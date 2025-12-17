@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "terrax",
+    # "terrax.xreader",  # TODO(dkochkov): Uncomment once moved.
+]
+
+[project]
+name = "terrax"
+description = "Terrax: Library for AI-first Earth System Modeling"
+version = "0.0.1"  # keep in sync with __version__ in terrax/__init__.py
+authors = [
+    {name = "Google LLC", email = "noreply@google.com"},
+]
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "coordax>=0.1.5",
+    "dinosaur @ git+https://github.com/neuralgcm/dinosaur.git",
+    "einops",
+    "etils",
+    # TODO(shoyer): use pypi version when there is a newer release than 0.3.0
+    "fiddle @ git+https://github.com/google/fiddle.git",
+    "flax>=0.12.0",
+    "grain",
+    "jax",
+    "jax-datetime @ git+https://github.com/google/jax-datetime.git",
+    "jax-solar",
+    "jaxlib",
+    "numpy",
+    "optax",
+    "orbax",
+    "pandas",
+    "treescope",
+    # require dev version of xarray until 2025.09.0 release
+    "xarray @ git+https://github.com/pydata/xarray.git",
+    "zarr>= 3.1.4",
+]
+
+[project.urls]
+source = "https://github.com/neuralgcm/terrax"
+# TODO(dkochkov): Uncomment once we have a readthedocs site.
+# documentation = "https://terrax.readthedocs.io"
+
+[project.optional-dependencies]
+tests = [
+    "absl-py",
+    "chex",
+    "pytest",
+]
