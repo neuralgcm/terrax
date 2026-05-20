@@ -11,7 +11,7 @@ packages = [
 [project]
 name = "terrax"
 description = "Terrax: Library for AI-first Earth System Modeling"
-version = "0.0.1"  # keep in sync with __version__ in terrax/__init__.py
+version = "0.0.2"  # keep in sync with __version__ in terrax/__init__.py
 authors = [
     {name = "Google LLC", email = "noreply@google.com"},
 ]
