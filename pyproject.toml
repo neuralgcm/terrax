@@ -5,13 +5,17 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = [
     "terrax",
-    # "terrax.xreader",  # TODO(dkochkov): Uncomment once moved.
+    "terrax.atmosphere",
+    "terrax.core",
+    "terrax.metrics",
+    "terrax.training",
+    "terrax.xreader",
 ]
 
 [project]
 name = "terrax"
 description = "Terrax: Library for AI-first Earth System Modeling"
-version = "0.0.2"  # keep in sync with __version__ in terrax/__init__.py
+version = "0.0.3"  # keep in sync with __version__ in terrax/__init__.py
 authors = [
     {name = "Google LLC", email = "noreply@google.com"},
 ]
