@@ -1001,12 +1001,33 @@ def unroll_for_template(
       - unroll: A trajectory of observations matching the template structure.
   """
   dt = model.timestep
+  coord_or_field = lambda x: cx.is_field(x) or cx.is_coord(x)
   to_coord = lambda x: x.coordinate if cx.is_field(x) else x
   combined_coords = jax.tree.map(
-      to_coord, template, is_leaf=lambda x: cx.is_field(x) or cx.is_coord(x)
+      to_coord, template, is_leaf=coord_or_field
   )
-  # TODO(dkochkov): Inspect combined_coords and infer if t0 should be included.
-  # To support this option we will need to trim t0 from combined_coords.
+  has_t0 = list({
+      cx.coords.extract(c, coordinates.TimeDelta).deltas[0]
+      == np.timedelta64(0)
+      for c in jax.tree.leaves(combined_coords, is_leaf=cx.is_coord)
+  })
+  if len(has_t0) != 1:
+    raise ValueError(
+        'Template timedeltas must all include t0 or all exclude t0.'
+    )
+  [prepend_init] = has_t0
+
+  if prepend_init:
+    template = jax.tree.map(
+        lambda x: x.isel(timedelta=slice(1, None)),
+        template,
+        is_leaf=coord_or_field,
+    )
+    combined_coords = jax.tree.map(
+        lambda x: x.isel(timedelta=slice(1, None)),
+        combined_coords,
+        is_leaf=cx.is_coord,
+    )
   final_leadtime = scan_utils.shared_final_leadtime(combined_coords)
 
   dt_and_specs = scan_utils.group_by_timedeltas(combined_coords, dt=dt)
@@ -1028,5 +1049,5 @@ def unroll_for_template(
       final_leadtime=final_leadtime,
       process_observations_fn=process_observations_fn,
       dynamic_inputs=dynamic_inputs,
-      prepend_init=False,
+      prepend_init=prepend_init,
   )

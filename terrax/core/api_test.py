@@ -642,6 +642,31 @@ class InferenceHelpersTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(predictions, expected_trajectory)
 
+  def test_unroll_for_template_reconstruction_prepend_init(self):
+    """Tests that unroll_for_template can reconstruct trajectory with t0."""
+    state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
+
+    _, expected_trajectory = api.unroll_from_advance(
+        self.model,
+        initial_state=state,
+        timedelta=self.model.timestep,
+        steps=5,
+        queries={'prognostics': {'population': self.x}},
+        dynamic_inputs=self.dynamic_inputs,
+        prepend_init=True,
+    )
+
+    template = map_fields(cx.get_coordinate, expected_trajectory)
+
+    _, predictions = api.unroll_for_template(
+        self.model,
+        initial_state=state,
+        template=template,
+        dynamic_inputs=self.dynamic_inputs,
+    )
+
+    chex.assert_trees_all_close(predictions, expected_trajectory)
+
   def test_unroll_for_template_reconstruction_nested(self):
     """Tests that unroll_for_template can reconstruct nested trajectory."""
     state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
