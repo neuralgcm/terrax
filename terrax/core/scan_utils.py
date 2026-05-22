@@ -135,6 +135,16 @@ def _compute_steps_and_validate(
   return tuple(reversed(steps))
 
 
+def scan_steps_from_timedeltas(
+    timedeltas: Sequence[np.timedelta64],
+    outer_delta: np.timedelta64,
+    ref_t0: np.timedelta64 | None = None,
+) -> tuple[int, ...]:
+  """Returns scan steps from a sequence of timedeltas."""
+  with_dummy_spec = [(td, {}) for td in timedeltas]
+  return _compute_steps_and_validate(with_dummy_spec, outer_delta, ref_t0)
+
+
 def nested_scan_specs(
     inputs_spec: ConcreteSpecs,
     dt: np.timedelta64 | None = None,

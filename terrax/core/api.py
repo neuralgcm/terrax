@@ -724,7 +724,9 @@ def _unroll_for_queries(
     spec = jax.tree.map(lambda x: _out_spec(x, td), q, is_leaf=coord_or_field)
     outputs_spec = pytree_utils.merge_nested_dicts(outputs_spec, spec)
 
-  all_steps = scan_utils.nested_scan_steps(outputs_spec, dt=dt)
+  all_steps = scan_utils.scan_steps_from_timedeltas(
+      timedelta, final_leadtime, ref_t0=np.timedelta64(0, 's')
+  )
 
   # Timedeltas in queries have been saved in outputs_spec. We can trim them away
   # from coordinates to make them directly compatible with `observe` call.

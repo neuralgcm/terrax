@@ -539,6 +539,36 @@ class InferenceHelpersTest(parameterized.TestCase):
     actual_coords = map_fields(cx.get_coordinate, trajectory)
     self.assertEqual(actual_coords, expected_coords)
 
+  def test_unroll_from_advance_with_empty_queries(self):
+    """Tests unroll_from_advance works successfully when queries is empty."""
+    state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
+    final_state, trajectory = api.unroll_from_advance(
+        self.model,
+        initial_state=state,
+        timedelta=self.model.timestep * 2,
+        steps=3,
+        queries={},
+        dynamic_inputs=self.dynamic_inputs,
+    )
+    self.assertEqual(trajectory, {})
+    self.assertIsNot(state, final_state)
+
+  def test_unroll_from_advance_single_step(self):
+    """Tests unroll_from_advance with steps=1 simulating 0h and 6h template."""
+    state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
+    td = self.model.timestep * 6
+    query = {'prognostics': {'population': self.x}}
+    _, trajectory = api.unroll_from_advance(
+        self.model,
+        initial_state=state,
+        timedelta=td,
+        steps=1,
+        queries=query,
+        dynamic_inputs=self.dynamic_inputs,
+        prepend_init=True,
+    )
+    self.assertIn('prognostics', trajectory)
+
   def test_unroll_for_template_returns_expected_coordinates(self):
     """Tests unroll_for_template returns expected coordinates."""
     state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
