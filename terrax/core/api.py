@@ -83,8 +83,8 @@ class Model(nnx.Module, abc.ABC):
     raise NotImplementedError()
 
   @abc.abstractmethod
-  def observe(self, query: typing.Query) -> typing.Observation:
-    """Computes observations specified in `query` from the model state."""
+  def observe(self, queries: typing.Queries) -> typing.Observation:
+    """Computes observations specified in `queries` from the model state."""
     raise NotImplementedError()
 
   @property
@@ -354,14 +354,14 @@ class VectorizedModel(Model):
     v_axis = self._vec_coord_for_filter(typing.Prognostic)
     self.run_vectorized(run_advance, v_axis)
 
-  def observe(self, query: typing.Query) -> typing.Observation:
-    """Computes observations specified in `query` from the model state."""
+  def observe(self, queries: typing.Queries) -> typing.Observation:
+    """Computes observations specified in `queries` from the model state."""
 
     def run_observe(model, q):
       return model.observe(q)
 
     v_axis = self._vec_coord_for_filter(typing.Prognostic)
-    return self.run_vectorized(run_observe, v_axis, query)
+    return self.run_vectorized(run_observe, v_axis, queries)
 
   @property
   def timestep(self):
@@ -569,12 +569,12 @@ class InferenceModel:
   def observe(
       self,
       simulation_state: typing.SimulationState,
-      query: typing.Query,
+      queries: typing.Queries,
       dynamic_inputs: typing.Pytree | None = None,
   ) -> dict[str, dict[str, cx.Field]]:
-    """Returns model observations given the simulation state and a query."""
+    """Returns model observations given the simulation state and queries."""
     model = self._prepare_model(simulation_state, dynamic_inputs)
-    return model.observe(query)
+    return model.observe(queries)
 
   @classmethod
   def from_model_api(
@@ -656,7 +656,7 @@ jax.tree_util.register_pytree_node(
 def _unroll_for_queries(
     model: InferenceModel,
     initial_state: typing.SimulationState,
-    queries: tuple[typing.Query, ...],
+    queries: tuple[typing.Queries, ...],
     timedelta: tuple[np.timedelta64, ...],
     final_leadtime: np.timedelta64,
     process_observations_fn: Callable[[typing.Observation], Any] = lambda x: x,
@@ -841,7 +841,7 @@ def _unroll_for_queries(
 def unroll_from_advance(
     model: InferenceModel,
     initial_state: typing.SimulationState,
-    queries: tuple[typing.Query, ...] | typing.Query,
+    queries: tuple[typing.Queries, ...] | typing.Queries,
     timedelta: tuple[np.timedelta64, ...] | np.timedelta64,
     steps: int,
     *,

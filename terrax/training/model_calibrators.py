@@ -119,12 +119,12 @@ class CollectNormalizationStats(ModelCalibrator):
   ) -> Model:
     rng = jax.random.key(self.rng_seed)
 
-    def unroll_fn(model, inputs, dynamic_data, rng, query):
+    def unroll_fn(model, inputs, dynamic_data, rng, queries):
       model.initialize_random_processes(cx.field(rng))
       model.update_dynamic_inputs(dynamic_data)
       model.assimilate(inputs)
       model.advance()
-      observed = model.observe(query)
+      observed = model.observe(queries)
       return observed
 
     unroll_fn = nnx.jit(unroll_fn)
@@ -150,12 +150,12 @@ class CollectNormalizationStats(ModelCalibrator):
 
     for i, (inputs, dynamic_data) in enumerate(data_iter):
       init_slice = data_loading.sel_init_fields(inputs)
-      # For query we need a single time slice of input data.
-      query = data_specs.construct_query(
+      # For queries we need a single time slice of input data.
+      queries = data_specs.construct_query(
           sel_timedelta(init_slice), train_stage.queries_spec
       )
       result = unroll_fn(
-          model, inputs, dynamic_data, jax.random.fold_in(rng, i), query
+          model, inputs, dynamic_data, jax.random.fold_in(rng, i), queries
       )
       jax.block_until_ready(result)
 

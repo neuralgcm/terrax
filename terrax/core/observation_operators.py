@@ -29,7 +29,7 @@ class ObservationOperatorABC(nnx.Module, abc.ABC):
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
+      query: typing.Query,
   ) -> dict[str, cx.Field]:
     """Returns observations for `query`."""
     ...
@@ -55,7 +55,7 @@ class DataObservationOperator(ObservationOperatorABC):
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
+      query: typing.Query,
   ) -> dict[str, cx.Field]:
     """Returns observations for `query` matched against `self.fields`."""
     del inputs  # unused.
@@ -95,8 +95,8 @@ class TransformObservationOperator(ObservationOperatorABC):
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
-  ) -> typing.Observation:
+      query: typing.Query,
+  ) -> dict[str, cx.Field]:
     q_fields = {k: query.get(k, None) for k in self.requested_fields_from_query}
     bad_fields = {k: v for k, v in q_fields.items() if not cx.is_field(v)}
     if bad_fields:
@@ -122,7 +122,7 @@ class ObservationOperatorWithRenaming(ObservationOperatorABC):
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
+      query: typing.Query,
   ) -> dict[str, cx.Field]:
     """Returns observations for `query` matched against `self.fields`."""
     renamed_query = {self.renaming_dict.get(k, k): v for k, v in query.items()}
@@ -144,7 +144,7 @@ class MultiObservationOperator(ObservationOperatorABC):
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
+      query: typing.Query,
   ) -> dict[str, cx.Field]:
     outputs = {}
     supported_keys = set(sum(self.keys_to_operator.keys(), start=()))

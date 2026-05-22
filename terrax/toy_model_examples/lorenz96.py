@@ -88,8 +88,8 @@ class Lorenz96Base(api.Model):
   @module_utils.ensure_unchanged_state_structure
   def observe(
       self,
-      queries: dict[str, dict[str, cx.Field | cx.Coordinate]],
-  ) -> dict[str, dict[str, cx.Field]]:
+      queries: typing.Queries,
+  ) -> typing.Observation:
     result = {}
     for k, q in queries.items():
       if k in self.operators:

@@ -128,7 +128,7 @@ class DataModel(api.Model):
     self._prognostic_vars.set_value(new_prognostics)
 
   @module_utils.ensure_unchanged_state_structure
-  def observe(self, queries: typing.Query) -> typing.Observation:
+  def observe(self, queries: typing.Queries) -> typing.Observation:
     result = {}
     diagnostic_values = self.diagnostic_values()
     diagnostics_op = observation_operators.DataObservationOperator(

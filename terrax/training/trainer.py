@@ -203,16 +203,16 @@ def _remove_timedelta(
   )
 
 
-def _drop_field_in_query_outputs(
-    predictions: PyTree, query: PyTree
+def _drop_field_in_queries_outputs(
+    predictions: PyTree, queries: PyTree
 ) -> PyTree:
-  """Removes outputs from predictions that correspond to fields in query."""
+  """Removes outputs from predictions that correspond to fields in queries."""
   flat_preds, empty_keys = pytree_utils.flatten_dict(predictions)
-  flat_query, _ = pytree_utils.flatten_dict(query)
+  flat_queries, _ = pytree_utils.flatten_dict(queries)
 
   filtered_flat_preds = {
       k: v for k, v in flat_preds.items()
-      if not cx.is_field(flat_query.get(k))
+      if not cx.is_field(flat_queries.get(k))
   }
 
   return pytree_utils.unflatten_dict(filtered_flat_preds, empty_keys)
@@ -322,11 +322,11 @@ def _compute_aggregation(
   else:
     targets_slice = cx.tag(loaded_targets_slice, batch_axis)
 
-  query = data_specs.construct_query(targets_slice, query_spec)
+  queries = data_specs.construct_query(targets_slice, query_spec)
   targets_only_slice = data_loading.filter_inputs_by_queries(
       targets_slice, query_spec
   )
-  prediction = process_fn(process_obs, observe_fn(model, query))
+  prediction = process_fn(process_obs, observe_fn(model, queries))
   prediction = training_mesh.with_sharding_constraint(prediction, 'physics')
   target = process_fn(process_obs, targets_only_slice)
   target = training_mesh.with_sharding_constraint(target, 'physics')
@@ -972,12 +972,12 @@ class RolloutTrainer:
     )
     process_fn = lambda proc_module, target_slice: proc_module(target_slice)
     target_struct = nnx.eval_shape(process_fn, process_obs, target_slice_struct)
-    query_struct = data_specs.construct_query(data_slice_struct, queries_spec)
+    queries_struct = data_specs.construct_query(data_slice_struct, queries_spec)
     dummy_observe = lambda model, proc_module, q: proc_module(
-        _drop_field_in_query_outputs(model.observe(q), q)
+        _drop_field_in_queries_outputs(model.observe(q), q)
     )
     prediction_struct = nnx.eval_shape(
-        dummy_observe, eb_model, process_obs, query_struct
+        dummy_observe, eb_model, process_obs, queries_struct
     )
     return prediction_struct, target_struct
 
@@ -1014,9 +1014,9 @@ class RolloutTrainer:
       model_state = jax.tree.map(add_name, model_state)
       nnx.update(model, model_state)
 
-    def observe_fn(model: api.Model, query: typing.Queries):
-      predictions = model.observe(query)
-      predictions = _drop_field_in_query_outputs(predictions, query)
+    def observe_fn(model: api.Model, queries: typing.Queries):
+      predictions = model.observe(queries)
+      predictions = _drop_field_in_queries_outputs(predictions, queries)
       predictions = self.training_mesh.with_sharding_constraint(
           predictions, 'physics'
       )

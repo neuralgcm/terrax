@@ -42,10 +42,10 @@ import xarray
 NestedData = dict[str, xarray.Dataset]  # eventually, use xarray.DataTree
 
 
-def _query_to_dummy_datatree(query: typing.Query) -> xarray.DataTree:
-  """Create a DataTree of dummy dask.array objects, matching the given query."""
+def _queries_to_dummy_datatree(queries: typing.Queries) -> xarray.DataTree:
+  """Create a DataTree of dummy dask.array objects, matching the given queries."""
   outputs = {}
-  for group, sub_query in query.items():
+  for group, sub_query in queries.items():
     ds = xarray.Dataset()
     for var, coord in sub_query.items():
       ds[var] = xarray.DataArray(
@@ -163,7 +163,7 @@ class InferenceRunner:
   init_times: npt.NDArray[np.datetime64] | pd.DatetimeIndex
   ensemble_size: int | None  # ensemble_size=None for deterministic models
   output_path: str
-  output_query: typing.Query
+  output_query: typing.Queries
   output_freq: np.timedelta64
   output_duration: np.timedelta64
   unroll_duration: np.timedelta64
@@ -264,7 +264,7 @@ class InferenceRunner:
 
     # Our strategy here is to create a DataTree where all variables are empty
     # dask.array objects, similar xarray_beam.make_template()
-    template = _query_to_dummy_datatree(self.output_query)
+    template = _queries_to_dummy_datatree(self.output_query)
     lead_times = np.arange(0, self.output_duration, self.output_freq)
     expanded_dims = {}
     if self.ensemble_size is not None:

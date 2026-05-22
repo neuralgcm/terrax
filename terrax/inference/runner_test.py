@@ -91,12 +91,12 @@ class MockModel(api.Model):
     next_prognostics['time'] = time + self.timestep
     self.prognostics.set_value(next_prognostics)
 
-  def observe(self, query: typing.Query) -> typing.Observation:
+  def observe(self, queries: typing.Queries) -> typing.Observation:
     prognostics = self.prognostics.get_value()
     result = {}
-    if 'state' in query:
+    if 'state' in queries:
       result['state'] = {
-          k: v for k, v in prognostics.items() if k in query['state']
+          k: v for k, v in prognostics.items() if k in queries['state']
       }
     return result
 

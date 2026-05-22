@@ -49,7 +49,7 @@ Quantity = scales.Quantity
 Fields = dict[str, cx.Field]
 InputFields = dict[str, Fields]
 Observation = dict[str, dict[str, cx.Field]]
-Query = dict[str, dict[str, cx.Coordinate | cx.Field]]
+Query = dict[str, cx.Coordinate | cx.Field]
 Queries = dict[str, Query]
 
 
@@ -160,7 +160,7 @@ class ObservationOperator(Protocol):
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
+      query: Query,
   ) -> dict[str, cx.Field]:
     """Returns observations for `query`."""
     ...

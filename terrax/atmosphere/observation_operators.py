@@ -57,7 +57,7 @@ class StandardVariablesObservationOperator(
   def observe(
       self,
       inputs: dict[str, cx.Field],
-      query: dict[str, cx.Field | cx.Coordinate],
+      query: typing.Query,
   ) -> dict[str, cx.Field]:
     """Observes fields in `query` on pressure/lon/lat coords from YLM `inputs`.
 

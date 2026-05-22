@@ -83,13 +83,13 @@ class MockModel(api.Model):
     })
 
   @module_utils.ensure_unchanged_state_structure
-  def observe(self, query: typing.Query) -> typing.Observation:
+  def observe(self, queries: typing.Queries) -> typing.Observation:
     prognostic = self.prognostics.get_value()
     result = {}
     operators = {
         self.data_key: observation_operators.DataObservationOperator(prognostic)
     } | self.operators
-    for k, q in query.items():
+    for k, q in queries.items():
       if k not in operators:
         raise ValueError(f'No operator for query key: {k}')
       result[k] = operators[k].observe(prognostic, q)
@@ -182,7 +182,7 @@ class ModelApiTest(parameterized.TestCase):
         jax.random.split(jax.random.key(0), self.ensemble_axis.size),
         self.ensemble_axis,
     )
-    self.query = {'prognostics': {'population': self.x}}
+    self.queries = {'prognostics': {'population': self.x}}
 
   def test_api_methods(self):
     """Tests assimilate, advance, and observe methods."""
@@ -205,7 +205,7 @@ class ModelApiTest(parameterized.TestCase):
       self.assertFalse(np.all(initial_population == final_population))
 
     with self.subTest('observe'):
-      obs = self.model.observe(self.query)
+      obs = self.model.observe(self.queries)
       model_population = self.model.prognostics.get_value()['population'].data
       np.testing.assert_allclose(
           obs['prognostics']['population'].data,
@@ -220,7 +220,7 @@ class ModelApiTest(parameterized.TestCase):
     v_model = self.model.to_vectorized({typing.Prognostic: self.batch_axis})
     v_model.assimilate(self.batched_inputs)
     v_model.advance()
-    obs = v_model.observe(self.query)
+    obs = v_model.observe(self.queries)
     self.assertEqual(
         obs['prognostics']['population'].coordinate,
         cx.coords.compose(self.batch_axis, self.x),
@@ -241,7 +241,7 @@ class ModelApiTest(parameterized.TestCase):
     v_model.initialize_random_processes(self.ensemble_rng)
     v_model.assimilate(ensemble_inputs)
     v_model.advance()
-    obs = v_model.observe(self.query)
+    obs = v_model.observe(self.queries)
     self.assertEqual(
         obs['prognostics']['population'].coordinate,
         cx.coords.compose(self.ensemble_axis, self.x),
@@ -301,7 +301,7 @@ class InferenceModelApiTest(parameterized.TestCase):
             'time': cx.field(t0 + self.timedelta.deltas, self.timedelta),
         },
     }
-    self.query = {'prognostics': {'population': self.x}}
+    self.queries = {'prognostics': {'population': self.x}}
     self.rng = cx.field(jax.random.key(0))
 
   def test_api_methods(self):
@@ -310,7 +310,7 @@ class InferenceModelApiTest(parameterized.TestCase):
         self.inputs, self.dynamic_inputs, self.rng
     )
     state = self.inference_model.advance(state, self.dynamic_inputs)
-    obs = self.inference_model.observe(state, self.query)
+    obs = self.inference_model.observe(state, self.queries)
     self.assertEqual(obs['prognostics']['population'].coordinate, self.x)
 
   def test_model_is_immutable(self):

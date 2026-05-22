@@ -543,8 +543,8 @@ class TrainerTest(parameterized.TestCase):
     self.assertTrue(metrics_saver.metrics)
     self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'checkpoints')))
 
-  def test_drop_field_in_query_outputs(self):
-    """Tests _drop_field_in_query_outputs."""
+  def test_drop_field_in_queries_outputs(self):
+    """Tests _drop_field_in_queries_outputs."""
     predictions = {
         'slow': {
             'x': cx.field(jnp.zeros((8,)), cx.SizedAxis('k', 8)),
@@ -556,7 +556,7 @@ class TrainerTest(parameterized.TestCase):
             ),
         },
     }
-    query = {
+    queries = {
         'slow': {
             'x': cx.SizedAxis('k', 8),
             'time': cx.Scalar(),
@@ -568,7 +568,7 @@ class TrainerTest(parameterized.TestCase):
         },
     }
 
-    filtered = trainer._drop_field_in_query_outputs(predictions, query)
+    filtered = trainer._drop_field_in_queries_outputs(predictions, queries)
 
     self.assertIn('slow', filtered)
     self.assertIn('x', filtered['slow'])
