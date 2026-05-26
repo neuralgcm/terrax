@@ -14,6 +14,7 @@
 
 from absl.testing import absltest
 import jax
+import numpy as np
 from terrax.core import coordinates
 from terrax.core import spatial_filters
 from terrax.core import spherical_harmonics
@@ -57,6 +58,18 @@ class SpatialFiltersTest(absltest.TestCase):
         restored.filters[0], spatial_filters.ExponentialModalFilter
     )
     self.assertIsInstance(restored, spatial_filters.SequentialModalFilter)
+
+  def test_exponential_modal_filter_from_timescale_timedelta(self):
+    mapping = spherical_harmonics.FixedYlmMapping(
+        lon_lat_grid=coordinates.LonLatGrid.T21(),
+        ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
+    )
+    filter_mod = spatial_filters.ExponentialModalFilter.from_timescale(
+        ylm_map=mapping,
+        dt=np.timedelta64(1, 'h'),
+        timescale=np.timedelta64(40, 'm'),
+    )
+    self.assertEqual(filter_mod.attenuation, 1.5)
 
 
 if __name__ == '__main__':

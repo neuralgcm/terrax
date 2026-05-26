@@ -77,22 +77,35 @@ class ExponentialModalFilter(ModalSpatialFilter):
   def from_timescale(
       cls,
       ylm_map: spherical_harmonics.FixedYlmMapping,
-      dt: float | typing.Quantity | typing.Numeric,
-      timescale: float | typing.Quantity | typing.Numeric,
+      dt: float | typing.Quantity | typing.Numeric | np.timedelta64,
+      timescale: (
+          float | typing.Quantity | typing.Numeric | np.timedelta64 | str
+      ),
       order: int = 18,
       cutoff: float = 0.0,
       *,
-      sim_units: units.SimUnits,
+      sim_units: units.SimUnits | None = None,
   ):
     """Returns a filter with the given timescale."""
-    if isinstance(dt, np.timedelta64):
-      dt = units.nondimensionalize_timedelta64(dt, sim_units)
+    if sim_units is not None:
+      if isinstance(dt, np.timedelta64):
+        dt = units.nondimensionalize_timedelta64(dt, sim_units)
+      else:
+        dt = units.maybe_nondimensionalize(dt, sim_units)
+      if isinstance(timescale, np.timedelta64):
+        timescale = units.nondimensionalize_timedelta64(timescale, sim_units)
+      else:
+        timescale = units.maybe_nondimensionalize(timescale, sim_units)
+    elif isinstance(dt, np.timedelta64) and isinstance(
+        timescale, np.timedelta64
+    ):
+      pass
+    elif isinstance(dt, (float, int)) and isinstance(timescale, (float, int)):
+      pass
     else:
-      dt = units.maybe_nondimensionalize(dt, sim_units)
-    if isinstance(timescale, np.timedelta64):
-      timescale = units.nondimensionalize_timedelta64(timescale, sim_units)
-    else:
-      timescale = units.maybe_nondimensionalize(timescale, sim_units)
+      raise ValueError(
+          'sim_units must be provided if dt or timescale require conversion.'
+      )
     return cls(
         ylm_map=ylm_map,
         attenuation=(dt / timescale),
