@@ -609,6 +609,27 @@ class InferenceModel:
     return self._dummy_model().inputs_spec
 
 
+class _OpaqueConfigMetadata:
+  """Wrapper that makes any object safely usable as JAX pytree aux_data.
+
+  JAX requires that pytree metadata (aux_data) fields support equality
+  checks and hashing. Some objects (e.g., Fiddle configs containing NumPy
+  arrays) fail these checks natively. This wrapper uses the string
+  representation of the wrapped value to enforce strict equality and hashing.
+  """
+
+  def __init__(self, value):
+    self.value = value
+
+  def __eq__(self, other):
+    return isinstance(other, _OpaqueConfigMetadata) and str(self.value) == str(
+        other.value
+    )
+
+  def __hash__(self):
+    return hash(str(self.value))
+
+
 def _inference_model_flatten(model: InferenceModel):
   """Flattens InferenceModel."""
   children = (model.model_state,)
@@ -619,7 +640,7 @@ def _inference_model_flatten(model: InferenceModel):
       model.model_graph_def,
       dummy_sim_state_leaves,
       dummy_sim_state_treedef,
-      model.fiddle_config,
+      _OpaqueConfigMetadata(model.fiddle_config),
   )
   return children, aux_data
 
@@ -632,7 +653,7 @@ def _inference_model_unflatten(
       model_graph_def,
       dummy_sim_state_leaves,
       dummy_sim_state_treedef,
-      fiddle_config,
+      opaque_fiddle_config,
   ) = aux_data
   dummy_simulation_state = jax.tree.unflatten(
       dummy_sim_state_treedef, dummy_sim_state_leaves
@@ -642,7 +663,7 @@ def _inference_model_unflatten(
       model_graph_def=model_graph_def,
       model_state=model_state,
       dummy_simulation_state=dummy_simulation_state,
-      fiddle_config=fiddle_config,
+      fiddle_config=opaque_fiddle_config.value,
   )
 
 

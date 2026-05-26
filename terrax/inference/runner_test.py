@@ -104,10 +104,19 @@ class MockModel(api.Model):
 class RunnerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-      dict(testcase_name='deterministic', ensemble_size=None),
-      dict(testcase_name='ensemble', ensemble_size=2),
+      dict(
+          testcase_name='deterministic',
+          ensemble_size=None,
+          ensemble_batch_size=1,
+      ),
+      dict(testcase_name='ensemble', ensemble_size=2, ensemble_batch_size=1),
+      dict(
+          testcase_name='ensemble_batched_exact',
+          ensemble_size=4,
+          ensemble_batch_size=2,
+      ),
   )
-  def test_inference_runner(self, ensemble_size):
+  def test_inference_runner(self, ensemble_size, ensemble_batch_size):
     if ensemble_size is not None:
       assimilation_noise = random_processes.UniformUncorrelated.construct(
           minval=-0.1, maxval=0.1, coord=cx.Scalar(), rngs=nnx.Rngs(0)
@@ -177,6 +186,7 @@ class RunnerTest(parameterized.TestCase):
         dynamic_inputs=dynamic_inputs,
         init_times=init_times,
         ensemble_size=ensemble_size,
+        ensemble_batch_size=ensemble_batch_size,
         output_path=output_path,
         output_query=output_query,
         output_freq=np.timedelta64(6, 'h'),
@@ -188,8 +198,13 @@ class RunnerTest(parameterized.TestCase):
     )
     runner.setup()
 
-    ensemble_count = 1 if ensemble_size is None else ensemble_size
-    self.assertEqual(runner.task_count, len(init_times) * ensemble_count)
+    if ensemble_size is None:
+      expected_task_count = len(init_times)
+    else:
+      expected_task_count = len(init_times) * (
+          ensemble_size // ensemble_batch_size
+      )
+    self.assertEqual(runner.task_count, expected_task_count)
 
     expected_lead_times = np.arange(0, 48, 6) * np.timedelta64(1, 'h')
     nans = functools.partial(np.full, fill_value=np.nan)

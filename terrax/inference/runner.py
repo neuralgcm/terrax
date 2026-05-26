@@ -15,6 +15,7 @@
 
 import contextlib
 import dataclasses
+import functools
 import logging
 import math
 import pickle
@@ -54,15 +55,7 @@ def _queries_to_dummy_datatree(queries: typing.Queries) -> xarray.DataTree:
           dims=coord.dims,
           coords=coord.to_xarray(),
       )
-    # TODO(jianingfang): remove this once we have can handle nested DataTrees.
-    # replace / with | to avoid xarray errors associated with nested DataTrees.
-    renamed_group = (
-        group.replace('land/', 'land|')
-        .replace('ocean/', 'ocean|')
-        .replace('atmosphere/', 'atmosphere|')
-        .replace('ice/', 'ice|')
-    )
-    outputs[renamed_group] = ds
+    outputs[group] = ds
   return xarray.DataTree.from_dict(outputs)
 
 
@@ -162,6 +155,7 @@ class InferenceRunner:
   dynamic_inputs: dynamic_inputs_lib.DynamicInputs
   init_times: npt.NDArray[np.datetime64] | pd.DatetimeIndex
   ensemble_size: int | None  # ensemble_size=None for deterministic models
+  ensemble_batch_size: int = dataclasses.field(default=1, kw_only=True)
   output_path: str
   output_query: typing.Queries
   output_freq: np.timedelta64
@@ -176,6 +170,12 @@ class InferenceRunner:
   random_seed: int = 0
 
   def __post_init__(self):
+    if self.ensemble_size is not None and self.ensemble_batch_size > 1:
+      if self.ensemble_size % self.ensemble_batch_size != 0:
+        raise ValueError(
+            f'ensemble_size ({self.ensemble_size}) must be divisible by '
+            f'ensemble_batch_size ({self.ensemble_batch_size})'
+        )
     if self.output_duration % self.output_freq != np.timedelta64(0):
       raise ValueError(
           f'{self.output_duration=} must be a multiple of {self.output_freq=}'
@@ -303,11 +303,32 @@ class InferenceRunner:
     checkpoints_path.mkdir(exist_ok=True, mode=0o775)
     logging.info('InferenceRunner.setup() complete')
 
+  def _decompose_task_id(
+      self, task_id: int
+  ) -> tuple[int, int | None, int | None]:
+    """Decompose a task_id to init_time_index and realization range."""
+    if self.ensemble_size is None:
+      return task_id, None, None
+    ens_total, ens_batch = self.ensemble_size, self.ensemble_batch_size
+    ensemble_batches = math.ceil(ens_total / ens_batch)
+    init_time_index = task_id // ensemble_batches
+    batch_index = task_id % ensemble_batches
+    realization_start = batch_index * ens_batch
+    realization_end = realization_start + ens_batch
+    return (
+        init_time_index,
+        realization_start,
+        realization_end,
+    )
+
   @property
   def task_count(self) -> int:
     """Total number of simulation tasks."""
-    ensemble_count = 1 if self.ensemble_size is None else self.ensemble_size
-    return len(self.init_times) * ensemble_count
+    if self.ensemble_size is None:
+      return len(self.init_times)
+    ens_total, ens_batch = self.ensemble_size, self.ensemble_batch_size
+    ensemble_batches = math.ceil(ens_total / ens_batch)
+    return len(self.init_times) * ensemble_batches
 
   def _task_path(self, task_id: int) -> epath.Path:
     return self._checkpoints_path() / f'task_{task_id}.pkl'
@@ -325,9 +346,11 @@ class InferenceRunner:
     """
     if self.model is None:
       raise ValueError('model must be set before calling InferenceRunner.run()')
-    init_time_index = (
-        task_id if self.ensemble_size is None else task_id // self.ensemble_size
+
+    init_time_index, realization_start, _ = (
+        self._decompose_task_id(task_id)
     )
+
     init_time = self.init_times[init_time_index].astype('datetime64[ns]')
     dynamic_inputs_forecast = self.dynamic_inputs.get_forecast(init_time)
 
@@ -341,7 +364,18 @@ class InferenceRunner:
       logging.info(f'no state checkpoint found for task {task_id=}')
       if self.ensemble_size is not None:
         base_key = jax.random.key(self.random_seed)
-        rng = cx.field(jax.random.fold_in(base_key, task_id))
+        if self.ensemble_batch_size == 1:
+          rng = cx.field(jax.random.fold_in(base_key, task_id))
+        else:
+          # Use individual task_ids for each realization in the batch.
+          # This matches the RNG sequence of the unbatched execution setup.
+          task_ids = (
+              realization_start
+              + np.arange(self.ensemble_batch_size)
+              + init_time_index * self.ensemble_size
+          )
+          keys = jax.vmap(jax.random.fold_in, (None, 0))(base_key, task_ids)
+          rng = cx.field(keys)
       else:
         rng = None
 
@@ -361,7 +395,15 @@ class InferenceRunner:
           model=self.model,
       )
       logging.info('assimilating initial state')
-      state = self.model.assimilate(input_obs, dynamic_inputs, rng)
+
+      if self.ensemble_size is not None and self.ensemble_batch_size > 1:
+        vmap_assimilate = jax.vmap(
+            self.model.assimilate, in_axes=(None, None, 0)
+        )
+        state = vmap_assimilate(input_obs, dynamic_inputs, rng)
+      else:
+        state = self.model.assimilate(input_obs, dynamic_inputs, rng)
+
       if self.bad_state_strategy != 'ignore':
         check_pytree_for_bad_state(state, f'initial state for {task_id=}')
       commited_steps = 0
@@ -385,9 +427,8 @@ class InferenceRunner:
 
     @timing.Timed
     def unroll(state, dynamic_inputs):
-      return api.unroll_from_advance(
-          model=self.model,
-          initial_state=state,
+      unroll_fn = functools.partial(
+          api.unroll_from_advance,
           timedelta=self.output_freq,
           steps=self.steps_per_unroll,
           queries=self.output_query,
@@ -395,6 +436,9 @@ class InferenceRunner:
           prepend_init=True,
           trim_last=True,
       )
+      if self.ensemble_size is not None and self.ensemble_batch_size > 1:
+        unroll_fn = jax.vmap(unroll_fn, in_axes=(None, 0))
+      return unroll_fn(self.model, state)
 
     dynamic_inputs_task = streaming.SingleTaskExecutor(get_dynamic_inputs)
     commit_chunk_task = streaming.SingleTaskExecutor(self._commit_chunk)
@@ -467,27 +511,25 @@ class InferenceRunner:
     """Write Zarr chunk to disk."""
     if self.model is None:
       raise ValueError('model must be set before calling InferenceRunner.run()')
-    if self.ensemble_size is None:
-      init_time_index = task_id
-      realization_index = None
-    else:
-      init_time_index = task_id // self.ensemble_size
-      realization_index = task_id % self.ensemble_size
+    init_time_index, realization_start, realization_end = (
+        self._decompose_task_id(task_id)
+    )
 
     logging.info('preparing DataTree for writing to zarr')
     trees = []
     for trajectory_slice in output_buffer:
-      # Replace / with | to avoid xarray errors in nested DataTrees.
-      # TODO(jianingfang): remove this once we have can handle nested DataTrees.
+      if self.ensemble_size is not None and self.ensemble_batch_size > 1:
+        r_axis = cx.LabeledAxis(
+            'realization', np.arange(realization_start, realization_end)
+        )
+        trajectory_slice = cx.tag(trajectory_slice, r_axis)
+
       outputs = {
-          k.replace('land/', 'land|')
-          .replace('ocean/', 'ocean|')
-          .replace('atmosphere/', 'atmosphere|')
-          .replace('ice/', 'ice|'): xarray_utils.fields_to_xarray(ds)
+          k: xarray_utils.fields_to_xarray(ds)
           for k, ds in trajectory_slice.items()
       }
       outputs_tree = xarray.DataTree.from_dict(outputs)
-      # TODO(shoyer): update the name of the TimeDelta coordinate?
+
       outputs_tree = _datatree_rename(outputs_tree, {'timedelta': 'lead_time'})
       trees.append(outputs_tree)
 
@@ -495,17 +537,21 @@ class InferenceRunner:
         lambda *xs: xarray.concat(xs, dim='lead_time'), *trees
     )
     tree = _coordinate_to_root(tree, 'lead_time')
+    if self.ensemble_size is not None and self.ensemble_batch_size > 1:
+      tree = _coordinate_to_root(tree, 'realization')
     num_steps_in_chunk = tree.sizes['lead_time']
 
     init_time = self.init_times[init_time_index].astype('datetime64[ns]')
     tree = _datatree_expand_dims(tree, init_time=[init_time])
+
     region = {'init_time': slice(init_time_index, init_time_index + 1)}
     region['lead_time'] = slice(
         steps_written, steps_written + num_steps_in_chunk
     )
-    if realization_index is not None:
-      tree = _datatree_expand_dims(tree, realization=[realization_index])
-      region['realization'] = slice(realization_index, realization_index + 1)
+    if realization_start is not None:
+      if self.ensemble_batch_size == 1:
+        tree = _datatree_expand_dims(tree, realization=[realization_start])
+      region['realization'] = slice(realization_start, realization_end)
     # Remove variables that don't have an init_time dimension. These shouldn't
     # be written to disk again.
     for node in tree.subtree:
