@@ -259,6 +259,26 @@ class TransformsTest(parameterized.TestCase):
     with self.assertRaises(KeyError):
       normalize(inputs)
 
+  def test_stop_gradient(self):
+    x = cx.SizedAxis('x', 3)
+    stop_grad = transforms.StopGradient()
+
+    def loss_dict(inputs):
+      outputs = stop_grad(inputs)
+      return jnp.sum(outputs['a'].data)
+
+    inputs_dict = {'a': cx.field(jnp.array([1.0, 2.0, 3.0]), x)}
+    grads_dict = jax.grad(loss_dict)(inputs_dict)
+    chex.assert_trees_all_close(grads_dict['a'].data, jnp.zeros(3))
+
+    def loss_field(input_field):
+      output_field = stop_grad(input_field)
+      return jnp.sum(output_field.data)
+
+    input_field = cx.field(jnp.array([1.0, 2.0, 3.0]), x)
+    grad_field = jax.grad(loss_field)(input_field)
+    chex.assert_trees_all_close(grad_field.data, jnp.zeros(3))
+
   def test_sequential(self):
     x = cx.SizedAxis('x', 3)
 

@@ -191,6 +191,22 @@ class Identity(PytreeFieldTransformABC):
     return field
 
 
+class StopGradient(PytreeFieldTransformABC):
+  """Applies jax.lax.stop_gradient to inputs.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {'a': cx.field(jnp.zeros(2))}
+    >>> transforms.StopGradient()(inputs)
+    {'a': <Field dims=(None,) shape=(2,) axes={} >}
+  """
+
+  def _transform_field(self, field: cx.Field) -> cx.Field:
+    return cx.cmap(jax.lax.stop_gradient)(field)
+
+
 class Empty(PytreeTransformABC):
   """Returns an empty dict, regardless of inputs.
 
