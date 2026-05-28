@@ -214,6 +214,9 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
     default_timedelta: Time increment to use in `advance_clock` if
       explicit `timedelta` is not provided in the inputs. If specified,
       `resolution` must be a multiple of `default_timedelta`.
+    accumulation_frequency: Optional frequency at which diagnostic values are
+      accumulated. If specified, `resolution` must be a multiple of
+      `accumulation_frequency`.
     include_instant: Whether to include additional instantaneous diagnostics.
     include_dt_offset: Whether to include an additional diagnostic for the time
       since the last sub-interval update.
@@ -228,6 +231,7 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
   interval: np.timedelta64 | dict[str, np.timedelta64]
   resolution: np.timedelta64
   default_timedelta: np.timedelta64 | None = None
+  accumulation_frequency: np.timedelta64 | None = None
   include_instant: bool = False
   include_dt_offset: bool = False
   dt_mod_freq: typing.Diagnostic = nnx.data(init=False)
@@ -252,6 +256,20 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
     self.periods = _check_and_get_periods(
         max_interval, self.resolution, 'max_interval'
     )
+
+    if self.accumulation_frequency is not None:
+      if self.resolution % self.accumulation_frequency != np.timedelta64(0):
+        raise ValueError(
+            f'{self.resolution=} must be a multiple of '
+            f'{self.accumulation_frequency=}.'
+        )
+      if self.default_timedelta is not None:
+        timedelta = self.default_timedelta
+        if self.accumulation_frequency % timedelta != np.timedelta64(0):
+          raise ValueError(
+              f'{self.accumulation_frequency=} must be a multiple of '
+              f'{self.default_timedelta=}.'
+          )
 
     self.dt_mod_freq = typing.Diagnostic(cx.field(jdt.Timedelta()))
     self.since_last_update = {
@@ -337,13 +355,32 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
   def __call__(self, inputs, *args, **kwargs):
     """Updates the internal module state from the inputs."""
     diagnostics = self.extract(inputs, *args, **kwargs)
+    should_accumulate = None
+    if self.accumulation_frequency is not None:
+      timedelta = _get_timedelta(inputs, self.default_timedelta)
+      dt = self.dt_mod_freq.get_value() + timedelta
+      freq = jdt.to_timedelta(self.accumulation_frequency)
+      should_accumulate = (dt == freq * (dt // freq)).data
+      diagnostics = {
+          k: jax.lax.cond(
+              should_accumulate, lambda x: x, cx.field(0.0).broadcast_like, v
+          )
+          for k, v in diagnostics.items()
+      }
+
     for k, v in diagnostics.items():
       if k in self.extract_coords:
         self.since_last_update[k].set_value(
             self.since_last_update[k].get_value() + v
         )
         if self.include_instant:
-          self.instants[k].set_value(v)
+          new_instant = v
+          if should_accumulate is not None:
+            previous = self.instants[k].get_value()
+            new_instant = jax.lax.cond(
+                should_accumulate, lambda x, y: x, lambda x, y: y, v, previous
+            )
+          self.instants[k].set_value(new_instant)
 
 
 @nnx.dataclass

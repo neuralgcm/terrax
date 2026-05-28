@@ -430,6 +430,52 @@ class DiagnosticsTest(parameterized.TestCase):
           resolution=np.timedelta64(2, 's'),
       )
 
+  def test_interval_diagnostic_with_accumulation_frequency(self):
+    y_coord = cx.SizedAxis('y', 5)
+    extract = lambda x, *args, **kwargs: {'increasing': x['increasing']}
+    d_coords = {'increasing': y_coord}
+    diagnostic = diagnostics.IntervalDiagnostic(
+        extract,
+        d_coords,
+        interval=np.timedelta64(6, 'h'),
+        resolution=np.timedelta64(6, 'h'),
+        default_timedelta=np.timedelta64(1, 'h'),
+        accumulation_frequency=np.timedelta64(2, 'h'),
+        include_instant=True,
+    )
+    module = MockMethod()
+    module_with_diagnostic = module_utils.with_callback(module, diagnostic)
+    module_with_diagnostic = module_utils.with_callback(
+        module_with_diagnostic, (diagnostic, 'advance_clock')
+    )
+    fields = {'increasing': cx.field(jnp.zeros(5), y_coord)}
+    for _ in range(4):
+      fields = module_with_diagnostic(fields)
+    # Doing steps 5, and 6 manually to save intermediate instants.
+    instant_after_4 = diagnostic.diagnostic_values()['increasing_instant']
+    fields = module_with_diagnostic(fields)  # step 5.
+    instant_after_5 = diagnostic.diagnostic_values()['increasing_instant']
+    module_with_diagnostic(fields)  # step 6.
+
+    diag_values = diagnostic.diagnostic_values()
+    expected_increasing = jnp.ones(5) * 24.0
+    expected_instant = jnp.ones(5) * 12.0
+    cx.testing.assert_fields_allclose(
+        diag_values['increasing'], cx.field(expected_increasing, y_coord)
+    )
+    cx.testing.assert_fields_allclose(
+        diag_values['increasing_instant'], cx.field(expected_instant, y_coord)
+    )
+    # steps 4 and 5 are within the same accumulation frequency, should feature
+    # the same instant values of 4 * 2 = 8.
+    expected_instant_4_and_5 = jnp.ones(5) * 8.0
+    cx.testing.assert_fields_allclose(
+        instant_after_4, cx.field(expected_instant_4_and_5, y_coord)
+    )
+    cx.testing.assert_fields_allclose(
+        instant_after_5, cx.field(expected_instant_4_and_5, y_coord)
+    )
+
   def test_time_offset_diagnostic(self):
     x_coord, y_coord = cx.SizedAxis('x', 3), cx.SizedAxis('y', 5)
     diagnostic = diagnostics.TimeOffsetDiagnostic(
