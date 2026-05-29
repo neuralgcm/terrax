@@ -703,7 +703,7 @@ class UncorrelatedRandomFieldsTest(parameterized.TestCase):
   ):
     rng = nnx.Rngs(0)
     uniform = random_processes.UniformUncorrelated.construct(
-        coord, minval, maxval, rng
+        coord, minval, maxval, rngs=rng
     )
     with self.subTest('unconditional_sample_stats'):
       sample = uniform.state_values().data
@@ -743,7 +743,7 @@ class UncorrelatedRandomFieldsTest(parameterized.TestCase):
   ):
     rng = nnx.Rngs(0)
     normal = random_processes.NormalUncorrelated.construct(
-        coord, mean, std, rng
+        coord, mean, std, rngs=rng
     )
     with self.subTest('unconditional_sample_stats'):
       sample = normal.state_values().data
@@ -870,6 +870,53 @@ class SamplerTest(parameterized.TestCase):
       val = sampler.draw(batched_seed)
       self.assertEqual(val.shape, b.shape + x.shape)
 
+  def test_dynamic_sampler_and_tape_slicing(self):
+    dist = random_processes.NormalDistribution()
+    # Test optional sample_coord
+    dyn_sampler = random_processes.DistributionSampler(dist, sample_coord=None)
+    rng = cx.field(jax.random.key(42))
+    x2 = cx.SizedAxis('x', 2)
+    val = dyn_sampler.draw(rng, coord=x2)
+    self.assertEqual(val.coordinate, x2)
+
+    # Test tape slicing
+    x4 = cx.SizedAxis('x', 4)
+    base_sampler = random_processes.DistributionSampler(dist, sample_coord=x4)
+    rec_sampler = random_processes.RecordingSampler.with_fixed_tape_length(
+        base_sampler, max_steps=2, enable_tape_slicing=True
+    )
+    val_sliced = rec_sampler.draw(rng, coord=x2)
+    self.assertEqual(val_sliced.coordinate, x2)
+
+    tape = rec_sampler.tape.get_value()
+    tape_sampler = random_processes.TapeSampler(
+        base_sampler, tape, enable_tape_slicing=True
+    )
+    val_replayed = tape_sampler.draw(rng, coord=x2)
+    cx_testing.assert_fields_allclose(val_sliced, val_replayed)
+
+  def test_tape_sampler_labeled_axis_sel(self):
+    dist = random_processes.NormalDistribution()
+    x4 = cx.LabeledAxis('x', np.array([10, 20, 30, 40]))
+    x2 = cx.LabeledAxis('x', np.array([10, 30]))
+    tape_axis = cx.SizedAxis('tape_idx', 2)
+    tape_data = jnp.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    tape = cx.field(tape_data, tape_axis, x4)
+
+    base_sampler = random_processes.DistributionSampler(dist, sample_coord=x4)
+    tape_sampler = random_processes.TapeSampler(
+        base_sampler, tape, enable_tape_slicing=True
+    )
+    rng = cx.field(jax.random.key(42))
+    val = tape_sampler.draw(rng, coord=x2)
+    self.assertEqual(val.coordinate, x2)
+    expected_val = cx.field(jnp.array([1.0, 3.0]), x2)
+    cx_testing.assert_fields_allclose(val, expected_val)
+    val = tape_sampler.draw(rng, coord=x4)
+    self.assertEqual(val.coordinate, x4)
+    expected_val = cx.field(jnp.array([5.0, 6.0, 7.0, 8.0]), x4)
+    cx_testing.assert_fields_allclose(val, expected_val)
+
 
 class DistributionsTest(parameterized.TestCase):
   """Tests for basic probability distribution implementations."""
@@ -905,7 +952,9 @@ class ProcessSamplerInjectionTest(parameterized.TestCase):
   def test_recording_sampler_in_normal_random_process(self):
     coord = coordinates.LonLatGrid.T21()
     rng = nnx.Rngs(0)
-    normal = random_processes.NormalUncorrelated.construct(coord, 0.0, 1.0, rng)
+    normal = random_processes.NormalUncorrelated.construct(
+        coord, 0.0, 1.0, rngs=rng
+    )
     orig = nnx.clone(normal)
     max_steps = 5
     rec_sampler = random_processes.RecordingSampler.with_fixed_tape_length(
@@ -950,7 +999,9 @@ class ProcessSamplerInjectionTest(parameterized.TestCase):
     """Demonstrates workflow between RecordingSampler and TapeSampler."""
     coord = coordinates.LonLatGrid.T21()
     rng = nnx.Rngs(0)
-    normal = random_processes.NormalUncorrelated.construct(coord, 0.0, 1.0, rng)
+    normal = random_processes.NormalUncorrelated.construct(
+        coord, 0.0, 1.0, rngs=rng
+    )
     init_rng_1 = cx.field(jax.random.key(42))
     init_rng_2 = cx.field(jax.random.key(43))
 

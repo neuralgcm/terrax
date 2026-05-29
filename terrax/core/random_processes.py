@@ -80,13 +80,14 @@ class Sampler(nnx.Module, abc.ABC):
     sample_coord: coordinate describing a single draw event.
   """
 
-  def __init__(self, sample_coord: cx.Coordinate):
+  def __init__(self, sample_coord: cx.Coordinate | None = None):
     self.sample_coord = sample_coord
 
   @abc.abstractmethod
   def draw(
       self,
       seed: cx.Field,
+      coord: cx.Coordinate | None = None,
   ) -> cx.Field:
     """Draws samples `sample_coord` coordinate for each entry in `seed`."""
 
@@ -95,7 +96,9 @@ class DistributionSampler(Sampler):
   """Sampler that draws i.i.d. variables from a distribution."""
 
   def __init__(
-      self, distribution: DistributionLike, sample_coord: cx.Coordinate
+      self,
+      distribution: DistributionLike,
+      sample_coord: cx.Coordinate | None = None,
   ):
     super().__init__(sample_coord)
     self.distribution = distribution
@@ -103,11 +106,15 @@ class DistributionSampler(Sampler):
   def draw(
       self,
       seed: cx.Field,
+      coord: cx.Coordinate | None = None,
   ) -> cx.Field:
+    target_coord = coord if coord is not None else self.sample_coord
+    if target_coord is None:
+      raise ValueError('sample_coord must be provided during init or draw')
     sample_fn = lambda k: self.distribution.sample(
-        seed=k, sample_shape=self.sample_coord.shape
+        seed=k, sample_shape=target_coord.shape
     )
-    return cx.cmap(sample_fn, seed.named_axes)(seed).tag(self.sample_coord)
+    return cx.cmap(sample_fn, seed.named_axes)(seed).tag(target_coord)
 
 
 class RecordingSampler(Sampler):
@@ -119,7 +126,12 @@ class RecordingSampler(Sampler):
       tape: cx.Field,
       tape_axis: str | cx.Coordinate = 'tape_idx',
       tape_position: cx.Field | None = None,
+      enable_tape_slicing: bool = False,
   ):
+    if sampler.sample_coord is None:
+      raise ValueError(
+          f'RecordingSampler requires {sampler=} to specify sample_coord'
+      )
     super().__init__(sampler.sample_coord)
     self.sampler = sampler
     self.tape = RandomnessTape(tape)
@@ -127,6 +139,13 @@ class RecordingSampler(Sampler):
       tape_position = cx.field(0)
     self.tape_position = TapePosition(tape_position)
     self.tape_axis = tape_axis
+    self.enable_tape_slicing = enable_tape_slicing
+
+  @property
+  def _sample_coord(self) -> cx.Coordinate:
+    s_coord = self.sample_coord
+    assert isinstance(s_coord, cx.Coordinate)
+    return s_coord
 
   @classmethod
   def with_fixed_tape_length(
@@ -135,8 +154,13 @@ class RecordingSampler(Sampler):
       max_steps: int,
       tape_axis: str | cx.Coordinate = 'tape_idx',
       vectorize_coord: cx.Coordinate | None = None,
+      enable_tape_slicing: bool = False,
   ):
     """Creates a RecordingSampler with a fixed tape length."""
+    if sampler.sample_coord is None:
+      raise ValueError(
+          'sample_coord of the sampler must be defined to create a tape.'
+      )
     if isinstance(tape_axis, str):
       tape_axis = cx.DummyAxis(tape_axis, max_steps)
     tape_coord_components = [tape_axis, sampler.sample_coord]
@@ -147,14 +171,37 @@ class RecordingSampler(Sampler):
     tape_coord = cx.coords.compose(*tape_coord_components)
     tape_data = jnp.zeros(tape_coord.shape)
     tape = cx.field(tape_data, tape_coord)
-    return cls(sampler, tape, tape_axis, tape_position)
+    return cls(sampler, tape, tape_axis, tape_position, enable_tape_slicing)
 
   def draw(
       self,
       seed: cx.Field,
+      coord: cx.Coordinate | None = None,
   ) -> cx.Field:
     """Draws a sampler from the wrapped sampler."""
-    draw = self.sampler.draw(seed)
+    target_coord = coord if coord is not None else self._sample_coord
+    isel_arg, sel_arg = {}, {}  # used if tape slicing is enabled and needed.
+    if target_coord != self._sample_coord:
+      if not self.enable_tape_slicing:
+        raise ValueError(
+            f'Requested {target_coord=} does not match tape'
+            f' {self.sample_coord=} and enable_tape_slicing is False.'
+        )
+      if target_coord.dims != self._sample_coord.dims:
+        raise ValueError(
+            f'Dimension names of {target_coord=} != {self._sample_coord=}'
+        )
+      for t_ax, s_ax in zip(target_coord.axes, self._sample_coord.axes):
+        if isinstance(t_ax, cx.SizedAxis) and isinstance(s_ax, cx.SizedAxis):
+          if t_ax.size > s_ax.size:
+            raise ValueError(
+                f'SizedAxis in {target_coord=} > {self._sample_coord=}'
+            )
+          isel_arg[s_ax.name] = slice(0, t_ax.size)
+        else:
+          sel_arg[s_ax.dims[0]] = t_ax
+
+    draw = self.sampler.draw(seed, self._sample_coord)
     # Updating the tape value if it is not full.
     tape = self.tape.get_value()
     tape_axis = cx.get_coordinate_part(tape, self.tape_axis)
@@ -167,6 +214,8 @@ class RecordingSampler(Sampler):
     # Update tape position.
     clip_fn = cx.cmap(functools.partial(jnp.clip, max=tape_length))
     self.tape_position.set_value(clip_fn(idx + 1))
+    if isel_arg or sel_arg:
+      draw = draw.isel(isel_arg).sel(sel_arg)
     return draw
 
   def rewind(self) -> None:
@@ -184,7 +233,12 @@ class TapeSampler(Sampler):
       tape_axis: str | cx.Coordinate = 'tape_idx',
       allow_broadcasting: bool = False,
       tape_position: cx.Field | None = None,
+      enable_tape_slicing: bool = False,
   ):
+    if sampler.sample_coord is None:
+      raise ValueError(
+          f'TapeSampler requires {sampler=} to specify sample_coord'
+      )
     super().__init__(sampler.sample_coord)
     self.sampler = sampler
     self.tape = RandomnessTape(tape)
@@ -193,17 +247,47 @@ class TapeSampler(Sampler):
       tape_position = cx.field(0)
     self.tape_position = TapePosition(tape_position)
     self.tape_axis = tape_axis
+    self.enable_tape_slicing = enable_tape_slicing
+
+  @property
+  def _sample_coord(self) -> cx.Coordinate:
+    s_coord = self.sample_coord
+    assert isinstance(s_coord, cx.Coordinate)
+    return s_coord
 
   def draw(
       self,
       seed: cx.Field,
+      coord: cx.Coordinate | None = None,
   ) -> cx.Field:
     """Draws a sample either from sampler or tape depending on call count."""
+    target_coord = coord if coord is not None else self._sample_coord
+    isel_arg, sel_arg = {}, {}  # used if tape slicing is enabled and needed.
+    if target_coord != self._sample_coord:
+      if not self.enable_tape_slicing:
+        raise ValueError(
+            f'Requested {target_coord=} does not match tape'
+            f' {self.sample_coord=} and enable_tape_slicing is False.'
+        )
+      if target_coord.dims != self._sample_coord.dims:
+        raise ValueError(
+            f'Dimension names of {target_coord=} != {self._sample_coord=}'
+        )
+      for t_ax, s_ax in zip(target_coord.axes, self._sample_coord.axes):
+        if isinstance(t_ax, cx.SizedAxis) and isinstance(s_ax, cx.SizedAxis):
+          if t_ax.size > s_ax.size:
+            raise ValueError(
+                f'SizedAxis in {target_coord=} > {self._sample_coord=}'
+            )
+          isel_arg[s_ax.name] = slice(0, t_ax.size)
+        else:
+          sel_arg[s_ax.dims[0]] = t_ax
+
     idx = self.tape_position.get_value()
     tape = self.tape.get_value()
     tape_axis = cx.get_coordinate_part(tape, self.tape_axis)
     tape_draw = cx.cmap(lambda x, i: x[i])(tape.untag(tape_axis), idx)
-    sampler_draw = self.sampler.draw(seed)
+    sampler_draw = self.sampler.draw(seed, self._sample_coord)
 
     if sampler_draw.coordinate != tape_draw.coordinate:
       if not self.allow_broadcasting:
@@ -219,6 +303,10 @@ class TapeSampler(Sampler):
     draw = cx.cmap(pick_draw_fn)(idx, tape_draw, sampler_draw)
     clip_fn = cx.cmap(functools.partial(jnp.clip, max=tape_length))
     self.tape_position.set_value(clip_fn(idx + 1))
+
+    if isel_arg or sel_arg:
+      draw = draw.isel(isel_arg).sel(sel_arg)
+
     return draw
 
   def rewind(self) -> None:
@@ -370,9 +458,10 @@ class UniformUncorrelated(RandomProcessModule):
   @classmethod
   def construct(
       cls,
-      coord: cx.Coordinate,
-      minval: float,
-      maxval: float,
+      coord: cx.Coordinate | None = None,
+      minval: float = 0.0,
+      maxval: float = 1.0,
+      *,
       rngs: nnx.Rngs,
   ):
     dist = UniformDistribution(minval, maxval)
@@ -402,7 +491,7 @@ class UniformUncorrelated(RandomProcessModule):
       self,
       coord: cx.Coordinate | None = None,
   ) -> cx.Field:
-    return self.sampler.draw(self.core.get_value())
+    return self.sampler.draw(self.core.get_value(), coord=coord)
 
 
 class NormalUncorrelated(RandomProcessModule):
@@ -422,9 +511,10 @@ class NormalUncorrelated(RandomProcessModule):
   @classmethod
   def construct(
       cls,
-      coord: cx.Coordinate,
-      mean: float,
-      std: float,
+      coord: cx.Coordinate | None = None,
+      mean: float = 0.0,
+      std: float = 1.0,
+      *,
       rngs: nnx.Rngs,
   ):
     dist = NormalDistribution(mean, std)
@@ -454,7 +544,7 @@ class NormalUncorrelated(RandomProcessModule):
       self,
       coord: cx.Coordinate | None = None,
   ) -> cx.Field:
-    return self.sampler.draw(self.core.get_value())
+    return self.sampler.draw(self.core.get_value(), coord=coord)
 
 
 class GaussianRandomFieldCore(nnx.Module):
