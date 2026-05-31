@@ -96,7 +96,8 @@ class MockModel(api.Model):
     result = {}
     if 'state' in queries:
       result['state'] = {
-          k: v for k, v in prognostics.items() if k in queries['state']
+          k: v if cx.is_field(v) else prognostics[k]
+          for k, v in queries['state'].items()
       }
     return result
 
@@ -115,8 +116,28 @@ class RunnerTest(parameterized.TestCase):
           ensemble_size=4,
           ensemble_batch_size=2,
       ),
+      dict(
+          testcase_name='static_field_query',
+          ensemble_size=None,
+          ensemble_batch_size=1,
+          field_in_queries_coord=cx.LabeledAxis('loc', np.array([1, 2])),
+          use_dynamic_query_inputs=False,
+      ),
+      dict(
+          testcase_name='dynamic_field_query',
+          ensemble_size=None,
+          ensemble_batch_size=1,
+          field_in_queries_coord=cx.LabeledAxis('loc', np.array([1, 2])),
+          use_dynamic_query_inputs=True,
+      ),
   )
-  def test_inference_runner(self, ensemble_size, ensemble_batch_size):
+  def test_inference_runner(
+      self,
+      ensemble_size,
+      ensemble_batch_size,
+      field_in_queries_coord: cx.Coordinate | None = None,
+      use_dynamic_query_inputs: bool = False,
+  ):
     if ensemble_size is not None:
       assimilation_noise = random_processes.UniformUncorrelated.construct(
           minval=-0.1, maxval=0.1, coord=cx.Scalar(), rngs=nnx.Rngs(0)
@@ -155,6 +176,11 @@ class RunnerTest(parameterized.TestCase):
     init_times = np.array(
         [np.datetime64('2025-01-01'), np.datetime64('2025-01-02')]
     )
+    out_freq_in_h = 6
+    out_duration_in_h = 48
+    output_freq = np.timedelta64(out_freq_in_h, 'h')
+    output_duration = np.timedelta64(out_duration_in_h, 'h')
+    one_h = np.timedelta64(1, 'h')
     inputs = {
         'state': xarray.Dataset(
             {
@@ -177,6 +203,34 @@ class RunnerTest(parameterized.TestCase):
             'bar': cx.LabeledAxis('x', np.array([0.1, 0.2, 0.3])),
         }
     }
+    query_ds = None  # make pytype happy.
+    dynamic_query_inputs = None
+    if field_in_queries_coord is not None:
+      buz_spec = data_specs.FieldInQuerySpec(field_in_queries_coord)
+      if use_dynamic_query_inputs:
+        output_query['state']['buz'] = buz_spec
+        lead_times = one_h * np.arange(
+            0, out_duration_in_h + out_freq_in_h, out_freq_in_h
+        )  # contains values for all lead times, including last (not written).
+        all_times = np.unique(
+            np.concatenate([t0 + lead_times for t0 in init_times])
+        )
+        hours = (all_times - all_times[0]) / one_h
+        query_data = hours[:, None] * np.ones(buz_spec.spec.shape)
+        query_ds = xarray.Dataset(
+            {'buz': (('time',) + buz_spec.spec.dims, query_data)},
+            coords={'time': all_times} | buz_spec.spec.to_xarray(),
+        )
+        dynamic_query_inputs = dynamic_inputs_lib.Prescribed(
+            full_data={'state': query_ds},
+            climatology=None,
+            update_freq=output_freq,  # update for each output step.
+        )
+      else:
+        output_query['state']['buz'] = cx.field(
+            np.ones(buz_spec.spec.shape), buz_spec.spec
+        )
+
     zarr_chunks = {'lead_time': 4, 'init_time': 1}
     if ensemble_size is not None:
       zarr_chunks['realization'] = 1
@@ -184,13 +238,14 @@ class RunnerTest(parameterized.TestCase):
         model=model,
         inputs=inputs,
         dynamic_inputs=dynamic_inputs,
+        dynamic_query_inputs=dynamic_query_inputs,
         init_times=init_times,
         ensemble_size=ensemble_size,
         ensemble_batch_size=ensemble_batch_size,
         output_path=output_path,
         output_query=output_query,
-        output_freq=np.timedelta64(6, 'h'),
-        output_duration=np.timedelta64(48, 'h'),
+        output_freq=output_freq,
+        output_duration=output_duration,
         zarr_chunks=zarr_chunks,
         write_duration=np.timedelta64(24, 'h'),
         unroll_duration=np.timedelta64(12, 'h'),
@@ -206,7 +261,7 @@ class RunnerTest(parameterized.TestCase):
       )
     self.assertEqual(runner.task_count, expected_task_count)
 
-    expected_lead_times = np.arange(0, 48, 6) * np.timedelta64(1, 'h')
+    expected_lead_times = np.arange(0, out_duration_in_h, out_freq_in_h) * one_h
     nans = functools.partial(np.full, fill_value=np.nan)
     coords = {
         'init_time': init_times.astype('datetime64[ns]'),
@@ -219,14 +274,19 @@ class RunnerTest(parameterized.TestCase):
       dims = ('realization',) + dims
       shape = (ensemble_size,) + shape
 
+    child_coords = {'x': np.array([0.1, 0.2, 0.3])}
+    child_node_dict = {
+        'foo': (dims, nans(shape)),
+        'bar': (dims + ('x',), nans(shape + (3,))),
+    }
+    if field_in_queries_coord is not None:
+      buz_dims = dims + field_in_queries_coord.dims
+      buz_shape = shape + field_in_queries_coord.shape
+      child_node_dict['buz'] = (buz_dims, nans(buz_shape))
+      child_coords.update(field_in_queries_coord.to_xarray())
+
     root_node = xarray.Dataset(coords=coords)
-    child_node = xarray.Dataset(
-        {
-            'foo': (dims, nans(shape)),
-            'bar': (dims + ('x',), nans(shape + (3,))),
-        },
-        coords={'x': np.array([0.1, 0.2, 0.3])},
-    )
+    child_node = xarray.Dataset(child_node_dict, coords=child_coords)
     expected = xarray.DataTree.from_dict({'/': root_node, '/state': child_node})
     actual = xarray.open_datatree(output_path, engine='zarr')
     xarray.testing.assert_equal(actual, expected)
@@ -243,13 +303,28 @@ class RunnerTest(parameterized.TestCase):
       expected_foo = np.stack([expected_foo] * ensemble_size, axis=0)
       expected_bar = np.stack([expected_bar] * ensemble_size, axis=0)
 
-    child_node = xarray.Dataset(
-        {
-            'foo': (dims, expected_foo),
-            'bar': (dims + ('x',), expected_bar),
-        },
-        coords={'x': np.array([0.1, 0.2, 0.3])},
-    )
+    child_node_dict = {
+        'foo': (dims, expected_foo),
+        'bar': (dims + ('x',), expected_bar),
+    }
+    if field_in_queries_coord is not None:
+      buz_dims = dims + field_in_queries_coord.dims
+      buz_shape = shape + field_in_queries_coord.shape
+      if use_dynamic_query_inputs:
+        assert query_ds is not None
+        expected_buz_list = [
+            query_ds['buz'].sel(time=t + expected_lead_times).to_numpy()
+            for t in init_times
+        ]
+        expected_buz = np.stack(expected_buz_list, axis=0)
+        if ensemble_size is not None:
+          expected_buz = np.stack([expected_buz] * ensemble_size, axis=0)
+      else:
+        expected_buz = np.ones(buz_shape)
+      child_node_dict['buz'] = (buz_dims, expected_buz)
+      child_coords.update(field_in_queries_coord.to_xarray())
+
+    child_node = xarray.Dataset(child_node_dict, coords=child_coords)
     expected = xarray.DataTree.from_dict({'/': root_node, '/state': child_node})
     actual = xarray.open_datatree(output_path, engine='zarr')
     # round() removes initialization noise, which is between -0.1 and 0.1

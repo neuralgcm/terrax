@@ -16,7 +16,7 @@
 
 import dataclasses
 import enum
-from typing import Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
 import coordax as cx
 import jax
@@ -328,49 +328,48 @@ def finalize_query_spec(
   return finalize_spec(query_spec, source_coord)
 
 
-def finalize_query_spec_pytree(
-    query_spec_tree: typing.Pytree,
-    source_tree: typing.Pytree | None = None,
-) -> typing.Pytree:
-  """Returns finalized leaves of `query_spec_tree`."""
-  spec_types = (cx.Coordinate, CoordSpec, FieldInQuerySpec)
-  is_coord_or_spec = lambda c: isinstance(c, spec_types)
-  if source_tree is None:
-    source_tree = jax.tree.map(
-        lambda x: None, query_spec_tree, is_leaf=is_coord_or_spec
-    )
-  field_to_coord = lambda x: x.coordinate if cx.is_field(x) else x
-  source_tree = jax.tree.map(
-      field_to_coord, source_tree, is_leaf=cx.is_field
-  )
-  return jax.tree.map(
-      finalize_query_spec,
-      query_spec_tree,
-      source_tree,
-      is_leaf=is_coord_or_spec,
-  )
+def finalize_nested_queries_spec(
+    queries_spec: dict[str, Any],
+    sources: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Returns finalized dictionary of queries spec with optional source subsets."""
+  if sources is None:
+    sources = {}
+
+  finalized = {}
+  for key, spec_item in queries_spec.items():
+    source_item = sources.get(key, None)
+    if isinstance(spec_item, dict):
+      finalized[key] = finalize_nested_queries_spec(spec_item, source_item)
+    else:
+      if source_item is not None and cx.is_field(source_item):
+        coord_source = source_item.coordinate
+      else:
+        coord_source = source_item
+      finalized[key] = finalize_query_spec(spec_item, coord_source)
+  return finalized
 
 
-def finalize_spec_pytree(
-    coord_spec_tree: typing.Pytree,
-    source_tree: typing.Pytree | None = None,
-) -> typing.Pytree:
-  """Returns finalized leaves of `coord_spec_tree`."""
-  is_coord_or_spec = lambda c: isinstance(c, (cx.Coordinate, CoordSpec))
-  if source_tree is None:
-    source_tree = jax.tree.map(
-        lambda x: None, coord_spec_tree, is_leaf=is_coord_or_spec
-    )
-  field_to_coord = lambda x: x.coordinate if cx.is_field(x) else x
-  source_tree = jax.tree.map(
-      field_to_coord, source_tree, is_leaf=cx.is_field
-  )
-  return jax.tree.map(
-      finalize_spec,
-      coord_spec_tree,
-      source_tree,
-      is_leaf=is_coord_or_spec,
-  )
+def finalize_nested_spec(
+    specs: dict[str, Any],
+    sources: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Returns finalized dictionary of specs with optional source subsets."""
+  if sources is None:
+    sources = {}
+
+  finalized = {}
+  for key, spec_item in specs.items():
+    source_item = sources.get(key, None)
+    if isinstance(spec_item, dict):
+      finalized[key] = finalize_nested_spec(spec_item, source_item)
+    else:
+      if source_item is not None and cx.is_field(source_item):
+        coord_source = source_item.coordinate
+      else:
+        coord_source = source_item
+      finalized[key] = finalize_spec(spec_item, coord_source)
+  return finalized
 
 
 def get_coord_types(
@@ -391,10 +390,35 @@ def get_coord_types(
   if cx.LabeledAxis in types:
     types.remove(cx.LabeledAxis)
     types.append(cx.LabeledAxis)
-  # If selected axis is present, remove it as it does not implement from xarray.
   if cx.SelectedAxis in types:
     types.remove(cx.SelectedAxis)
   return tuple(types)
+
+
+def get_nested_coord_types(
+    nested_specs: Any,
+) -> list[type[cx.Coordinate]]:
+  """Returns list of unique coordinate types present in `nested_specs`."""
+  spec_types = (cx.Coordinate, CoordSpec, FieldInQuerySpec, OptionalSpec)
+  is_spec = lambda x: isinstance(x, spec_types)
+  leaves = jax.tree.leaves(nested_specs, is_leaf=is_spec)
+
+  types_dict = {}
+  for leaf in leaves:
+    if is_spec(leaf):
+      if isinstance(leaf, (OptionalSpec, FieldInQuerySpec)):
+        spec_leaf = leaf.spec
+      else:
+        spec_leaf = leaf
+      if isinstance(spec_leaf, (cx.Coordinate, CoordSpec)):
+        for c_type in get_coord_types(spec_leaf):
+          types_dict[c_type] = None
+
+  types = list(types_dict.keys())
+  if cx.LabeledAxis in types:
+    types.remove(cx.LabeledAxis)
+    types.append(cx.LabeledAxis)
+  return types
 
 
 def unwrap_optional(spec: T | OptionalSpec[T]) -> tuple[T, bool]:
@@ -446,19 +470,32 @@ def validate_inputs(
 
 def construct_query(
     inputs: typing.InputFields,
-    queries_spec: dict[str, dict[str, cx.Coordinate | QuerySpec]],
+    queries_spec: dict[str, dict[str, cx.Coordinate | cx.Field | QuerySpec]],
 ) -> typing.Queries:
   """Constructs query from data and OutputDataSpecs."""
   queries = {}
   for data_key, query_spec in queries_spec.items():
     queries[data_key] = {}
+    in_data = inputs.get(data_key, {})
     for var_name, spec in query_spec.items():
       spec, is_field_in_query = _maybe_unwrap_field_spec(spec)
 
-      if is_field_in_query:
-        queries[data_key][var_name] = inputs[data_key][var_name]
+      if is_field_in_query or cx.is_field(spec):
+        if cx.is_field(spec):
+          if var_name in in_data:
+            raise ValueError(
+                f'Field in query for {data_key}/{var_name} is specified in'
+                ' queries and in the data, which is bug-prone'
+            )
+          queries[data_key][var_name] = spec
+        else:
+          if var_name not in in_data:
+            raise ValueError(
+                f'Required data for {data_key}/{var_name} is missing in'
+                f' {in_data.keys()=}'
+            )
+          queries[data_key][var_name] = in_data[var_name]
       elif isinstance(spec, CoordSpec):
-        in_data = inputs.get(data_key, {})
         x = in_data.get(var_name, None)
         coord = x.coordinate if (x is not None and cx.is_field(x)) else None
         queries[data_key][var_name] = finalize_spec(spec, coord)

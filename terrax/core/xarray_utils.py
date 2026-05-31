@@ -15,7 +15,7 @@
 """Utilities for converting between xarray and DataObservation objects."""
 
 import collections
-from typing import TypeAlias, TypeVar, cast
+from typing import Sequence, TypeAlias, TypeVar, cast
 
 import coordax as cx
 from dinosaur import xarray_utils as dino_xarray_utils
@@ -35,6 +35,19 @@ CoordSpec: TypeAlias = data_specs.CoordSpec
 OptionalSpec: TypeAlias = data_specs.OptionalSpec
 
 verify_grid_consistency = dino_xarray_utils.verify_grid_consistency
+
+
+CORE_COORD_TYPES = (
+    coordinates.TimeDelta,
+    coordinates.LonLatGrid,
+    coordinates.SphericalHarmonicGrid,
+    coordinates.HybridLevels,
+    coordinates.PressureLevels,
+    coordinates.SigmaLevels,
+    coordinates.SigmaBoundaries,
+    coordinates.LayerLevels,
+    cx.DummyAxis,
+)
 
 
 def xarray_nondimensionalize(
@@ -166,18 +179,7 @@ def field_from_xarray(
     additional_coord_types: tuple[cx.Coordinate, ...] = (),
 ) -> cx.Field:
   """Converts an xarray.DataArray to a Field using NeuralGCM coordinates."""
-  coord_types = (
-      coordinates.TimeDelta,
-      coordinates.LonLatGrid,
-      coordinates.SphericalHarmonicGrid,
-      coordinates.HybridLevels,
-      coordinates.PressureLevels,
-      coordinates.SigmaLevels,
-      coordinates.SigmaBoundaries,
-      coordinates.LayerLevels,
-      cx.DummyAxis,
-  )
-  return cx.from_xarray(data_array, coord_types + additional_coord_types)
+  return cx.from_xarray(data_array, CORE_COORD_TYPES + additional_coord_types)
 
 
 def validate_xarray_inputs(
@@ -197,6 +199,31 @@ def validate_xarray_inputs(
         c_types = data_specs.get_coord_types(spec)
         coords[data_key][k] = cx.coords.from_xarray(dataset[k], c_types)
   data_specs.validate_inputs(coords, in_spec)
+
+
+def extract_xr_source_coords(
+    xr_data: typing.Pytree,
+    coord_types: Sequence[type[cx.Coordinate]] | None = None,
+):
+  """Extracts coordinates tree from xarray data."""
+  if coord_types is None:
+    coord_types = CORE_COORD_TYPES
+
+  is_dataset = lambda x: isinstance(x, xarray.Dataset)
+  is_dataarray = lambda x: isinstance(x, xarray.DataArray)
+  is_xarray_data = lambda x: is_dataset(x) or is_dataarray(x)
+
+  def _extract_coords(x):
+    if is_dataarray(x):
+      return cx.coords.from_xarray(x, coord_types)
+    if is_dataset(x):
+      return {
+          k: cx.coords.from_xarray(v, coord_types)
+          for k, v in x.items()
+      }
+    raise ValueError(f'Unsupported type: {type(x)}')
+
+  return jax.tree.map(_extract_coords, xr_data, is_leaf=is_xarray_data)
 
 
 def read_from_xarray(
@@ -233,7 +260,7 @@ def read_from_xarray(
       continue
 
     result[data_key] = {}
-    target_coords = data_specs.finalize_spec_pytree(specs, fields)
+    target_coords = data_specs.finalize_nested_spec(specs, fields)
     for k, v in fields.items():
       target_coord = target_coords[k]
       if strict_matches:

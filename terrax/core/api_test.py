@@ -617,6 +617,38 @@ class InferenceHelpersTest(parameterized.TestCase):
     actual_coords = map_fields(cx.get_coordinate, predictions)
     self.assertEqual(actual_coords, expected_coords)
 
+  def test_unroll_for_template_with_time_varying_fields_prepend_init(self):
+    """Tests unroll_for_template with time-varying fields and prepend_init."""
+    state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
+
+    td_outer = coordinates.TimeDelta(np.arange(0, 3) * self.model.timestep * 2)
+    thresholds = cx.field(
+        np.ones(td_outer.shape + self.x.shape) * 0.5, td_outer, self.x
+    )
+
+    template = {
+        'below_threshold': {
+            'population': cx.coords.compose(td_outer, self.x),
+            'thresholds': thresholds,
+        }
+    }
+
+    _, predictions = api.unroll_for_template(
+        self.model,
+        initial_state=state,
+        template=template,
+        dynamic_inputs=self.dynamic_inputs,
+    )
+
+    expected_coords = {
+        'below_threshold': {
+            'population': cx.coords.compose(td_outer, self.x),
+            'thresholds': cx.coords.compose(td_outer, self.x),
+        },
+    }
+    actual_coords = map_fields(cx.get_coordinate, predictions)
+    self.assertEqual(actual_coords, expected_coords)
+
   def test_unroll_for_template_reconstruction(self):
     """Tests that unroll_for_template can reconstruct trajectory."""
     state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)

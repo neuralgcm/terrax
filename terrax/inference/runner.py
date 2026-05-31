@@ -31,6 +31,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from terrax.core import api
+from terrax.core import data_specs
 from terrax.core import typing
 from terrax.core import xarray_utils
 from terrax.inference import dynamic_inputs as dynamic_inputs_lib
@@ -48,12 +49,15 @@ def _queries_to_dummy_datatree(queries: typing.Queries) -> xarray.DataTree:
   outputs = {}
   for group, sub_query in queries.items():
     ds = xarray.Dataset()
-    for var, coord in sub_query.items():
+    for var, c in sub_query.items():
+      if isinstance(c, data_specs.FieldInQuerySpec):
+        c = c.spec
+      coords = c.coordinate.to_xarray() if cx.is_field(c) else c.to_xarray()
       ds[var] = xarray.DataArray(
           # TODO(shoyer): include dtype as part of the query spec?
-          data=dask.array.zeros(coord.shape, np.float32),
-          dims=coord.dims,
-          coords=coord.to_xarray(),
+          data=dask.array.zeros(c.shape, np.float32),
+          dims=c.dims,
+          coords=coords,
       )
     outputs[group] = ds
   return xarray.DataTree.from_dict(outputs)
@@ -158,6 +162,9 @@ class InferenceRunner:
   ensemble_batch_size: int = dataclasses.field(default=1, kw_only=True)
   output_path: str
   output_query: typing.Queries
+  dynamic_query_inputs: dynamic_inputs_lib.DynamicInputs | None = (
+      dataclasses.field(default=None, kw_only=True)
+  )
   output_freq: np.timedelta64
   output_duration: np.timedelta64
   unroll_duration: np.timedelta64
@@ -168,6 +175,9 @@ class InferenceRunner:
   zarr_shards: dict[str, int] | None = None
   bad_state_strategy: str = 'raise'
   random_seed: int = 0
+  _dynamic_queries_read_spec: dict[str, dict[str, cx.Coordinate]] = (
+      dataclasses.field(default_factory=dict, init=False)
+  )
 
   def __post_init__(self):
     if self.ensemble_size is not None and self.ensemble_batch_size > 1:
@@ -215,6 +225,31 @@ class InferenceRunner:
             f'inputs {key!r} does not contain all init_times:\n'
             f'inputs={self.inputs}\ninit_times={self.init_times}'
         )
+
+    # Pre-compute specs for reading dynamic queries from the data.
+    dynamic_queries_read_spec = {}
+    for ds_key, sub_query in self.output_query.items():
+      ds_specs = {}
+      for var_name, spec in sub_query.items():
+        # we only need read specs for FieldInQuery.
+        if isinstance(spec, data_specs.FieldInQuerySpec):
+          var_spec = spec.spec
+          # Set any timedelta to enable reading arbitrary lead times.
+          if isinstance(var_spec, cx.Coordinate):
+            var_spec = data_specs.CoordSpec.with_any_timedelta(var_spec)
+          elif isinstance(var_spec, data_specs.CoordSpec):
+            var_spec = data_specs.CoordSpec.with_any_timedelta(
+                var_spec.coord, var_spec.dim_match_rules
+            )
+          else:
+            raise ValueError(
+                f'Unsupported spec type for dynamic query {ds_key} {var_name}:'
+                f' {type(var_spec)}'
+            )
+          ds_specs[var_name] = var_spec
+      if ds_specs:
+        dynamic_queries_read_spec[ds_key] = ds_specs
+    self._dynamic_queries_read_spec = dynamic_queries_read_spec
 
   @property
   def total_steps(self) -> int:
@@ -264,7 +299,21 @@ class InferenceRunner:
 
     # Our strategy here is to create a DataTree where all variables are empty
     # dask.array objects, similar xarray_beam.make_template()
-    template = _queries_to_dummy_datatree(self.output_query)
+    sample_queries = self.output_query
+    if self.dynamic_query_inputs is not None:
+      # If using streaming dynamic queries, we fetch metadata & finalize specs.
+      first_time = self.init_times[0].astype('datetime64[ns]')
+      q_stream = self.dynamic_query_inputs.get_forecast(first_time)
+      q_data = q_stream.get_data(np.timedelta64(0), self.output_freq)
+      q_data = {k: v.isel(time=0, drop=True) for k, v in q_data.items()}
+      c_types = data_specs.get_nested_coord_types(
+          self._dynamic_queries_read_spec
+      )
+      coord_sources = xarray_utils.extract_xr_source_coords(q_data, c_types)
+      sample_queries = data_specs.finalize_nested_queries_spec(
+          self.output_query, coord_sources
+      )
+    template = _queries_to_dummy_datatree(sample_queries)
     lead_times = np.arange(0, self.output_duration, self.output_freq)
     expanded_dims = {}
     if self.ensemble_size is not None:
@@ -353,6 +402,11 @@ class InferenceRunner:
 
     init_time = self.init_times[init_time_index].astype('datetime64[ns]')
     dynamic_inputs_forecast = self.dynamic_inputs.get_forecast(init_time)
+    dynamic_queries_stream = (
+        self.dynamic_query_inputs.get_forecast(init_time)
+        if self.dynamic_query_inputs is not None
+        else None
+    )
 
     # Initialize state from checkpoint or from scratch.
     task_path = self._task_path(task_id)
@@ -410,7 +464,7 @@ class InferenceRunner:
 
     # Unroll simulation forward in time.
 
-    def get_dynamic_inputs(output_step):
+    def get_dynamic_inputs_and_queries(output_step):
       lead_start = output_step * self.output_freq
       lead_stop = (output_step + self.steps_per_unroll) * self.output_freq
       logging.info(f'getting dynamic inputs for {output_step=}')
@@ -423,15 +477,26 @@ class InferenceRunner:
         check_pytree_for_bad_state(data, f'dynamic inputs at {output_step=}')
       keys = {k: list(v) for k, v in data.items()}
       logging.info(f'dynamic inputs ready: {keys}')
-      return data
+
+      query_fields = {}
+      if dynamic_queries_stream is not None:
+        queries_data = dynamic_queries_stream.get_data(
+            lead_start, lead_stop + self.output_freq
+        )
+        queries_data = xarray_utils.ensure_timedelta_axis(queries_data)
+        query_fields = xarray_utils.read_from_xarray(
+            queries_data, self._dynamic_queries_read_spec, strict_matches=False
+        )
+      queries = data_specs.construct_query(query_fields, self.output_query)
+      return data, queries
 
     @timing.Timed
-    def unroll(state, dynamic_inputs):
+    def unroll(state, dynamic_inputs, query_slice):
       unroll_fn = functools.partial(
           api.unroll_from_advance,
           timedelta=self.output_freq,
           steps=self.steps_per_unroll,
-          queries=self.output_query,
+          queries=query_slice,
           dynamic_inputs=dynamic_inputs,
           prepend_init=True,
           trim_last=True,
@@ -440,7 +505,9 @@ class InferenceRunner:
         unroll_fn = jax.vmap(unroll_fn, in_axes=(None, 0))
       return unroll_fn(self.model, state)
 
-    dynamic_inputs_task = streaming.SingleTaskExecutor(get_dynamic_inputs)
+    dynamic_inputs_task = streaming.SingleTaskExecutor(
+        get_dynamic_inputs_and_queries
+    )
     commit_chunk_task = streaming.SingleTaskExecutor(self._commit_chunk)
 
     dynamic_inputs_task.submit(commited_steps)
@@ -459,12 +526,12 @@ class InferenceRunner:
         for step_start in range(
             steps_written, chunk_end_step, self.steps_per_unroll
         ):
-          dynamic_inputs = dynamic_inputs_task.get()
+          dynamic_inputs, query_slice = dynamic_inputs_task.get()
           if step_start + self.steps_per_unroll < self.total_steps:
             dynamic_inputs_task.submit(step_start + self.steps_per_unroll)
 
           logging.info(f'{dynamic_inputs=}')
-          state, trajectory_slice = unroll(state, dynamic_inputs)
+          state, trajectory_slice = unroll(state, dynamic_inputs, query_slice)
           output_buffer.append(device_put_to_cpu(trajectory_slice))
 
         commit_chunk_task.wait()

@@ -732,11 +732,18 @@ def _unroll_for_queries(
       coordinates.TimeDelta((1 + np.arange(final_leadtime // td)) * td)
       for td in timedelta
   ]
+  # we use nestable timedelta_coords to generate nested scan output spec.
+  # This means prepending one if missing or replacing if existing contains t=0.
 
   def _out_spec(x, td):
     coord = x.coordinate if cx.is_field(x) else x
     if 'timedelta' not in coord.dims:
       coord = cx.coords.compose(td, coord)
+    else:
+      # this covers the case of scannable queries, which may contain t=0, which
+      # is treated separately to ensure compatibility with nested scans.
+      orig_td = cx.coords.extract(coord, coordinates.TimeDelta)
+      coord = cx.coords.replace_axes(coord, orig_td, td)
     return coord
 
   outputs_spec = {}  # contains flat coordinates spec for the final outputs.
@@ -750,15 +757,17 @@ def _unroll_for_queries(
   )
 
   # Timedeltas in queries have been saved in outputs_spec. We can trim them away
-  # from coordinates to make them directly compatible with `observe` call.
-  def _remove_td(x, td):
+  # from coordinates to make them directly compatible with the `observe` call.
+  def _remove_td(x):
     if cx.is_field(x):
       return x
-    return cx.coords.replace_axes(x, td, cx.Scalar()) if td in x.axes else x
+    if 'timedelta' in x.dims:
+      orig_td = cx.coords.extract(x, coordinates.TimeDelta)
+      return cx.coords.replace_axes(x, orig_td, cx.Scalar())
+    return x
 
   queries = tuple(
-      jax.tree.map(lambda x: _remove_td(x, td), q, is_leaf=coord_or_field)
-      for q, td in zip(queries, timedelta_coords, strict=True)
+      jax.tree.map(_remove_td, q, is_leaf=coord_or_field) for q in queries
   )
   # pylint: enable=cell-var-from-loop
 
@@ -773,8 +782,17 @@ def _unroll_for_queries(
   # To nest data for scans we combine all queries, extract scannable fields and
   # nest them according to the full scan structure.
   merged_query = functools.reduce(pytree_utils.merge_nested_dicts, queries, {})
+  scannable_queries = pytree_utils.filter_nested_dict(
+      is_scannable_field, merged_query
+  )
+  if prepend_init:  # remove t=0 from scannable queries for nested scan compat.
+    scannable_queries = jax.tree.map(
+        lambda x: x.isel(timedelta=slice(1, None)),
+        scannable_queries,
+        is_leaf=cx.is_field,
+    )
   fields_in_queries_to_scan_over = scan_utils.nest_data_for_scans(
-      pytree_utils.filter_nested_dict(is_scannable_field, merged_query),
+      scannable_queries,
       scan_steps=all_steps,
       scan_specs=scannable_field_queries_specs,
   )
@@ -1039,11 +1057,6 @@ def unroll_for_template(
   [prepend_init] = has_t0
 
   if prepend_init:
-    template = jax.tree.map(
-        lambda x: x.isel(timedelta=slice(1, None)),
-        template,
-        is_leaf=coord_or_field,
-    )
     combined_coords = jax.tree.map(
         lambda x: x.isel(timedelta=slice(1, None)),
         combined_coords,

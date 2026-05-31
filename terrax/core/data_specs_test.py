@@ -338,9 +338,9 @@ class CoordSpecTest(parameterized.TestCase):
 
 
 class FinalizeSpecTest(parameterized.TestCase):
-  """Tests that finalize_spec_pytree and finalize_query_spec_pytree work."""
+  """Tests that finalize_nested_spec and finalize_nested_queries_spec work."""
 
-  def test_finalize_spec_pytree(self):
+  def test_finalize_nested_spec(self):
     x = cx.LabeledAxis('x', np.arange(5))
     y = cx.LabeledAxis('y', np.arange(4))
     z = cx.LabeledAxis('z', np.arange(3))
@@ -353,17 +353,16 @@ class FinalizeSpecTest(parameterized.TestCase):
     }
 
     z_dummy = cx.SizedAxis('z', 3)
+    # Testing partial subset source dictionary
     source_tree = {
-        'coord': cx.field(np.zeros(x.shape), x),
-        'coord_spec_exact': cx.field(np.zeros(y.shape), y),
         'coord_spec_replace': cx.field(np.zeros(z.shape), z_dummy),
     }
 
     expected = {'coord': x, 'coord_spec_exact': y, 'coord_spec_replace': z}
-    actual = data_specs.finalize_spec_pytree(spec_tree, source_tree)
+    actual = data_specs.finalize_nested_spec(spec_tree, source_tree)
     chex.assert_trees_all_equal(actual, expected)
 
-  def test_finalize_query_spec_pytree(self):
+  def test_finalize_nested_queries_spec(self):
     x = cx.LabeledAxis('x', np.arange(5))
     y = cx.LabeledAxis('y', np.arange(4))
     z = cx.LabeledAxis('z', np.arange(3))
@@ -382,9 +381,10 @@ class FinalizeSpecTest(parameterized.TestCase):
     }
 
     x_dummy = cx.SizedAxis('x', 5)
+    # Testing partial subset source dictionary across two groups
     source_tree = {
-        'group1': {'field_spec_replace': x_dummy, 'coord_spec': y},
-        'group2': {'field_coord': z, 'coord': t},
+        'group1': {'field_spec_replace': x_dummy},
+        'group2': {},
     }
 
     expected = {
@@ -398,8 +398,24 @@ class FinalizeSpecTest(parameterized.TestCase):
         },
     }
 
-    actual = data_specs.finalize_query_spec_pytree(query_spec_tree, source_tree)
+    actual = data_specs.finalize_nested_queries_spec(
+        query_spec_tree, source_tree
+    )
     chex.assert_trees_all_equal(actual, expected)
+
+  def test_get_nested_coord_types(self):
+    x = cx.LabeledAxis('x', np.arange(5))
+    td = coordinates.TimeDelta(np.array([np.timedelta64(1, 'h')]))
+    spec_tree = {
+        'group1': {
+            'a': data_specs.FieldInQuerySpec(x),
+            'b': data_specs.CoordSpec(td),
+        }
+    }
+    # cx.LabeledAxis should be moved to the end of the list.
+    expected = [coordinates.TimeDelta, cx.LabeledAxis]
+    actual = data_specs.get_nested_coord_types(spec_tree)
+    self.assertEqual(actual, expected)
 
 
 if __name__ == '__main__':
