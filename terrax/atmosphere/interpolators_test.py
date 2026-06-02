@@ -104,17 +104,33 @@ class LinearOnPressureTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='linear',
+          testcase_name='linear_dot',
           extrapolation='linear',
+          method='dot',
           expected_data=np.array([10.0, 25.0, 35.0, 45.0, 55.0]),
       ),
       dict(
-          testcase_name='constant',
+          testcase_name='linear_index',
+          extrapolation='linear',
+          method='index',
+          expected_data=np.array([10.0, 25.0, 35.0, 45.0, 55.0]),
+      ),
+      dict(
+          testcase_name='constant_dot',
           extrapolation='constant',
+          method='dot',
+          expected_data=np.array([10.0, 25.0, 30.0, 30.0, 30.0]),
+      ),
+      dict(
+          testcase_name='constant_index',
+          extrapolation='constant',
+          method='index',
           expected_data=np.array([10.0, 25.0, 30.0, 30.0, 30.0]),
       ),
   )
-  def test_to_sigma_from_pressure_1d(self, extrapolation, expected_data):
+  def test_to_sigma_from_pressure_1d(
+      self, extrapolation, method, expected_data
+  ):
     """Tests interpolation to sigma from 1d pressure level inputs."""
     source_levels = coordinates.PressureLevels([100, 200, 400])
     target_levels = coordinates.SigmaLevels.equidistant(5)
@@ -122,7 +138,9 @@ class LinearOnPressureTest(parameterized.TestCase):
     field = cx.field(np.array([10.0, 20.0, 30.0]), source_levels)
     inputs = {'field': field, 'surface_pressure': cx.field(surface_pressure)}
 
-    regridder = interpolators.LinearOnPressure(target_levels, extrapolation)
+    regridder = interpolators.LinearOnPressure(
+        target_levels, extrapolation, method=method
+    )
     actual = regridder(inputs)['field']
 
     expected = cx.field(expected_data, target_levels)

@@ -39,6 +39,19 @@ def _linear_interp_with_linear_extrap(x, xp, fp):
   return jnp.dot(weights, fp, precision='highest')
 
 
+def _index_linear_interp_with_linear_extrap(x, xp, fp):
+  """Linear interpolation with linear extrapolation using direct indexing."""
+  xp = jnp.asarray(xp)
+  fp = jnp.asarray(fp)
+  n = len(xp)
+  u = jnp.searchsorted(xp, x, side='right', method='compare_all')
+  u = jnp.clip(u, 1, n - 1)
+  dx = xp[u] - xp[u - 1]
+  delta = x - xp[u - 1]
+  w = delta / dx
+  return (1 - w) * fp[u - 1] + w * fp[u]
+
+
 def _dot_interp(x, xp, fp):
   """Interpolate with a dot product instead of indexing."""
   n = len(xp)
@@ -97,6 +110,10 @@ class LinearOnPressure(nnx.Module):
   Attributes:
     target_levels: The vertical levels to interpolate to.
     extrapolation: The extrapolation method to use. One of 'linear','constant'.
+    method: The implementation method to use for interpolation. One of 'dot',
+      'index'. 'dot' uses dot product weighting (highly efficient on TPUs for
+      small number of vertical levels), while 'index' uses array indexing (more
+      memory efficient for large vertical level grids).
     include_surface_pressure_in_output: Whether to forward the surface pressure.
     sim_units: An optional `SimUnits` instance. If provided, inputs are
       interpreted as nondimensionalized and appropriate coordinate
@@ -113,6 +130,7 @@ class LinearOnPressure(nnx.Module):
       | coordinates.HybridLevels
   )
   extrapolation: Literal['linear', 'constant'] = 'linear'
+  method: Literal['dot', 'index'] = 'dot'
   include_surface_pressure_in_output: bool = False
   sim_units: units.SimUnits | None = None
   allow_no_levels: bool = False
@@ -128,9 +146,19 @@ class LinearOnPressure(nnx.Module):
   def interpolate_array(self, x, xp, fp):
     # x - target pressure; xp - data pressure level, fp - value at said level.
     if self.extrapolation == 'linear':
-      return _linear_interp_with_linear_extrap(x, xp, fp)
+      if self.method == 'dot':
+        return _linear_interp_with_linear_extrap(x, xp, fp)
+      elif self.method == 'index':
+        return _index_linear_interp_with_linear_extrap(x, xp, fp)
+      else:
+        raise ValueError(f'Unknown interpolation method "{self.method}".')
     elif self.extrapolation == 'constant':
-      return _interp(x, xp, fp)
+      if self.method == 'dot':
+        return _interp(x, xp, fp)
+      elif self.method == 'index':
+        return jnp.interp(x, xp, fp)
+      else:
+        raise ValueError(f'Unknown interpolation method "{self.method}".')
     else:
       raise ValueError(f'Unknown extrapolation method "{self.extrapolation}".')
 
