@@ -677,6 +677,26 @@ class BatchGaussianRandomFieldTest(BaseSphericalHarmonicRandomProcessTest):
     grf = build_grf()
     self.assertEqual(grf.n_fields, 2)
 
+  def test_dt_zero_and_timedelta64(self):
+    ylm_map = spherical_harmonics.FixedYlmMapping(
+        lon_lat_grid=coordinates.LonLatGrid.T42(),
+        ylm_grid=coordinates.SphericalHarmonicGrid.T42(),
+    )
+    dt = np.timedelta64(0, 's')
+    corr_time = np.timedelta64(1, 'h')
+    grf = random_processes.GaussianRandomField.construct(
+        ylm_map=ylm_map,
+        dt=dt,
+        sim_units=self.sim_units,
+        correlation_time=corr_time,
+        correlation_length=0.15,
+        variance=1.0,
+        rngs=nnx.Rngs(0),
+    )
+    grf.unconditional_sample(cx.field(jax.random.key(42)))
+    vals = grf.state_values().data
+    self.assertFalse(np.isnan(vals).any())
+
 
 class UncorrelatedRandomFieldsTest(parameterized.TestCase):
   """Tests Uncorrelated random processes."""

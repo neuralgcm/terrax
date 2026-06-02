@@ -209,12 +209,14 @@ ONE_MINUTE_DT_UNITS = SimUnits.from_si(
 
 
 def maybe_nondimensionalize(
-    x: typing.Numeric | typing.Quantity | str | None,
+    x: typing.Numeric | typing.Quantity | str | np.timedelta64 | None,
     sim_units: SimUnits,
 ) -> None | typing.Numeric:
-  """Calls nondimensionalize on Quantity or str, otherwise passthrough."""
+  """Calls nondimensionalize on Quantity, str, or timedelta64, otherwise passthrough."""
   if x is None:
     return None
+  elif isinstance(x, np.timedelta64):
+    return sim_units.nondimensionalize_timedelta64(x)
   elif isinstance(x, (str, typing.Quantity)):
     nondim = sim_units.nondimensionalize(typing.Quantity(x))
     assert isinstance(nondim, typing.Numeric)  # make pytype happy.

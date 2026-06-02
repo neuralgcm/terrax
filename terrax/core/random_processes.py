@@ -579,9 +579,9 @@ class GaussianRandomFieldCore(nnx.Module):
   def __init__(
       self,
       ylm_map: spherical_harmonics.FixedYlmMapping,
-      dt: float,
+      dt: float | np.timedelta64,
       sim_units: units.SimUnits,
-      correlation_time: typing.Numeric | typing.Quantity,
+      correlation_time: typing.Numeric | typing.Quantity | np.timedelta64,
       correlation_length: typing.Numeric | typing.Quantity,
       variance: typing.Numeric,
       correlation_time_type: nnx.Param | RandomnessParam = RandomnessParam,
@@ -609,6 +609,8 @@ class GaussianRandomFieldCore(nnx.Module):
         numerical stability.
     """
     nondimensionalize = lambda x: units.maybe_nondimensionalize(x, sim_units)
+    dt = nondimensionalize(dt)
+    assert dt is not None
     correlation_time = nondimensionalize(correlation_time)
     correlation_length = nondimensionalize(correlation_length)
     variance = nondimensionalize(variance)
@@ -664,8 +666,7 @@ class GaussianRandomFieldCore(nnx.Module):
     """Integral of the GRF's variance over the earth's surface."""
     return self.variance * self._surf_area
 
-  def _sigma_array(self) -> jax.Array:
-    """Array of σₙ from Appendix 8 in [Palmer] http://shortn/_56HCcQwmSS."""
+  def _stationary_sigma_array(self) -> jax.Array:
     dinosaur_grid = self.ylm_map.dinosaur_grid
     # n = [0, 1, ..., N]
     n = dinosaur_grid.modal_axes[1]  # total wavenumbers.
@@ -681,19 +682,24 @@ class GaussianRandomFieldCore(nnx.Module):
     # total wavenumber.
     sum_unnormed_vars = jnp.sum(n_longitudian_wavenumbers * sigmas_unnormed**2)
     # This is analogous to F₀ from [Palmer].
-    # (normalization * sigmas_unnormed)² would sum to 1. The leading factor
-    #   self._integrated_grf_variance * (1 - self.phi ** 2)
-    # ensures that the AR(1) process has variance self._integrated_grf_variance.
+    # (normalization * sigmas_unnormed)² would sum to 1. Here we use the leading
+    # factor `self._integrated_grf_variance`, which onces completed with
+    # sqrt(1 - self.phi ** 2) in `self._sigma_array ensures that the AR(1)
+    # process has variance `self._integrated_grf_variance`.
     # We do not include the extra fator of 2 in the denominator. I do not know
     # why [Palmer] has this factor.
-    # In sampling, phi appears as 1 - phi**2 = 1 - exp(-2 dt / tau)
-    one_minus_phi2 = -jnp.expm1(-2 * self.dt / self.corr_time)
     normalization = jnp.sqrt(
-        self._integrated_grf_variance() * one_minus_phi2 / sum_unnormed_vars
+        self._integrated_grf_variance() / sum_unnormed_vars
     )
     # The factor of coords.horizontal.radius appears because our basis vectors
     # have L2 norm = radius.
     return normalization * sigmas_unnormed / dinosaur_grid.radius
+
+  def _sigma_array(self) -> jax.Array:
+    """Array of σₙ from Appendix 8 in [Palmer] http://shortn/_56HCcQwmSS."""
+    # In sampling, phi appears as 1 - phi**2 = 1 - exp(-2 dt / tau)
+    one_minus_phi2 = -jnp.expm1(-2 * self.dt / self.corr_time)
+    return jnp.sqrt(one_minus_phi2) * self._stationary_sigma_array()
 
   def sample_core(
       self, rng: typing.PRNGKeyArray, sampler: Sampler | None = None
@@ -705,14 +711,14 @@ class GaussianRandomFieldCore(nnx.Module):
 
     dinosaur_grid = self.ylm_map.dinosaur_grid
     modal_shape = dinosaur_grid.modal_shape
-    sigmas = self._sigma_array()
+    # By using stationary array we avoid 0/0 division if `dt == 0`.
+    sigmas = self._stationary_sigma_array()
     weights = jnp.where(
         dinosaur_grid.mask,
         sampler.draw(cx.field(rng)).data,
         jnp.zeros(modal_shape),
     )
-    one_minus_phi2 = -jnp.expm1(-2 * self.dt / self.corr_time)
-    return one_minus_phi2 ** (-0.5) * sigmas * weights
+    return sigmas * weights
 
   def advance_core(
       self,
@@ -745,9 +751,9 @@ class GaussianRandomField(RandomProcessModule):
   def __init__(
       self,
       ylm_map: spherical_harmonics.FixedYlmMapping,
-      dt: float,
+      dt: float | np.timedelta64,
       sim_units: units.SimUnits,
-      correlation_time: typing.Numeric | typing.Quantity,
+      correlation_time: typing.Numeric | typing.Quantity | np.timedelta64,
       correlation_length: typing.Numeric | typing.Quantity,
       variance: typing.Numeric,
       sampler: Sampler,
@@ -781,9 +787,9 @@ class GaussianRandomField(RandomProcessModule):
   def construct(
       cls,
       ylm_map: spherical_harmonics.FixedYlmMapping,
-      dt: float,
+      dt: float | np.timedelta64,
       sim_units: units.SimUnits,
-      correlation_time: typing.Numeric | typing.Quantity,
+      correlation_time: typing.Numeric | typing.Quantity | np.timedelta64,
       correlation_length: typing.Numeric | typing.Quantity,
       variance: typing.Numeric,
       clip: float = 6.0,
@@ -862,10 +868,12 @@ class VectorizedGaussianRandomField(RandomProcessModule):
   def __init__(
       self,
       ylm_map: spherical_harmonics.FixedYlmMapping,
-      dt: float,
+      dt: float | np.timedelta64,
       sim_units: units.SimUnits,
       axis: cx.Coordinate,
-      correlation_times: typing.Numeric | typing.Quantity,
+      correlation_times: Sequence[
+          typing.Numeric | typing.Quantity | np.timedelta64
+      ],
       correlation_lengths: typing.Numeric | typing.Quantity,
       variances: Sequence[float],
       sampler: Sampler,
@@ -886,6 +894,8 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       )
 
     nondimensionalize = lambda x: units.maybe_nondimensionalize(x, sim_units)
+    dt = nondimensionalize(dt)
+    assert dt is not None
     correlation_times = np.array(
         [nondimensionalize(tau) for tau in correlation_times]
     )
@@ -925,10 +935,12 @@ class VectorizedGaussianRandomField(RandomProcessModule):
   def construct(
       cls,
       ylm_map: spherical_harmonics.FixedYlmMapping,
-      dt: float,
+      dt: float | np.timedelta64,
       sim_units: units.SimUnits,
       axis: cx.Coordinate,
-      correlation_times: typing.Numeric | typing.Quantity,
+      correlation_times: Sequence[
+          typing.Numeric | typing.Quantity | np.timedelta64
+      ],
       correlation_lengths: typing.Numeric | typing.Quantity,
       variances: Sequence[float],
       clip: float = 6.0,
