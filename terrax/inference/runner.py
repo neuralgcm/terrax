@@ -174,6 +174,8 @@ class InferenceRunner:
   zarr_chunks: dict[str, int] = dataclasses.field(default_factory=dict)
   zarr_shards: dict[str, int] | None = None
   bad_state_strategy: str = 'raise'
+  max_nan_retries: int = 3  # only used when bad_state_strategy='retry'.
+  check_dynamic_inputs_data: bool = False
   random_seed: int = 0
   _dynamic_queries_read_spec: dict[str, dict[str, cx.Coordinate]] = (
       dataclasses.field(default_factory=dict, init=False)
@@ -214,8 +216,15 @@ class InferenceRunner:
           f'{self.checkpoint_duration=} must be a multiple of'
           f' {self.write_duration=}'
       )
-    if self.bad_state_strategy not in ('raise', 'impute_nan', 'ignore'):
+    if self.bad_state_strategy not in (
+        'raise', 'impute_nan', 'ignore', 'retry',
+    ):
       raise ValueError(f'Unknown bad_state_strategy: {self.bad_state_strategy}')
+    if self.bad_state_strategy == 'retry' and self.ensemble_size is None:
+      raise ValueError(
+          "bad_state_strategy='retry' requires ensemble_size to be set, "
+          'because deterministic models have no RNG to vary across retries.'
+      )
     if isinstance(self.init_times, pd.DatetimeIndex):
       self.init_times = self.init_times.to_numpy()
     for key, dataset in self.inputs.items():
@@ -382,6 +391,46 @@ class InferenceRunner:
   def _task_path(self, task_id: int) -> epath.Path:
     return self._checkpoints_path() / f'task_{task_id}.pkl'
 
+  def _make_rng(
+      self,
+      task_id: int,
+      init_time_index: int,
+      realization_start: int | None,
+      attempt: int = 0,
+  ) -> cx.Field | None:
+    """Construct RNG for a given task, with optional retry offset.
+
+    On retry attempts, the RNG seed is offset by `attempt * task_count` to
+    guarantee a unique but deterministic key for each retry while avoiding
+    collisions with other task_ids.
+
+    Args:
+      task_id: integer task ID.
+      init_time_index: index into init_times for this task.
+      realization_start: starting realization index, or None for deterministic.
+      attempt: retry attempt number (0 for the first try).
+
+    Returns:
+      A Field wrapping the JAX PRNGKey(s), or None for deterministic models.
+    """
+    if self.ensemble_size is None:
+      return None
+    base_key = jax.random.key(self.random_seed)
+    total_realizations = len(self.init_times) * self.ensemble_size
+    retry_offset = attempt * total_realizations
+    if self.ensemble_batch_size == 1:
+      return cx.field(jax.random.fold_in(base_key, task_id + retry_offset))
+    # Use individual task_ids for each realization in the batch.
+    # This matches the RNG sequence of the unbatched execution setup.
+    task_ids = (
+        realization_start
+        + np.arange(self.ensemble_batch_size)
+        + init_time_index * self.ensemble_size
+        + retry_offset
+    )
+    keys = jax.vmap(jax.random.fold_in, (None, 0))(base_key, task_ids)
+    return cx.field(keys)
+
   def run(self, task_id: int) -> None:
     """Simulate a single task, saving outputs to the Zarr file.
 
@@ -396,6 +445,52 @@ class InferenceRunner:
     if self.model is None:
       raise ValueError('model must be set before calling InferenceRunner.run()')
 
+    max_attempts = (
+        self.max_nan_retries + 1
+        if self.bad_state_strategy == 'retry'
+        else 1
+    )
+    for attempt in range(max_attempts):
+      try:
+        self._run_attempt(task_id, attempt=attempt)
+        return  # success
+      except BadStateError as error:
+        if self.bad_state_strategy == 'raise':
+          error.add_note(f'{task_id=} failed')
+          raise
+        elif self.bad_state_strategy == 'retry':
+          # Clean up any partial checkpoint before retrying.
+          self._task_path(task_id).unlink(missing_ok=True)
+          if attempt + 1 < max_attempts:
+            logging.warning(
+                f'Bad state on {task_id=} (attempt {attempt + 1}'
+                f'/{max_attempts}), retrying with new RNG: {error}'
+            )
+          else:
+            logging.warning(
+                f'Bad state on {task_id=}, all {max_attempts} attempts'
+                f' exhausted. Imputing NaN for remainder: {error}'
+            )
+        else:
+          # 'impute_nan': stop and leave remainder as NaN.
+          logging.warning(
+              f'Bad state encountered, imputing NaN for remainder of'
+              f' {task_id=}: {error}'
+          )
+          return
+
+  def _run_attempt(self, task_id: int, *, attempt: int = 0) -> None:
+    """Execute a single simulation attempt for a task.
+
+    Args:
+      task_id: integer task ID to run.
+      attempt: retry attempt number (0 for the first try). Used to offset the
+        RNG seed so each retry uses a different random trajectory.
+
+    Raises:
+      BadStateError: if NaN is detected in state or outputs.
+    """
+    assert self.model is not None  # checked in run()
     init_time_index, realization_start, _ = (
         self._decompose_task_id(task_id)
     )
@@ -416,22 +511,7 @@ class InferenceRunner:
         state, commited_steps = pickle.load(f)
     else:
       logging.info(f'no state checkpoint found for task {task_id=}')
-      if self.ensemble_size is not None:
-        base_key = jax.random.key(self.random_seed)
-        if self.ensemble_batch_size == 1:
-          rng = cx.field(jax.random.fold_in(base_key, task_id))
-        else:
-          # Use individual task_ids for each realization in the batch.
-          # This matches the RNG sequence of the unbatched execution setup.
-          task_ids = (
-              realization_start
-              + np.arange(self.ensemble_batch_size)
-              + init_time_index * self.ensemble_size
-          )
-          keys = jax.vmap(jax.random.fold_in, (None, 0))(base_key, task_ids)
-          rng = cx.field(keys)
-      else:
-        rng = None
+      rng = self._make_rng(task_id, init_time_index, realization_start, attempt)
 
       # TODO(shoyer): Can we get the number of time-steps to include in model
       # inputs from the model (or at least an InferenceRunner property) instead
@@ -473,7 +553,10 @@ class InferenceRunner:
       data = xarray_utils.model_dynamic_inputs_from_xarray(
           xarray_inputs, self.model
       )
-      if self.bad_state_strategy != 'ignore':
+      if (
+          self.check_dynamic_inputs_data
+          and self.bad_state_strategy != 'ignore'
+      ):
         check_pytree_for_bad_state(data, f'dynamic inputs at {output_step=}')
       keys = {k: list(v) for k, v in data.items()}
       logging.info(f'dynamic inputs ready: {keys}')
@@ -513,51 +596,40 @@ class InferenceRunner:
     dynamic_inputs_task.submit(commited_steps)
     write_step_timer = timing.Timer()
 
-    try:
-      for steps_written in range(
-          commited_steps, self.total_steps, self.max_steps_per_write
+    for steps_written in range(
+        commited_steps, self.total_steps, self.max_steps_per_write
+    ):
+      write_step_timer.begin_step()
+      output_buffer = []
+      chunk_end_step = min(
+          steps_written + self.max_steps_per_write, self.total_steps
+      )
+
+      for step_start in range(
+          steps_written, chunk_end_step, self.steps_per_unroll
       ):
-        write_step_timer.begin_step()
-        output_buffer = []
-        chunk_end_step = min(
-            steps_written + self.max_steps_per_write, self.total_steps
-        )
+        dynamic_inputs, query_slice = dynamic_inputs_task.get()
+        if step_start + self.steps_per_unroll < self.total_steps:
+          dynamic_inputs_task.submit(step_start + self.steps_per_unroll)
 
-        for step_start in range(
-            steps_written, chunk_end_step, self.steps_per_unroll
-        ):
-          dynamic_inputs, query_slice = dynamic_inputs_task.get()
-          if step_start + self.steps_per_unroll < self.total_steps:
-            dynamic_inputs_task.submit(step_start + self.steps_per_unroll)
-
-          logging.info(f'{dynamic_inputs=}')
-          state, trajectory_slice = unroll(state, dynamic_inputs, query_slice)
-          output_buffer.append(device_put_to_cpu(trajectory_slice))
-
-        commit_chunk_task.wait()
-        commit_chunk_task.submit(state, output_buffer, task_id, steps_written)
-        write_step_timer.finish_step()
-
-        logging.info(
-            f'write step took {write_step_timer.last:.3g}s '
-            f'({unroll.timer.total:.3g}s for compute, '
-            f'{dynamic_inputs_task.timer.total:.3g}s for dynamic inputs, '
-            f'{commit_chunk_task.timer.last:.3g}s for commit chunk)'
-        )
-        dynamic_inputs_task.timer.reset_total()
-        unroll.timer.reset_total()
+        logging.info(f'{dynamic_inputs=}')
+        state, trajectory_slice = unroll(state, dynamic_inputs, query_slice)
+        output_buffer.append(device_put_to_cpu(trajectory_slice))
 
       commit_chunk_task.wait()
+      commit_chunk_task.submit(state, output_buffer, task_id, steps_written)
+      write_step_timer.finish_step()
 
-    except BadStateError as error:
-      if self.bad_state_strategy == 'raise':
-        error.add_note(f'{task_id=} failed')
-        raise
-      else:
-        logging.warning(
-            f'Bad state encountered, imputing NaN for remainder of {task_id=}:'
-            f' {error}'
-        )
+      logging.info(
+          f'write step took {write_step_timer.last:.3g}s '
+          f'({unroll.timer.total:.3g}s for compute, '
+          f'{dynamic_inputs_task.timer.total:.3g}s for dynamic inputs, '
+          f'{commit_chunk_task.timer.last:.3g}s for commit chunk)'
+      )
+      dynamic_inputs_task.timer.reset_total()
+      unroll.timer.reset_total()
+
+    commit_chunk_task.wait()
 
   def _commit_chunk(
       self,
