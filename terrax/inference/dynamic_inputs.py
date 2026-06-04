@@ -81,6 +81,26 @@ def _get_climatology(
   )
 
 
+def _align_datasets(
+    a: XarrayData, b: XarrayData
+) -> tuple[XarrayData, XarrayData]:
+  """Align two XarrayData objects using xarray.align with join='override'."""
+  # pytype: disable=bad-return-type
+  if isinstance(a, xarray.Dataset):
+    return xarray.align(a, b, join='override')
+  elif isinstance(a, xarray.DataTree):
+    return xarray.align(a, b, join='override')
+  # pytype: enable=bad-return-type
+  else:
+    aligned_a = {}
+    aligned_b = {}
+    for key in a:
+      aligned_a[key], aligned_b[key] = xarray.align(
+          a[key], b[key], join='override'
+      )
+    return aligned_a, aligned_b
+
+
 @dataclasses.dataclass(frozen=True)
 class DynamicInputs(abc.ABC, Generic[XarrayData]):
   """Base class for describing how to calculate dynamic inputs (i.e., forcings).
@@ -305,6 +325,15 @@ class Climatology(DynamicInputs[XarrayData]):
 
 @dataclasses.dataclass(frozen=True)
 class _AnomalyPersistenceForecast(_Forecast[XarrayData]):  # pylint: disable=missing-class-docstring
+
+  def __post_init__(self):
+    if self.full_data is None:
+      raise TypeError('full_data is required for AnomalyPersistenceForecast')
+    if self.climatology is None:
+      raise TypeError('climatology is required for AnomalyPersistenceForecast')
+    full_data, climatology = _align_datasets(self.full_data, self.climatology)
+    object.__setattr__(self, 'full_data', full_data)
+    object.__setattr__(self, 'climatology', climatology)
 
   @functools.cached_property
   def init_anomaly(self) -> XarrayData:
