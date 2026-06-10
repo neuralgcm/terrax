@@ -300,9 +300,11 @@ class Mesh:
     )
 
   def with_sharding_constraint(
-      self, inputs: typing.PyTreeState, schema: str | tuple[str, ...]
+      self, inputs: typing.PyTreeState, schema: str | tuple[str, ...] | None
   ) -> typing.PyTreeState:
     """Applies `schema` sharding constraint to `inputs`."""
+    if schema is None:
+      return inputs
     if isinstance(schema, tuple):
       if not schema:  # case when we processed all constraints
         return inputs

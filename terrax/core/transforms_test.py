@@ -1655,6 +1655,106 @@ class NestedTransformTest(parameterized.TestCase):
     expected = {'a': cx.field(jnp.array([10.0, 200.0]), x)}
     chex.assert_trees_all_equal(actual, expected)
 
+  def test_compute_masks_combine_and_reduce(self):
+    x = cx.SizedAxis('x', 2)
+    c = cx.SizedAxis('c', 2)
+    inputs = {
+        'a': cx.field(jnp.array([[1.0, jnp.nan], [2.0, 3.0]]), x, c),
+        'b': cx.field(jnp.array([[jnp.nan, 4.0], [5.0, 6.0]]), x, c),
+    }
+    with self.subTest('reduce_c'):
+      transform = transforms.ComputeMasks(
+          'isnan',
+          combine_method='any',
+          reduce_dims=('c',),
+          output_key='master_mask',
+      )
+      actual = transform(inputs)
+      expected = {'master_mask': cx.field(jnp.array([True, False]), x)}
+      chex.assert_trees_all_equal(actual, expected)
+
+    with self.subTest('reduce_x'):
+      transform = transforms.ComputeMasks(
+          'isnan',
+          combine_method='any',
+          reduce_dims=('x',),
+          output_key='master_mask',
+      )
+      actual = transform(inputs)
+      expected = {'master_mask': cx.field(jnp.array([True, True]), c)}
+      chex.assert_trees_all_equal(actual, expected)
+
+  def test_compute_masks_reduce_dims_follows_de_morgan(self):
+    """Dimensional reduction always follows De Morgan, not combine_method.
+
+    The reduce_op used when collapsing `reduce_dims` is determined solely by
+    the mask method via De Morgan's law:
+      - 'isnan'  → jnp.any  ("flag if *any* element along the dim is NaN")
+      - 'notnan' → jnp.all  ("flag only if *all* elements along the dim are ok")
+    """
+    x = cx.SizedAxis('x', 2)
+    c = cx.SizedAxis('c', 2)
+    inputs = {
+        # x=0: one NaN; x=1: clean
+        'a': cx.field(jnp.array([[1.0, jnp.nan], [2.0, 3.0]]), x, c),
+        # x=0: one NaN; x=1: all NaN
+        'b': cx.field(jnp.array([[jnp.nan, 4.0], [jnp.nan, jnp.nan]]), x, c),
+    }
+
+    with self.subTest('isnan_combine_all'):
+      transform = transforms.ComputeMasks(
+          'isnan',
+          combine_method='all',
+          reduce_dims=('c',),
+          output_key='master_mask',
+      )
+      actual = transform(inputs)
+      # isnan + combine='all': reduce_op should be jnp.any (De Morgan).
+      # Per-key masks after reduce: a→[True, False], b→[True, True].
+      # combine='all': [True & True, False & True] = [True, False].
+      expected = {'master_mask': cx.field(jnp.array([True, False]), x)}
+      chex.assert_trees_all_equal(actual, expected)
+
+    with self.subTest('notnan_combine_any'):
+      transform = transforms.ComputeMasks(
+          'notnan',
+          combine_method='any',
+          reduce_dims=('c',),
+          output_key='master_mask',
+      )
+      actual = transform(inputs)
+      # notnan + combine='any': reduce_op should be jnp.all (De Morgan).
+      # Per-key masks after reduce: a→[False, True], b→[False, False].
+      # combine='any' (logical_or): [F|F, T|F] = [False, True].
+      expected = {'master_mask': cx.field(jnp.array([False, True]), x)}
+      chex.assert_trees_all_equal(actual, expected)
+
+  def test_where_include_remaining(self):
+    x = cx.SizedAxis('x', 2)
+    inputs = {
+        'mask': cx.field(jnp.array([True, False]), x),
+        'a': cx.field(jnp.array([1.0, 2.0]), x),
+        'untouched': cx.field(jnp.array([5.0, 5.0]), x),
+    }
+    transform_true = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.ScaleFields(cx.field(10.0)),
+    ])
+    transform_false = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.ScaleFields(cx.field(100.0)),
+    ])
+    transform = transforms.Where(
+        'mask', transform_true, transform_false, include_remaining=True
+    )
+    actual = transform(inputs)
+    expected = {
+        'a': cx.field(jnp.array([10.0, 200.0]), x),
+        'mask': cx.field(jnp.array([True, False]), x),
+        'untouched': cx.field(jnp.array([5.0, 5.0]), x),
+    }
+    chex.assert_trees_all_equal(actual, expected)
+
   def test_elementwise_binary_op_custom_types(self):
 
     time = jdt.Datetime.from_isoformat('1993-03-21:03:04:12')

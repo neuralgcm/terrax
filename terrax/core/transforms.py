@@ -139,6 +139,32 @@ def _masked_to_mean(x: cx.Field, mask: cx.Field) -> cx.Field:
   return result.tag(mask_coord)
 
 
+# TODO(dkochkov): Consider moving this to coordax.
+def _align_axes_order(
+    *axis_order: str | cx.Coordinate,
+    reference: cx.Coordinate | cx.Field,
+    allow_missing: bool = False,
+) -> tuple[str | cx.Coordinate, ...]:
+  """Aligns the sequence of axes/coordinates to match their order in reference."""
+  ref_dims = reference.dims
+  ref_dim_indices = {d: i for i, d in enumerate(ref_dims)}
+
+  valid_axes = []
+  valid_indices = []
+  for ax in axis_order:
+    ax_dims = (ax,) if isinstance(ax, str) else ax.dims
+    indices = [ref_dim_indices[d] for d in ax_dims if d in ref_dim_indices]
+    if not indices:
+      if not allow_missing:
+        raise ValueError(f'Axis {ax} not found in reference dims {ref_dims}')
+    else:
+      valid_axes.append(ax)
+      valid_indices.append(min(indices))
+
+  combined = sorted(zip(valid_indices, valid_axes), key=lambda x: x[0])
+  return tuple(ax for _, ax in combined)
+
+
 ApplyMaskMethods = (
     Literal['zero_multiply', 'nan_to_0', 'nan_to_mean', 'set_nan']
     | Callable[[cx.Field, cx.Field], cx.Field]
@@ -167,6 +193,7 @@ COMPUTE_MASK_FNS = {
     'below': lambda x, t: cx.cmap(lambda x: x < t)(x),
     'as_bool': lambda x, t: x.astype(jnp.bool),
 }
+_DE_MORGAN_INVERTS = ('notnan', 'notinf')
 
 
 def get_partial_jnp_fn(name, **kwargs):
@@ -1197,7 +1224,6 @@ class ClipWavenumbers(PytreeFieldTransformABC):
     for grid, n_clip in self.wavenumbers_for_grid.items():
       if all(ax in field.axes.values() for ax in grid.axes):
         return grid.clip_wavenumbers(field, n_clip)
-    
     if self.skip_missing:
       return field
     else:
@@ -1313,7 +1339,16 @@ class ComputeMasks(PytreeTransformABC):
   Args:
     compute_mask_method: String specifying the method to compute bool mask.
     threshold_value: Value used by threshold-based `compute_mask_method`s.
-    mask_keys: Keys to generate masks for. Defaults to all key in ``inputs``.
+    mask_keys: Keys to generate masks for. Defaults to all keys in ``inputs``.
+    combine_method: If specified, combines per-key masks into a single mask
+      using ``'any'`` (logical or) or ``'all'`` (logical and). Requires
+      ``output_key`` to be set.
+    reduce_dims: Dimensions to reduce over within each per-key mask. The
+      reduction operation is determined by the ``compute_mask_method`` via
+      De Morgan's law (e.g. ``jnp.any`` for ``'isnan'``, ``jnp.all`` for
+      ``'notnan'``).
+    output_key: Key for the combined output mask. Required when
+      ``combine_method`` is set.
 
   Examples:
     >>> import coordax as cx
@@ -1328,16 +1363,50 @@ class ComputeMasks(PytreeTransformABC):
   compute_mask_method: ComputeMaskMethods = 'as_bool'
   threshold_value: float | None = None
   mask_keys: str | tuple[str, ...] | None = None
+  combine_method: Literal['any', 'all'] | None = None
+  reduce_dims: tuple[str | cx.Coordinate, ...] | None = None
+  output_key: str | None = None
+
+  def __post_init__(self):
+    if self.combine_method is not None and self.output_key is None:
+      raise ValueError(
+          '`output_key` must be specified when `combine_method` is not None.'
+      )
+    if self.combine_method is None and self.output_key is not None:
+      raise ValueError(
+          '`output_key` cannot be specified when `combine_method` is None.'
+      )
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     is_str = lambda x: isinstance(x, str)
     mask_keys = (self.mask_keys,) if is_str(self.mask_keys) else self.mask_keys
     if mask_keys is None:
       mask_keys = inputs.keys()
-    compute_mask_fn = COMPUTE_MASK_FNS[self.compute_mask_method]
-    return {
-        k: compute_mask_fn(inputs[k], self.threshold_value) for k in mask_keys
-    }
+
+    mask_method = self.compute_mask_method
+    combine_method = self.combine_method
+    compute_mask_fn = COMPUTE_MASK_FNS[mask_method]
+
+    reduce_op = jnp.all if mask_method in _DE_MORGAN_INVERTS else jnp.any
+
+    outputs = {}
+    for k in mask_keys:
+      m = compute_mask_fn(inputs[k], self.threshold_value)
+      if self.reduce_dims is not None:
+        axes = _align_axes_order(
+            *self.reduce_dims, reference=m, allow_missing=True
+        )
+        if axes:
+          m = cx.cmap(reduce_op)(m.untag(*axes))
+      outputs[k] = m
+
+    if combine_method is not None:
+      if not outputs:
+        raise ValueError('No masks computed to combine.')
+      combine = jnp.logical_and if combine_method == 'all' else jnp.logical_or
+      combined = functools.reduce(cx.cmap(combine), outputs.values())
+      return {self.output_key: combined}
+    return outputs
 
 
 @nnx.dataclass
@@ -2276,6 +2345,7 @@ class Where(TransformABC):
   mask_key: str
   true_transform: TransformABC = nnx.data()
   false_transform: TransformABC = nnx.data()
+  include_remaining: bool = False
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     if self.mask_key not in inputs:
@@ -2291,6 +2361,8 @@ class Where(TransformABC):
     results = {}
     for k in set(true_outputs.keys()) - {self.mask_key}:
       results[k] = where_fn(mask, true_outputs[k], false_outputs[k])
+    if self.include_remaining:
+      results.update({k: v for k, v in inputs.items() if k not in results})
     return results
 
 
