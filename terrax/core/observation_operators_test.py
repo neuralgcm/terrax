@@ -29,6 +29,7 @@ from terrax.core import pytree_utils
 from terrax.core import standard_layers
 from terrax.core import towers
 from terrax.core import transforms
+from terrax.core import typing as terrax_typing
 
 
 class DataObservationOperatorsTest(parameterized.TestCase):
@@ -112,20 +113,37 @@ class DataObservationOperatorsTest(parameterized.TestCase):
     ):
       operator.observe(inputs={}, query=query)
 
-  def test_raises_on_field_in_query(self):
+  def test_field_query_passes_through(self):
     coord = cx.LabeledAxis('rel_x', np.arange(7))
+    fields = {'a': cx.field(np.ones(7), coord)}
+    operator = observation_operators.DataObservationOperator(fields)
+    injected_x = cx.field(np.linspace(0, np.pi, 7), coord)
+    query = {'a': coord, 'x': injected_x}
+    actual = operator.observe(inputs={}, query=query)
+    expected = {'a': fields['a'], 'x': injected_x}
+    chex.assert_trees_all_equal(actual, expected)
+
+  def test_auxiliary_entries_excluded(self):
+    coord = cx.LabeledAxis('x', np.arange(5))
     fields = {
-        'a': cx.field(np.ones(7), coord),
-        'x': cx.field(np.linspace(0, np.pi, 7), coord),
+        'a': cx.field(np.ones(5), coord),
+        'b': cx.field(np.arange(5, dtype=float), coord),
     }
     operator = observation_operators.DataObservationOperator(fields)
-    query = {'a': coord, 'x': fields['x'] + 10.0}
-    with self.assertRaisesWithLiteralMatch(
-        ValueError,
-        'DataObservationOperator only supports coordinate queries, got'
-        f' {query["x"]}',
-    ):
-      operator.observe(inputs={}, query=query)
+    query = {'a': coord, 'b': terrax_typing.Auxiliary(coord)}
+    actual = operator.observe(inputs={}, query=query)
+    self.assertSetEqual(set(actual.keys()), {'a'})
+    chex.assert_trees_all_equal(actual, {'a': fields['a']})
+
+  def test_auxiliary_field_excluded(self):
+    coord = cx.LabeledAxis('x', np.arange(3))
+    fields = {'a': cx.field(np.ones(3), coord)}
+    operator = observation_operators.DataObservationOperator(fields)
+    injected = cx.field(np.array([10.0, 20.0, 30.0]), coord)
+    query = {'a': coord, 'aux': terrax_typing.Auxiliary(injected)}
+    actual = operator.observe(inputs={}, query=query)
+    self.assertSetEqual(set(actual.keys()), {'a'})
+    chex.assert_trees_all_equal(actual, {'a': fields['a']})
 
 
 class TransformObservationOperatorTest(parameterized.TestCase):
@@ -177,6 +195,101 @@ class TransformObservationOperatorTest(parameterized.TestCase):
     self.assertSetEqual(set(actual.keys()), set(query.keys()))
     self.assertEqual(cx.get_coordinate(actual['evap_rate']), self.lon_lat_grid)
     self.assertEqual(cx.get_coordinate(actual['turbulence_index']), full_coord)
+
+  def test_fallback_transform_resolution(self):
+    station_coord = cx.LabeledAxis('station', ['A', 'B'])
+    prescribed_snow_depth = cx.field(np.array([2.5, 4.0]), station_coord)
+    prescribed_state = {'snow_depth': prescribed_snow_depth}
+
+    operator = observation_operators.TransformObservationOperator(
+        transform=transforms.Identity(),
+        requested_fields_from_query=('snow_depth',),
+        fallback_transform=transforms.PrescribedFields(prescribed_state),
+    )
+    inputs = {'passthrough': cx.field(np.array([1.0, 2.0]), station_coord)}
+
+    with self.subTest('snow_depth_from_query'):
+      injected_snow_depth = cx.field(np.array([10.0, 20.0]), station_coord)
+      query = {
+          'passthrough': station_coord,
+          'snow_depth': injected_snow_depth,
+      }
+      actual = operator.observe(inputs=inputs, query=query)
+      expected = {
+          'passthrough': cx.field(np.array([1.0, 2.0]), station_coord),
+          'snow_depth': injected_snow_depth,
+      }
+      chex.assert_trees_all_close(actual, expected)
+
+    with self.subTest('snow_depth_from_fallback'):
+      query = {'passthrough': station_coord, 'snow_depth': station_coord}
+      actual = operator.observe(inputs=inputs, query=query)
+      expected = {
+          'passthrough': cx.field(np.array([1.0, 2.0]), station_coord),
+          'snow_depth': prescribed_snow_depth,
+      }
+      chex.assert_trees_all_close(actual, expected)
+
+  def test_fallback_excluded_when_not_in_query(self):
+    """Fallback fields not in the query are Auxiliary and excluded from output."""
+    station_coord = cx.LabeledAxis('station', ['A', 'B'])
+    prescribed_elevation = cx.field(np.array([100.0, 200.0]), station_coord)
+
+    # The transform uses elevation internally but the user only queries 'result'
+    operator = observation_operators.TransformObservationOperator(
+        transform=transforms.Identity(),
+        requested_fields_from_query=('elevation',),
+        fallback_transform=transforms.PrescribedFields(
+            {'elevation': prescribed_elevation}
+        ),
+    )
+    inputs = {'result': cx.field(np.array([1.0, 2.0]), station_coord)}
+    query = {'result': station_coord}
+    actual = operator.observe(inputs=inputs, query=query)
+    # elevation was needed internally but not queried → excluded.
+    self.assertSetEqual(set(actual.keys()), {'result'})
+
+  def test_fallback_included_when_queried_as_coordinate(self):
+    """Fallback fields queried as Coordinate appear in output."""
+    station_coord = cx.LabeledAxis('station', ['A', 'B'])
+    prescribed_elevation = cx.field(np.array([100.0, 200.0]), station_coord)
+
+    operator = observation_operators.TransformObservationOperator(
+        transform=transforms.Identity(),
+        requested_fields_from_query=('elevation',),
+        fallback_transform=transforms.PrescribedFields(
+            {'elevation': prescribed_elevation}
+        ),
+    )
+    inputs = {'result': cx.field(np.array([1.0, 2.0]), station_coord)}
+    # User explicitly queries elevation as a Coordinate → wants it in output.
+    query = {'result': station_coord, 'elevation': station_coord}
+    actual = operator.observe(inputs=inputs, query=query)
+    expected = {
+        'result': cx.field(np.array([1.0, 2.0]), station_coord),
+        'elevation': prescribed_elevation,
+    }
+    chex.assert_trees_all_close(actual, expected)
+
+  def test_fallback_excluded_when_queried_as_auxiliary(self):
+    """Fallback fields queried as Auxiliary(Coordinate) are excluded."""
+    station_coord = cx.LabeledAxis('station', ['A', 'B'])
+    prescribed_elevation = cx.field(np.array([100.0, 200.0]), station_coord)
+
+    operator = observation_operators.TransformObservationOperator(
+        transform=transforms.Identity(),
+        requested_fields_from_query=('elevation',),
+        fallback_transform=transforms.PrescribedFields(
+            {'elevation': prescribed_elevation}
+        ),
+    )
+    inputs = {'result': cx.field(np.array([1.0, 2.0]), station_coord)}
+    query = {
+        'result': station_coord,
+        'elevation': terrax_typing.Auxiliary(station_coord),
+    }
+    actual = operator.observe(inputs=inputs, query=query)
+    self.assertSetEqual(set(actual.keys()), {'result'})
 
 
 class MultiObservationOperatorTest(parameterized.TestCase):

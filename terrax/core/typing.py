@@ -43,13 +43,51 @@ TimedeltaLike = str | np.timedelta64 | pd.Timestamp | datetime.timedelta
 ShapeFloatStruct = functools.partial(ShapeDtypeStruct, dtype=jnp.float32)
 Quantity = scales.Quantity
 
+T = TypeVar('T')
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclasses.dataclass
+class Auxiliary(Generic[T]):
+  """Wrapper indicating a supporting field/coord excluded from final output.
+
+  Use this to mark query entries that are needed for internal computation
+  (e.g., conditioning inputs for observation operators) but should not appear
+  in the returned observations. This enables a clean three-stage pipeline:
+
+  1. **Unwrap:** Use ``unwrap_auxiliary`` to extract the underlying spec.
+  2. **Compute:** Perform transforms using the unwrapped value.
+  3. **Filter:** Exclude keys whose original query entry was ``Auxiliary``.
+  """
+
+  spec: T
+
+  def tree_flatten(self):
+    return (self.spec,), None
+
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    del aux_data
+    return cls(children[0])
+
+
+def unwrap_auxiliary(spec: T | Auxiliary[T]) -> tuple[T, bool]:
+  """Returns underlying spec and a bool indicating if spec is Auxiliary."""
+  is_auxiliary = isinstance(spec, Auxiliary)
+  inner = spec.spec if is_auxiliary else spec  # pytype: disable=attribute-error
+  return inner, is_auxiliary
+
+
 #
 # Main structured API types.
 #
 Fields = dict[str, cx.Field]
 InputFields = dict[str, Fields]
 Observation = dict[str, dict[str, cx.Field]]
-Query = dict[str, cx.Coordinate | cx.Field]
+Query = dict[
+    str,
+    cx.Coordinate | cx.Field | Auxiliary[cx.Coordinate] | Auxiliary[cx.Field],
+]
 Queries = dict[str, Query]
 
 

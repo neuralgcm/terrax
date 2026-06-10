@@ -40,14 +40,16 @@ class ObservationOperatorABC(nnx.Module, abc.ABC):
 
 @dataclasses.dataclass
 class DataObservationOperator(ObservationOperatorABC):
-  """Operator that returns pre-computed fields for matching coordinate queries.
+  """Operator that returns pre-computed fields for matching queries.
 
-  This observation operator matches keys and coordinates in the pre-computed
-  dictionary of `coordax.Field`s and the query to the observation operator. This
-  operator requires that all `query` entries are of `coordax.Coordinate` type.
+  Resolves each query entry against the pre-computed ``fields`` dictionary:
+
+  - ``Coordinate`` query → selects/slices from the matching field.
+  - ``Field`` query → passes the query value through as-is.
+  - ``Auxiliary(...)`` query → skipped (excluded from output).
 
   Attributes:
-    fields: A dictionary of `coordax.Field`s to return in the observation.
+    fields: A dictionary of ``coordax.Field``s to match against.
   """
 
   fields: dict[str, cx.Field]
@@ -57,54 +59,116 @@ class DataObservationOperator(ObservationOperatorABC):
       inputs: dict[str, cx.Field],
       query: typing.Query,
   ) -> dict[str, cx.Field]:
-    """Returns observations for `query` matched against `self.fields`."""
+    """Returns observations for ``query`` matched against ``self.fields``."""
     del inputs  # unused.
     observations = {}
     valid_keys = list(self.fields.keys())
-    for k, query_coord in query.items():
-      if k not in valid_keys:
-        raise ValueError(f'query contains {k=} not in {valid_keys}')
-      if not cx.is_coord(query_coord):
-        raise ValueError(
-            'DataObservationOperator only supports coordinate queries, got'
-            f' {query_coord}'
-        )
-      field = self.fields[k]
-      if field.coordinate == query_coord:
-        result = field
+    for k, raw_entry in query.items():
+      entry, is_aux = typing.unwrap_auxiliary(raw_entry)
+      if is_aux:
+        continue
+      if cx.is_field(entry):
+        observations[k] = entry
+      elif cx.is_coord(entry):
+        if k not in valid_keys:
+          raise ValueError(f'query contains {k=} not in {valid_keys}')
+        field = self.fields[k]
+        if field.coordinate == entry:
+          result = field
+        else:
+          try:
+            result = field.sel({field.coordinate: entry})
+          except KeyError as e:
+            raise ValueError(
+                f'query coordinate for {k!r} is not a valid slice of field:\n'
+                f'{entry}\nvs\n{field.coordinate}'
+            ) from e
+        observations[k] = result
       else:
-        try:
-          result = field.sel({field.coordinate: query_coord})
-        except KeyError as e:
-          raise ValueError(
-              f'query coordinate for {k!r} is not a valid slice of field:\n'
-              f'{query_coord}\nvs\n{field.coordinate}'
-          ) from e
-      observations[k] = result
-
+        raise ValueError(
+            f'Unsupported query entry type for {k!r}: {type(entry)}'
+        )
     return observations
 
 
 @dataclasses.dataclass
 class TransformObservationOperator(ObservationOperatorABC):
-  """Operator that returns transformed inputs as observations."""
+  """Operator that transforms inputs and resolves queries from the output.
+
+  Pipeline:
+
+  1. Collect ``Field`` entries from the query as direct values.
+  2. For ``requested_fields_from_query`` keys missing from query fields,
+     run ``fallback_transform`` to produce them.
+  3. Run ``transform`` on ``inputs`` augmented with the resolved fields.
+  4. Build an effective query where fallback-produced fields replace their
+     original coordinate entries (preserving ``Auxiliary`` status), and keys
+     absent from the original query are added as ``Auxiliary``.
+  5. Delegate all output resolution to ``DataObservationOperator``.
+
+  Attributes:
+    transform: Transform to apply to inputs.
+    requested_fields_from_query: Keys that the transform expects as inputs
+      (not outputs). Values come from ``Field`` entries in the query, or from
+      ``fallback_transform`` when the query has a ``Coordinate`` or omits the
+      key entirely.
+    fallback_transform: Optional transform that produces missing requested
+      fields from ``inputs`` and available query fields.
+  """
 
   transform: typing.Transform
   requested_fields_from_query: tuple[str, ...] = ()
+  fallback_transform: typing.Transform | None = None
 
   def observe(
       self,
       inputs: dict[str, cx.Field],
       query: typing.Query,
   ) -> dict[str, cx.Field]:
-    q_fields = {k: query.get(k, None) for k in self.requested_fields_from_query}
-    bad_fields = {k: v for k, v in q_fields.items() if not cx.is_field(v)}
-    if bad_fields:
-      raise ValueError(f'Got {query=} that contains {bad_fields=}.')
-    data_obserator = DataObservationOperator(self.transform(inputs | q_fields))
-    coord_queries = {k: v for k, v in query.items() if cx.is_coord(v)}
-    present_q_fields = {k: v for k, v in q_fields.items() if v is not None}
-    return data_obserator.observe({}, coord_queries) | present_q_fields
+    unwrapped_query = {}
+    auxiliary_keys = set()
+    for k, v in query.items():
+      inner, is_aux = typing.unwrap_auxiliary(v)
+      unwrapped_query[k] = inner
+      if is_aux:
+        auxiliary_keys.add(k)
+    q_fields = {k: v for k, v in unwrapped_query.items() if cx.is_field(v)}
+
+    missing = [k for k in self.requested_fields_from_query if k not in q_fields]
+    fallback_fields = {}
+    if missing:
+      if self.fallback_transform is None:
+        raise ValueError(
+            f'Missing fields: {missing}, and {self.fallback_transform=}'
+        )
+      fallback_outputs = self.fallback_transform(inputs | q_fields)
+      missing_in_fallback = [k for k in missing if k not in fallback_outputs]
+      if missing_in_fallback:
+        raise ValueError(
+            'fallback_transform did not resolve all missing requested fields. '
+            f'Missing: {missing_in_fallback}. '
+            f'All available: {list(fallback_outputs.keys())}'
+        )
+      fallback_fields = {k: fallback_outputs[k] for k in missing}
+
+    all_fields = q_fields | fallback_fields
+    observations = self.transform(inputs | all_fields)
+
+    # Build effective query for DataObservationOperator.
+    #    - Fallback fields for keys present in query: replace the coordinate
+    #      with the fallback field, preserving Auxiliary wrapping.
+    #    - Fallback fields for keys absent from query: add as Auxiliary.
+    effective_query = dict(query)
+    for k, field in fallback_fields.items():
+      if k in query:
+        if k in auxiliary_keys:
+          effective_query[k] = typing.Auxiliary(field)
+        else:  # passed as a coordinate in query, fill with fallback field.
+          effective_query[k] = field
+      else:
+        effective_query[k] = typing.Auxiliary(field)
+
+    return DataObservationOperator(observations).observe({}, effective_query)
 
 
 @dataclasses.dataclass

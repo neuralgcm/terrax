@@ -404,6 +404,8 @@ class TimeOffsetDiagnostic(TemporalDiagnosticModule):
       explicit 'timedelta' of type jdt.Timedelta is not provided in the inputs.
     include_dt_offset: Whether to include an additional diagnostic for the time
       since the last sub-interval update, useful for debugging.
+    output_mapping: Dict providing optional renaming for keys in diagnostic
+      values mapping default suffixed keys to user-specified ones.
     dt_mod_freq: Time since the last interval update.
     latest_update: The most recent values from `__call__`.
     past_values: The stored values for each `resolution` step into the past.
@@ -416,6 +418,7 @@ class TimeOffsetDiagnostic(TemporalDiagnosticModule):
   resolution: np.timedelta64 = nnx.static()
   default_timedelta: np.timedelta64 | None = nnx.static(default=None)
   include_dt_offset: bool = nnx.static(default=False)
+  output_mapping: dict[str, str] = nnx.static(default_factory=dict)
   dt_mod_freq: typing.Diagnostic = nnx.data(init=False)
   latest_update: dict[str, typing.Diagnostic] = nnx.data(init=False)
   offset_axis: coordinates.TimeDelta = nnx.static(init=False)
@@ -492,6 +495,7 @@ class TimeOffsetDiagnostic(TemporalDiagnosticModule):
         selected = cx.cmap(lambda x: x[index])(field.untag(self.offset_axis))
         # pylint: enable=cell-var-from-loop
         out_key = f'{k}_{key_suffix}' if key_suffix else k
+        out_key = self.output_mapping.get(out_key, out_key)
         values[out_key] = selected
 
     if self.include_dt_offset:

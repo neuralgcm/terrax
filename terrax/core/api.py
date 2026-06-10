@@ -749,6 +749,8 @@ def _unroll_for_queries(
   outputs_spec = {}  # contains flat coordinates spec for the final outputs.
   # pylint: disable=cell-var-from-loop
   for q, td in zip(queries, timedelta_coords, strict=True):
+    not_aux = lambda x: not isinstance(x, typing.Auxiliary)
+    q = pytree_utils.filter_nested_dict(not_aux, q)
     spec = jax.tree.map(lambda x: _out_spec(x, td), q, is_leaf=coord_or_field)
     outputs_spec = pytree_utils.merge_nested_dicts(outputs_spec, spec)
 

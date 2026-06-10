@@ -317,15 +317,16 @@ FinalizedQueriesSpec: TypeAlias = dict[str, dict[str, FinalizedQuerySpec]]
 
 
 def finalize_query_spec(
-    query_spec: cx.Coordinate | QuerySpec,
+    query_spec: cx.Coordinate | QuerySpec | typing.Auxiliary,
     source_coord: cx.Coordinate | None,
-) -> cx.Coordinate | FieldInQuerySpec[cx.Coordinate]:
+) -> cx.Coordinate | FieldInQuerySpec[cx.Coordinate] | typing.Auxiliary:
   """Returns a `query_spec` with CoordSpec components being finalized."""
+  query_spec, is_aux = typing.unwrap_auxiliary(query_spec)
   if isinstance(query_spec, FieldInQuerySpec):
-    if isinstance(query_spec.spec, CoordSpec):
-      return FieldInQuerySpec(finalize_spec(query_spec.spec, source_coord))
-    return FieldInQuerySpec(finalize_spec(query_spec.spec, source_coord))
-  return finalize_spec(query_spec, source_coord)
+    result = FieldInQuerySpec(finalize_spec(query_spec.spec, source_coord))
+  else:
+    result = finalize_spec(query_spec, source_coord)
+  return typing.Auxiliary(result) if is_aux else result
 
 
 def finalize_nested_queries_spec(
@@ -373,9 +374,17 @@ def finalize_nested_spec(
 
 
 def get_coord_types(
-    coordinate: cx.Coordinate | CoordSpec,
+    coordinate: cx.Coordinate
+    | CoordSpec
+    | OptionalSpec
+    | FieldInQuerySpec
+    | typing.Auxiliary,
 ) -> tuple[type[cx.Coordinate], ...]:
   """Returns tuple of coordinate types present in `coordinate`."""
+  while isinstance(
+      coordinate, (OptionalSpec, FieldInQuerySpec, typing.Auxiliary)
+  ):
+    coordinate = coordinate.spec  # in case of double wrapping Aux[FieldInQ].
   if isinstance(coordinate, CoordSpec):
     coordinate = coordinate.coord
 
@@ -399,20 +408,21 @@ def get_nested_coord_types(
     nested_specs: Any,
 ) -> list[type[cx.Coordinate]]:
   """Returns list of unique coordinate types present in `nested_specs`."""
-  spec_types = (cx.Coordinate, CoordSpec, FieldInQuerySpec, OptionalSpec)
+  spec_types = (
+      cx.Coordinate,
+      CoordSpec,
+      FieldInQuerySpec,
+      OptionalSpec,
+      typing.Auxiliary,
+  )
   is_spec = lambda x: isinstance(x, spec_types)
   leaves = jax.tree.leaves(nested_specs, is_leaf=is_spec)
 
   types_dict = {}
   for leaf in leaves:
     if is_spec(leaf):
-      if isinstance(leaf, (OptionalSpec, FieldInQuerySpec)):
-        spec_leaf = leaf.spec
-      else:
-        spec_leaf = leaf
-      if isinstance(spec_leaf, (cx.Coordinate, CoordSpec)):
-        for c_type in get_coord_types(spec_leaf):
-          types_dict[c_type] = None
+      for c_type in get_coord_types(leaf):
+        types_dict[c_type] = None
 
   types = list(types_dict.keys())
   if cx.LabeledAxis in types:
