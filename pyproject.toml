@@ -6,8 +6,12 @@ build-backend = "setuptools.build_meta"
 packages = [
     "terrax",
     "terrax.atmosphere",
+    "terrax.auxiliary",
     "terrax.core",
+    "terrax.couplers",
+    "terrax.inference",
     "terrax.metrics",
+    "terrax.toy_model_examples",
     "terrax.training",
     "terrax.xreader",
 ]
@@ -15,7 +19,7 @@ packages = [
 [project]
 name = "terrax"
 description = "Terrax: Library for AI-first Earth System Modeling"
-version = "0.0.4"  # keep in sync with __version__ in terrax/__init__.py
+version = "0.0.5"  # keep in sync with __version__ in terrax/__init__.py
 authors = [
     {name = "Google LLC", email = "noreply@google.com"},
 ]
@@ -24,15 +28,15 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "coordax>=0.1.5",
-    "dinosaur @ git+https://github.com/neuralgcm/dinosaur.git",
+    "dinosaur>=1.3.6",
     "einops",
     "etils",
-    # TODO(shoyer): use pypi version when there is a newer release than 0.3.0
-    "fiddle @ git+https://github.com/google/fiddle.git",
+    "fiddle>=0.3.0",
+    # "fiddle @ git+https://github.com/google/fiddle.git",
     "flax>=0.12.0",
     "grain",
     "jax",
-    "jax-datetime @ git+https://github.com/google/jax-datetime.git",
+    "jax-datetime>=0.1.2",
     "jax-solar",
     "jaxlib",
     "numpy",
@@ -41,8 +45,7 @@ dependencies = [
     "pandas",
     "tqdm",
     "treescope",
-    # require dev version of xarray until 2025.09.0 release
-    "xarray @ git+https://github.com/pydata/xarray.git",
+    "xarray>=2026.4.0",
     "zarr>= 3.1.4",
 ]
 

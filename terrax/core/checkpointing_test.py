@@ -14,7 +14,7 @@
 
 """Tests for checkpointing routines."""
 
-import os.path
+import os
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -67,6 +67,11 @@ def build_model():
 class CheckpointingTest(parameterized.TestCase):
 
   def test_save_and_load_roundtrip(self):
+    if 'GITHUB_ACTIONS' in os.environ:
+      self.skipTest(
+          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
+          'serialization.'
+      )
     path = os.path.join(self.create_tempdir(), 'checkpoint')
     model_cfg = build_model.as_buildable()
     model = api.Model.from_fiddle_config(model_cfg)

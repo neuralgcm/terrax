@@ -138,6 +138,11 @@ class RunnerTest(parameterized.TestCase):
       field_in_queries_coord: cx.Coordinate | None = None,
       use_dynamic_query_inputs: bool = False,
   ):
+    if 'GITHUB_ACTIONS' in os.environ:
+      self.skipTest(
+          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
+          'serialization.'
+      )
     if ensemble_size is not None:
       assimilation_noise = random_processes.UniformUncorrelated.construct(
           minval=-0.1, maxval=0.1, coord=cx.Scalar(), rngs=nnx.Rngs(0)
