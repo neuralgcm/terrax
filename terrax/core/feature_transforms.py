@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+import functools
+from typing import Literal, Sequence
 
 import coordax as cx
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import jax_solar
@@ -216,3 +218,71 @@ class ParamFeatures(transforms.PytreeTransformABC):
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
         candidate = xarray_utils.field_from_xarray(da)
         feature.set_value(candidate.order_as(self.coords[key]).data)
+
+
+class ClimatologyFeatures(transforms.PytreeTransformABC):
+  """Returns climatological feature fields dynamically sliced by time."""
+
+  def __init__(
+      self,
+      coords: dict[str, cx.Coordinate],
+      *,
+      param_type: TransformParams | nnx.Param = TransformParams,
+      initializer: nnx.Initializer = nnx.initializers.zeros,
+      time_offset: np.timedelta64 = np.timedelta64(0, 's'),
+      rngs: nnx.Rngs,
+  ):
+    self.coords = coords
+    self.time_offset = time_offset
+    self.features = nnx.data({
+        k: param_type(initializer(rngs.params(), (366,) + c.shape))
+        for k, c in coords.items()
+    })
+
+  def _get_day_index(self, time: jdt.Datetime) -> typing.Array:
+    """Computes dayofyear index from Datetime."""
+    year = time.delta.days / 365.25  # estimate day of year.
+    day_idx = jnp.floor((year - jnp.floor(year)) * 365.25).astype(jnp.int32)
+    return day_idx
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    time = inputs['time']
+    if self.time_offset != np.timedelta64(0, 's'):
+      time = time + cx.field(jdt.to_timedelta(self.time_offset))
+
+    day_idx = cx.cpmap(self._get_day_index)(time)
+    slice_array = functools.partial(
+        jax.lax.dynamic_index_in_dim, axis=0, keepdims=False
+    )
+    slice_fn = cx.cmap(slice_array, out_axes='leading')
+
+    outputs = {}
+    for k, v in self.features.items():
+      outputs[k] = slice_fn(v[...], day_idx).tag(self.coords[k])
+    return outputs
+
+  def update_from_xarray(
+      self,
+      dataset: xarray.Dataset,
+      *,
+      reduce_hour_method: Literal['zero', 'mean'] = 'zero',
+      **kwargs,
+  ):
+    """Updates `self.features` with data from dataset."""
+    sim_units = kwargs['sim_units']
+    day_axis = cx.LabeledAxis('dayofyear', 1 + np.arange(366))
+    for key, feature in self.features.items():
+      if key in dataset:
+        da = dataset[key]
+        if 'hour' in da.dims:
+          if reduce_hour_method == 'zero':
+            da = da.sel(hour=0)
+          elif reduce_hour_method == 'mean':
+            da = da.mean('hour')
+          else:
+            raise ValueError(f'Unsupported {reduce_hour_method=}')
+        data_units = units.parse_units(da.attrs['units'])
+        da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
+        candidate = xarray_utils.field_from_xarray(da, (cx.LabeledAxis,))
+        full_coord = cx.coords.compose(day_axis, self.coords[key])
+        feature.set_value(candidate.order_as(full_coord).data)

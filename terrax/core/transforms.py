@@ -1119,6 +1119,31 @@ class ShardFields(PytreeFieldTransformABC):
     return self.mesh.with_sharding_constraint(field, self.schema)
 
 
+class ShiftFields(PytreeTransformABC):
+  """Applies x + `self.shift` to all fields in ``inputs``.
+
+  Args:
+    shift: The coordax Field used to shift the inputs.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {'a': cx.field(jnp.ones(2))}
+    >>> out = transforms.ShiftFields(cx.field(2.0))(inputs)
+    >>> out['a'].data[0]
+    Array(3., dtype=float32)
+  """
+
+  def __init__(self, shift: cx.Field):
+    self.shift = TransformParams(shift)
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    shift = self.shift.get_value()
+    shift_fn = lambda x: x + shift
+    return {k: shift_fn(v) for k, v in inputs.items()}
+
+
 class ScaleFields(PytreeTransformABC):
   """Applies x * `self.scale` to all fields in ``inputs``.
 

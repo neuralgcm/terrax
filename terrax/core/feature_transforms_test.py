@@ -238,6 +238,17 @@ class FeatureTransformsTest(parameterized.TestCase):
       )
       self._test_feature_module(randomness_features, None)
 
+  def test_climatology_features(self):
+    grid = coordinates.LonLatGrid.TL31()
+    climatology_features = feature_transforms.ClimatologyFeatures(
+        coords={'sea_surface_temperature': grid},
+        rngs=nnx.Rngs(0),
+    )
+    self._test_feature_module(
+        climatology_features,
+        {'time': cx.field(jdt.to_datetime('2025-01-09T15:00'))},
+    )
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')
