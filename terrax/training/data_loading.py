@@ -282,10 +282,10 @@ def _get_sample_origins(
 
 
 def filter_inputs_by_queries(
-    inputs: typing.InputFields,
+    inputs: typing.NestedFields,
     queries_spec: data_specs.QueriesSpec | None,
     include_field_in_query: bool = False,
-) -> typing.InputFields:
+) -> typing.NestedFields:
   """Selects targets matching queries from inputs."""
   # TODO(dkochkov) This is a temporary simpler solution for the case where no
   # queries include dynamic fields. Eventually those should be excluded here and

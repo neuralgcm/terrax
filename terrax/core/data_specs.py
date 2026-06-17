@@ -446,7 +446,7 @@ def _maybe_unwrap_field_spec(spec: T | FieldInQuerySpec[T]) -> tuple[T, bool]:
 
 
 def validate_inputs(
-    inputs: dict[str, dict[str, cx.Coordinate]] | typing.InputFields,
+    inputs: dict[str, dict[str, cx.Coordinate]] | typing.NestedFields,
     in_spec: dict[str, dict[str, cx.Coordinate | CoordLikeSpec]],
 ):
   """Validates that `inputs` satisfy expectations of `in_spec`."""
@@ -479,7 +479,7 @@ def validate_inputs(
 
 
 def construct_query(
-    inputs: typing.InputFields,
+    inputs: typing.NestedFields,
     queries_spec: dict[str, dict[str, cx.Coordinate | cx.Field | QuerySpec]],
 ) -> typing.Queries:
   """Constructs query from data and OutputDataSpecs."""

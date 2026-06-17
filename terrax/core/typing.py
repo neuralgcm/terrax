@@ -82,13 +82,14 @@ def unwrap_auxiliary(spec: T | Auxiliary[T]) -> tuple[T, bool]:
 # Main structured API types.
 #
 Fields = dict[str, cx.Field]
-InputFields = dict[str, Fields]
+NestedFields = dict[str, Fields]
 Observation = dict[str, dict[str, cx.Field]]
 Query = dict[
     str,
     cx.Coordinate | cx.Field | Auxiliary[cx.Coordinate] | Auxiliary[cx.Field],
 ]
 Queries = dict[str, Query]
+InputFields = NestedFields  # Deprecated. Use NestedFields instead.
 
 
 #

@@ -19,12 +19,12 @@ import math
 import time
 from typing import Any, TypeVar, Union
 
-from dinosaur import typing
 import einops
 import jax
 from jax.experimental import mesh_utils
 import jax.numpy as jnp
 import numpy as np
+from terrax.core import typing
 
 
 # pylint: disable=logging-fstring-interpolation
@@ -32,11 +32,12 @@ import numpy as np
 
 Array = Union[np.ndarray, jnp.ndarray]
 PyTree = Any
-Forcing = typing.Forcing
+Targets = typing.NestedFields
+DynamicInputs = typing.NestedFields
 ExperimentState = Any
 LossValue = Array
 TrainStepFunction = Callable[
-    [ExperimentState, int, PyTree, Forcing],
+    [ExperimentState, int, Targets, DynamicInputs],
     tuple[ExperimentState, LossValue],
 ]
 
@@ -245,7 +246,13 @@ def create_spmd_mesh(sizes: dict[str, int]) -> jax.sharding.Mesh:
     logical_mesh_shape = tuple(
         sizes[dim] for dim in ['ensemble', 'z', 'x', 'y']
     )
-    rearrangement = _TPU_LAYOUT_REARRANGEMENTS[topology][logical_mesh_shape]
+    try:
+      rearrangement = _TPU_LAYOUT_REARRANGEMENTS[topology][logical_mesh_shape]
+    except KeyError:
+      if logical_mesh_shape == (1, 1, 1, 1):
+        rearrangement = 'b0 b1 b2 -> (b0 b1 b2) () () () ()'
+      else:
+        raise
 
     abbreviated_sizes = {
         'e': sizes['ensemble'],

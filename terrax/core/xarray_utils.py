@@ -230,7 +230,7 @@ def read_from_xarray(
     nested_data: dict[str, xarray.Dataset],
     in_spec: dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]],
     strict_matches: bool = True,
-) -> typing.InputFields:
+) -> typing.NestedFields:
   """Reads `nested_data` from xarray according to `in_spec`."""
 
   def _get_field(da: xarray.DataArray, spec: cx.Coordinate | CoordSpec):
