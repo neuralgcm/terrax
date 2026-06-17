@@ -1842,6 +1842,90 @@ class ToNodal(PytreeFieldTransformABC):
 
 
 @nnx.dataclass
+class NodalToModal(PytreeTransformABC):
+  """Converts nodal fields to modal, passing non-nodal fields through.
+
+  Shortcut for ``FilterByCoord(types=LonLatGrid)`` + ``ToModal``.
+
+  Args:
+    ylm_map: ``FixedYlmMapping`` or ``YlmMapper``.
+    include_remaining: If ``True``, non-nodal fields are included
+      in the output unchanged.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import coordinates
+    >>> from terrax.core import spherical_harmonics
+    >>> from terrax.core import transforms
+    >>> grid = coordinates.LonLatGrid.T21()
+    >>> ylm = coordinates.SphericalHarmonicGrid.T21()
+    >>> ylm_map = spherical_harmonics.FixedYlmMapping(grid, ylm)
+    >>> inputs = {'u': cx.field(jnp.ones(grid.shape), grid)}
+    >>> out = transforms.NodalToModal(ylm_map)(inputs)
+    >>> cx.get_coordinate(out['u']) == ylm
+    True
+  """
+
+  ylm_map: spherical_harmonics.FixedYlmMapping | spherical_harmonics.YlmMapper
+  include_remaining: bool = False
+
+  def __post_init__(self):
+    self._filter = FilterByCoord(types=coordinates.LonLatGrid)
+    self._transform = ToModal(self.ylm_map)
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    to_transform = self._filter(inputs)
+    if self.include_remaining:
+      keep_as_is = {k: v for k, v in inputs.items() if k not in to_transform}
+    else:
+      keep_as_is = {}
+    return self._transform(to_transform) | keep_as_is
+
+
+@nnx.dataclass
+class ModalToNodal(PytreeTransformABC):
+  """Converts modal fields to nodal, passing non-modal fields through.
+
+  Shortcut for ``FilterByCoord(types=SphericalHarmonicGrid)`` + ``ToNodal``.
+
+  Args:
+    ylm_map: ``FixedYlmMapping`` or ``YlmMapper``.
+    include_remaining: If ``True``, non-modal fields are included
+      in the output unchanged.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import coordinates
+    >>> from terrax.core import spherical_harmonics
+    >>> from terrax.core import transforms
+    >>> grid = coordinates.LonLatGrid.T21()
+    >>> ylm = coordinates.SphericalHarmonicGrid.T21()
+    >>> ylm_map = spherical_harmonics.FixedYlmMapping(grid, ylm)
+    >>> inputs = {'u': cx.field(jnp.ones(ylm.shape), ylm)}
+    >>> out = transforms.ModalToNodal(ylm_map)(inputs)
+    >>> cx.get_coordinate(out['u']) == grid
+    True
+  """
+
+  ylm_map: spherical_harmonics.FixedYlmMapping | spherical_harmonics.YlmMapper
+  include_remaining: bool = False
+
+  def __post_init__(self):
+    self._filter = FilterByCoord(types=coordinates.SphericalHarmonicGrid)
+    self._transform = ToNodal(self.ylm_map)
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    to_transform = self._filter(inputs)
+    if self.include_remaining:
+      keep_as_is = {k: v for k, v in inputs.items() if k not in to_transform}
+    else:
+      keep_as_is = {}
+    return self._transform(to_transform) | keep_as_is
+
+
+@nnx.dataclass
 class ToModalWithDerivatives(nnx.Pytree):
   """Helper module that returns filtered grads and laplacians of input fields.
 

@@ -123,7 +123,9 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
     if inputs_are_modal:
       self.pre_process = lambda x: x
     else:
-      self.pre_process = transforms.ToModal(ylm_map)
+      self.pre_process = transforms.NodalToModal(
+          ylm_map, include_remaining=True
+      )
 
   def _extract_features(
       self,
@@ -184,11 +186,11 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
     return features
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    inputs = self.pre_process(inputs)
     if self.skip_non_modal:
       inputs = transforms.FilterByCoord(
           types=coordinates.SphericalHarmonicGrid
       )(inputs)
-    inputs = self.pre_process(inputs)
     nodal_features = self._extract_features(inputs)
     return nodal_features
 

@@ -599,6 +599,56 @@ class TransformsTest(parameterized.TestCase):
       actual_out_grid = cx.get_coordinate(to_nodal(linear_inputs)['u'])
       self.assertEqual(actual_out_grid, grid)
 
+  def test_nodal_to_modal(self):
+    nodal_grid = coordinates.LonLatGrid.T21()
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    ylm_map = spherical_harmonics.FixedYlmMapping(nodal_grid, ylm_grid)
+    scalar_field = cx.field(1.0)
+    inputs = {
+        'u': cx.field(np.ones(nodal_grid.shape), nodal_grid),
+        's': scalar_field,
+    }
+
+    with self.subTest('include_remaining_false'):
+      nodal_to_modal = transforms.NodalToModal(ylm_map, include_remaining=False)
+      out = nodal_to_modal(inputs)
+      self.assertIn('u', out)
+      self.assertNotIn('s', out)
+      self.assertEqual(cx.get_coordinate(out['u']), ylm_grid)
+
+    with self.subTest('include_remaining_true'):
+      nodal_to_modal = transforms.NodalToModal(ylm_map, include_remaining=True)
+      out = nodal_to_modal(inputs)
+      self.assertIn('u', out)
+      self.assertIn('s', out)
+      self.assertEqual(cx.get_coordinate(out['u']), ylm_grid)
+      self.assertEqual(out['s'], scalar_field)
+
+  def test_modal_to_nodal(self):
+    nodal_grid = coordinates.LonLatGrid.T21()
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    ylm_map = spherical_harmonics.FixedYlmMapping(nodal_grid, ylm_grid)
+    scalar_field = cx.field(1.0)
+    inputs = {
+        'u': cx.field(np.ones(ylm_grid.shape), ylm_grid),
+        's': scalar_field,
+    }
+
+    with self.subTest('include_remaining_false'):
+      modal_to_nodal = transforms.ModalToNodal(ylm_map, include_remaining=False)
+      out = modal_to_nodal(inputs)
+      self.assertIn('u', out)
+      self.assertNotIn('s', out)
+      self.assertEqual(cx.get_coordinate(out['u']), nodal_grid)
+
+    with self.subTest('include_remaining_true'):
+      modal_to_nodal = transforms.ModalToNodal(ylm_map, include_remaining=True)
+      out = modal_to_nodal(inputs)
+      self.assertIn('u', out)
+      self.assertIn('s', out)
+      self.assertEqual(cx.get_coordinate(out['u']), nodal_grid)
+      self.assertEqual(out['s'], scalar_field)
+
   def test_insert_axis(self):
     x = cx.SizedAxis('x', 3)
     y = cx.SizedAxis('y', 2)
