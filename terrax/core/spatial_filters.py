@@ -119,7 +119,7 @@ class SequentialModalFilter(ModalSpatialFilter):
   """Modal filter that applies multiple filters sequentially."""
 
   filters: Sequence[ModalSpatialFilter] = nnx.data()
-  ylm_map: spherical_harmonics.FixedYlmMapping
+  ylm_map: spherical_harmonics.FixedYlmMapping | spherical_harmonics.YlmMapper
 
   def filter_modal(self, inputs: typing.Pytree) -> typing.Pytree:
     for modal_filter in self.filters:
@@ -127,6 +127,6 @@ class SequentialModalFilter(ModalSpatialFilter):
     return inputs
 
   def __call__(self, inputs: typing.Pytree) -> typing.Pytree:
-    modal_inputs = self.ylm_map.dinosaur_grid.to_modal(inputs)
+    modal_inputs = self.ylm_map.to_modal(inputs)
     modal_outputs = self.filter_modal(modal_inputs)
-    return self.ylm_map.dinosaur_grid.to_nodal(modal_outputs)
+    return self.ylm_map.to_nodal(modal_outputs)
