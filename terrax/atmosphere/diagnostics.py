@@ -19,8 +19,8 @@ from typing import Literal, Protocol
 import coordax as cx
 from flax import nnx
 import jax.numpy as jnp
+import numpy as np
 from terrax.core import coordinates
-from terrax.core import observation_operators
 from terrax.core import orographies
 from terrax.core import spherical_harmonics
 from terrax.core import transforms
@@ -130,6 +130,11 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
       output.
     evaporation_key: Key under which the evaporation field is stored in the
       output.
+    output_precipitation_key: If set, renames the precipitation key in the
+      output dict. Useful when the query key (e.g. 'mean_evaporation_rate')
+      must match the surface operator but the output should use a different
+      name (e.g. 'total_evaporation').
+    output_evaporation_key: If set, renames the evaporation key in the output.
   """
 
   observation_operator: typing.ObservationOperator = nnx.data()
@@ -138,9 +143,11 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
   prognostics_arg_key: str | int = 'prognostics'
   precipitation_scaling: PrecipitationScales = 'rate'
   evaporation_scaling: PrecipitationScales = 'rate'
-  dt: float | None = None
+  dt: float | np.timedelta64 | None = None
   precipitation_key: str = 'precipitation'
   evaporation_key: str = 'evaporation'
+  output_precipitation_key: str | None = None
+  output_evaporation_key: str | None = None
   sim_units: units.SimUnits = nnx.static(kw_only=True)
 
   def __post_init__(self):
@@ -152,6 +159,16 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
       )
     [self.observe_key] = valid_keys.intersection(query_keys)
     [self.diagnosed_key] = valid_keys.difference(query_keys)
+    if isinstance(self.dt, np.timedelta64):
+      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)
+    # Build output key mapping for renaming results.
+    self._output_key_map = {}
+    if self.output_precipitation_key is not None:
+      self._output_key_map[self.precipitation_key] = (
+          self.output_precipitation_key
+      )
+    if self.output_evaporation_key is not None:
+      self._output_key_map[self.evaporation_key] = self.output_evaporation_key
 
   def _extract_prognostics(self, *args, **kwargs):
     if isinstance(self.prognostics_arg_key, int):
@@ -186,6 +203,14 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
         )
     return precipitation_and_evaporation
 
+  def _rename_outputs(self, result):
+    """Renames output keys using output_*_key mappings if specified."""
+    if self._output_key_map:
+      result = {
+          self._output_key_map.get(k, k): v for k, v in result.items()
+      }
+    return result
+
   def __call__(self, result, *args, **kwargs):
     tendencies = result
     [p_plus_e] = self.extract_p_plus_e(tendencies, *args, **kwargs).values()
@@ -198,7 +223,9 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
         self.diagnosed_key: p_plus_e - observation,
         self.observe_key: observation,
     }
-    return self._apply_scaling(precipitation_and_evaporation)
+    return self._rename_outputs(
+        self._apply_scaling(precipitation_and_evaporation)
+    )
 
 
 @nnx.dataclass
@@ -246,7 +273,9 @@ class ExtractPrecipitationAndEvaporationWithConstraints(
           f'{self.observe_key=} should be either {self.precipitation_key=} or'
           f' {self.evaporation_key=}.'
       )
-    return self._apply_scaling(precipitation_and_evaporation)
+    return self._rename_outputs(
+        self._apply_scaling(precipitation_and_evaporation)
+    )
 
 
 @nnx.dataclass
@@ -523,12 +552,14 @@ class ExtractColumnEnergyBudget(nnx.Module):
       default=None
   )
   energy_fluxes_query: dict[str, cx.Coordinate] | None = None
-  dt: float | None = None
+  dt: float | np.timedelta64 | None = None
   use_evaporation_for_latent_heat: bool = False
   use_liquid_ice_moist_static_energy: bool = False
   prognostics_arg_key: str | int | None = None
 
   def __post_init__(self):
+    if isinstance(self.dt, np.timedelta64):
+      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)
     if self.energy_fluxes_query is not None:
       self.rt_keys = ['top_net_thermal_radiation', 'top_net_solar_radiation']
       self.fs_keys = [
