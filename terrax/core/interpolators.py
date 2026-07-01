@@ -146,14 +146,17 @@ class ConservativeRegridder:
     mean = _mean(jnp.where(not_nulls, array, 0))
     not_null_fraction = _mean(not_nulls)
 
+    safe_fraction = jnp.where(not_null_fraction == 0.0, 1.0, not_null_fraction)
+
     if self.skipna:
-      return mean / not_null_fraction  # intended NaN if not_null_fraction == 0
+      all_nans = not_null_fraction == 0.0
+      return jnp.where(all_nans, jnp.nan, mean / safe_fraction)
     else:
       # If not_null_fraction is not close to 1, it means some source cells
       # were NaN. In this case, the target cell becomes NaN.
       return jnp.where(
           jnp.isclose(not_null_fraction, 1.0, rtol=1e-3),
-          mean / not_null_fraction,
+          mean / safe_fraction,
           jnp.nan,
       )
 
