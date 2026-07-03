@@ -16,6 +16,7 @@
 
 import abc
 import dataclasses
+from typing import Sequence
 
 import coordax as cx
 from flax import nnx
@@ -108,8 +109,8 @@ class TransformObservationOperator(ObservationOperatorABC):
 
   Attributes:
     transform: Transform to apply to inputs.
-    requested_fields_from_query: Keys that the transform expects as inputs
-      (not outputs). Values come from ``Field`` entries in the query, or from
+    requested_fields_from_query: Keys that the transform expects as inputs (not
+      outputs). Values come from ``Field`` entries in the query, or from
       ``fallback_transform`` when the query has a ``Coordinate`` or omits the
       key entirely.
     fallback_transform: Optional transform that produces missing requested
@@ -225,3 +226,81 @@ class MultiObservationOperator(ObservationOperatorABC):
           sub_query[key] = query[key]
       outputs |= obs_op.observe(inputs, sub_query)
     return outputs
+
+
+@nnx.dataclass
+class DispatchByCoordinateObservationOperator(ObservationOperatorABC):
+  """Operator that dispatches queries to operators based on coordinates.
+
+  Attributes:
+    coord_to_operator: A dict mapping coordinate to dispatch operators.
+  """
+
+  coord_to_operator: dict[cx.Coordinate, typing.ObservationOperator]
+
+  def observe(
+      self,
+      inputs: dict[str, cx.Field],
+      query: typing.Query,
+  ) -> dict[str, cx.Field]:
+    outputs = {}
+    # Group query entries by matching coordinate in coord_to_operator.
+    coord_to_sub_query = {coord: {} for coord in self.coord_to_operator}
+
+    for k, raw_entry in query.items():
+      entry, _ = typing.unwrap_auxiliary(raw_entry)
+      if cx.is_field(entry):
+        entry_coord = entry.coordinate
+      elif cx.is_coord(entry):
+        entry_coord = entry
+      else:
+        raise ValueError(
+            f'Unsupported query entry type for {k!r}: {type(entry)}'
+        )
+
+      entry_axes = set(entry_coord.axes)
+      matched_coords = [
+          coord
+          for coord in self.coord_to_operator
+          if set(coord.axes).issubset(entry_axes)
+      ]
+
+      if not matched_coords:
+        supported_coords = list(self.coord_to_operator.keys())
+        raise ValueError(
+            f'query entry {k!r} with coordinate {entry_coord} does not match '
+            f'any supported coordinates: {supported_coords}'
+        )
+      if len(matched_coords) > 1:
+        raise ValueError(
+            f'query entry {k!r} with coordinate {entry_coord} matches multiple '
+            f'supported coordinates: {matched_coords}'
+        )
+
+      [matched_coord] = matched_coords
+      coord_to_sub_query[matched_coord][k] = raw_entry
+
+    for coord, obs_op in self.coord_to_operator.items():
+      sub_query = coord_to_sub_query[coord]
+      if sub_query:
+        outputs |= obs_op.observe(inputs, sub_query)
+
+    return outputs
+
+  @classmethod
+  def construct(
+      cls,
+      coords: Sequence[cx.Coordinate] | cx.Coordinate,
+      operators: (
+          Sequence[typing.ObservationOperator] | typing.ObservationOperator
+      ),
+  ):
+    """Custom constructor based on grids and operators sequences."""
+    if isinstance(coords, cx.Coordinate):
+      coords = [coords]
+    if not isinstance(operators, Sequence):
+      operators = [operators] * len(coords)
+    coord_to_operator = {
+        grid: op for grid, op in zip(coords, operators, strict=True)
+    }
+    return cls(coord_to_operator=coord_to_operator)

@@ -384,6 +384,27 @@ class LonLatGrid(cx.Coordinate):
             f'thereof, got {dims}'
         )
 
+  def __lt__(self, other: LonLatGrid) -> bool:
+    """Custom comparison operator for sorting LonLatGrids."""
+
+    # Implementing __lt__ enables LonLatGrid to be keys in a dict
+    # and be compatible with jax.tree. operations.
+    def _to_tuple(x):
+      xt = (
+          x.longitude_nodes,
+          x.latitude_nodes,
+          x.latitude_spacing,
+          x.longitude_offset,
+          x.lon_lat_padding,
+      )
+      return xt
+
+    if not isinstance(other, LonLatGrid):
+      return NotImplemented
+    self_compare_values_in_order = _to_tuple(self)
+    other_compare_values_in_order = _to_tuple(other)
+    return self_compare_values_in_order < other_compare_values_in_order
+
   @classmethod
   def from_dinosaur_grid(
       cls,

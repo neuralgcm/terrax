@@ -354,6 +354,70 @@ class MultiObservationOperatorTest(parameterized.TestCase):
         multi_op.observe(inputs, query)
 
 
+class DispatchByCoordinateObservationOperatorTest(parameterized.TestCase):
+  """Tests DispatchByCoordinateObservationOperator implementation."""
+
+  def test_multicoordinate_dispatch(self):
+    tl63 = coordinates.LonLatGrid.TL63()
+    tl255 = coordinates.LonLatGrid.TL255()
+    pressure = coordinates.PressureLevels.with_era5_levels()
+    coord_tl63_p = cx.coords.compose(pressure, tl63)
+    coord_tl255_p = cx.coords.compose(pressure, tl255)
+
+    field_tl63 = cx.field(np.ones(coord_tl63_p.shape), coord_tl63_p)
+    field_tl255 = cx.field(np.ones(coord_tl255_p.shape), coord_tl255_p)
+
+    op_tl63 = observation_operators.DataObservationOperator(
+        {'era5:pressure': field_tl63}
+    )
+    op_tl255 = observation_operators.DataObservationOperator(
+        {'era5:pressure': field_tl255}
+    )
+
+    multi_op = observation_operators.DispatchByCoordinateObservationOperator({
+        tl63: op_tl63,
+        tl255: op_tl255,
+    })
+
+    with self.subTest('dispatch_tl63'):
+      query = {'era5:pressure': coord_tl63_p}
+      actual = multi_op.observe({}, query)
+      chex.assert_trees_all_equal(actual, {'era5:pressure': field_tl63})
+
+    with self.subTest('dispatch_tl255'):
+      query = {'era5:pressure': coord_tl255_p}
+      actual = multi_op.observe({}, query)
+      chex.assert_trees_all_equal(actual, {'era5:pressure': field_tl255})
+
+  def test_raises_on_unsupported_coordinate(self):
+    tl63 = coordinates.LonLatGrid.TL63()
+    tl255 = coordinates.LonLatGrid.TL255()
+    t21 = coordinates.LonLatGrid.T21()
+
+    op_tl63 = observation_operators.DataObservationOperator({})
+    multi_op = observation_operators.DispatchByCoordinateObservationOperator({
+        tl63: op_tl63,
+        tl255: op_tl63,
+    })
+    query = {'era5:pressure': t21}
+    with self.assertRaisesRegex(ValueError, 'does not match any'):
+      multi_op.observe({}, query)
+
+  def test_raises_on_multiple_matches(self):
+    tl63 = coordinates.LonLatGrid.TL63()
+    pressure = coordinates.PressureLevels.with_era5_levels()
+    coord_combo = cx.coords.compose(pressure, tl63)
+
+    op_dummy = observation_operators.DataObservationOperator({})
+    multi_op = observation_operators.DispatchByCoordinateObservationOperator({
+        tl63: op_dummy,
+        pressure: op_dummy,
+    })
+    query = {'era5:pressure': coord_combo}
+    with self.assertRaisesRegex(ValueError, 'matches multiple supported '):
+      multi_op.observe({}, query)
+
+
 if __name__ == '__main__':
   config.update('jax_traceback_filtering', 'off')
   absltest.main()
