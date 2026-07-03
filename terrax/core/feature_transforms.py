@@ -143,6 +143,14 @@ class OrographyFeatures(transforms.TransformABC):
     del inputs  # unused.
     return {'orography': self.orography_module.nodal_orography}
 
+  def update_from_xarray(
+      self,
+      dataset: xarray.Dataset,
+      **kwargs,
+  ):
+    """Updates the underlying orography module from an xarray dataset."""
+    self.orography_module.update_from_xarray(dataset, **kwargs)
+
 
 @nnx.dataclass
 class OrographyWithGradsFeatures(transforms.PytreeTransformABC):
@@ -179,6 +187,14 @@ class OrographyWithGradsFeatures(transforms.PytreeTransformABC):
       sec_lat_scale = sec_lat_scales[k.factor_order]
       features[k.name] = ylm_map.to_nodal(v) * sec_lat_scale
     return features
+
+  def update_from_xarray(
+      self,
+      dataset: xarray.Dataset,
+      **kwargs,
+  ):
+    """Updates the underlying orography module from an xarray dataset."""
+    self.orography_module.update_from_xarray(dataset, **kwargs)
 
 
 class ParamFeatures(transforms.PytreeTransformABC):
