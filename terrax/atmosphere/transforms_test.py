@@ -63,7 +63,7 @@ class AtmosphereTransformsTest(parameterized.TestCase):
         surface_field_names=('lsp',),
         compute_gradients_transform=with_gradients_transform,
     )
-    modal_grid = ylm_map.modal_grid
+    modal_grid = ylm_map.ylm_grid
     shape_3d = sigma.shape + modal_grid.shape
     inputs = {
         'u': cx.field(np.ones(shape_3d), sigma, modal_grid),
@@ -73,6 +73,53 @@ class AtmosphereTransformsTest(parameterized.TestCase):
         'lsp': cx.field(np.ones(modal_grid.shape), modal_grid),
     }
     self._test_feature_module(features_grads, inputs)
+
+  def test_prognostics_with_velocity_and_grads(self):
+    sigma = coordinates.SigmaLevels.equidistant(4)
+    ylm_map = spherical_harmonics.FixedYlmMapping(
+        lon_lat_grid=coordinates.LonLatGrid.T21(),
+        ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
+    )
+    diff_tx = transforms.ToModalWithDerivatives(ylm_map, attenuations=[2.0])
+    modal_grid = ylm_map.ylm_grid
+    nodal_grid = ylm_map.lon_lat_grid
+    shape_3d_modal = sigma.shape + modal_grid.shape
+    shape_3d_nodal = sigma.shape + nodal_grid.shape
+
+    with self.subTest('modal_velocity_inputs'):
+      feature_tx = atmos_transforms.PrognosticsWithVelocityAndGrads(
+          ylm_map, diff_tx, u_key='u', v_key='v'
+      )
+      inputs = {
+          'u': cx.field(np.ones(shape_3d_modal), sigma, modal_grid),
+          'v': cx.field(np.ones(shape_3d_modal), sigma, modal_grid),
+          'vorticity': cx.field(np.ones(shape_3d_modal), sigma, modal_grid),
+          'divergence': cx.field(np.ones(shape_3d_modal), sigma, modal_grid),
+          'lsp': cx.field(np.ones(modal_grid.shape), modal_grid),
+      }
+      self._test_feature_module(feature_tx, inputs)
+
+    with self.subTest('div_curl_reconstruction'):
+      feature_tx = atmos_transforms.PrognosticsWithVelocityAndGrads(
+          ylm_map, diff_tx, u_key='u', v_key='v'
+      )
+      inputs = {
+          'vorticity': cx.field(np.ones(shape_3d_modal), sigma, modal_grid),
+          'divergence': cx.field(np.ones(shape_3d_modal), sigma, modal_grid),
+          'lsp': cx.field(np.ones(modal_grid.shape), modal_grid),
+      }
+      self._test_feature_module(feature_tx, inputs)
+
+    with self.subTest('nodal_inputs_no_gradients'):
+      features_no_grads = atmos_transforms.PrognosticsWithVelocityAndGrads(
+          ylm_map, None, u_key='u', v_key='v'
+      )
+      inputs = {
+          'u': cx.field(np.ones(shape_3d_nodal), sigma, nodal_grid),
+          'v': cx.field(np.ones(shape_3d_nodal), sigma, nodal_grid),
+          'lsp': cx.field(np.ones(nodal_grid.shape), nodal_grid),
+      }
+      self._test_feature_module(features_no_grads, inputs)
 
   def test_pressure_features(self):
     sigma = coordinates.SigmaLevels.equidistant(8)

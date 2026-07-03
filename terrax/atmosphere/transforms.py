@@ -18,6 +18,7 @@ Currently this includes both feature-generating transforms and state transforms.
 """
 
 from __future__ import annotations
+import warnings
 
 import coordax as cx
 from flax import nnx
@@ -40,7 +41,7 @@ class ToModalWithDivCurl(transforms.PytreeTransformABC):
   v_key: str = 'v_component_of_wind'
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    grid = self.ylm_map.nodal_grid
+    grid = self.ylm_map.lon_lat_grid
     mesh = self.ylm_map.mesh
     if self.u_key not in inputs or self.v_key not in inputs:
       raise ValueError(
@@ -95,7 +96,10 @@ class PressureFeatures(transforms.PytreeTransformABC):
 
 
 class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
-  """Features module that returns prognostics + u,v and optionally gradients."""
+  """Features module that returns prognostics + u,v and optionally gradients.
+
+  Deprecated: Use ``PrognosticsWithVelocityAndGrads`` instead.
+  """
 
   def __init__(
       self,
@@ -110,6 +114,13 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
       v_key: str = 'v_component_of_wind',
       skip_non_modal: bool = False,
   ):
+    warnings.warn(
+        'VelocityAndPrognosticsWithModalGradients is deprecated and will be'
+        ' removed in a future release. Use PrognosticsWithVelocityAndGrads'
+        ' instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if compute_gradients_transform is None:
       compute_gradients_transform = lambda x: {}
     self.ylm_map = ylm_map
@@ -178,11 +189,9 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
     for k, v in (diff_operator_features | modal_features).items():
       value = self.ylm_map.to_nodal(v)
       lat_power = k.factor_order
-      sec_lat_scale = (1 / self.ylm_map.cos_lat(value) ** lat_power)
+      sec_lat_scale = 1 / self.ylm_map.cos_lat(value) ** lat_power
       features[k.name] = value * sec_lat_scale
-    features = parallelism.with_dycore_sharding(
-        self.ylm_map.mesh, features
-    )
+    features = parallelism.with_dycore_sharding(self.ylm_map.mesh, features)
     return features
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -193,6 +202,82 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
       )(inputs)
     nodal_features = self._extract_features(inputs)
     return nodal_features
+
+
+@nnx.dataclass
+class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
+  """Returns prognostics with reconstructed velocity and optional gradients.
+
+  Converts inputs to modal space, reconstructs ``u, v`` (if not present) from
+  div/curl when available, computes optional spatial gradients,
+  and returns all features in nodal space.
+
+  Attributes:
+    ylm_map: ``FixedYlmMapping`` for modal/nodal conversions.
+    compute_grads_transform: Optional ``ToModalWithDerivatives`` for additional
+      extra grad features.
+    u_key: Key for u-component of wind.
+    v_key: Key for v-component of wind.
+  """
+
+  ylm_map: spherical_harmonics.FixedYlmMapping
+  compute_grads_transform: transforms.ToModalWithDerivatives | None = None
+  u_key: str = 'u_component_of_wind'
+  v_key: str = 'v_component_of_wind'
+  pre_process: transforms.Sequential = nnx.data(init=False)
+
+  def __post_init__(self):
+    if self.compute_grads_transform is None:
+      self.compute_grads_transform = lambda x: {}
+    self.pre_process = transforms.Sequential([
+        transforms.NodalToModal(self.ylm_map, include_remaining=True),
+        transforms.FilterByCoord(types=coordinates.SphericalHarmonicGrid),
+    ])
+
+  def _extract_features(
+      self,
+      inputs: dict[str, cx.Field],
+  ) -> dict[str, cx.Field]:
+    """Returns nodal velocity and prognostic features."""
+    has_div_curl = 'vorticity' in inputs and 'divergence' in inputs
+    has_velocity = self.u_key in inputs and self.v_key in inputs
+    if has_div_curl and not has_velocity:
+      cos_lat_u, cos_lat_v = spherical_harmonics.get_cos_lat_vector(
+          inputs['vorticity'], inputs['divergence'], self.ylm_map
+      )
+      modal_features = {
+          typing.KeyWithCosLatFactor(self.u_key, 1): cos_lat_u,
+          typing.KeyWithCosLatFactor(self.v_key, 1): cos_lat_v,
+      }
+    elif has_velocity:
+      modal_features = {
+          typing.KeyWithCosLatFactor(self.u_key, 0): inputs[self.u_key],
+          typing.KeyWithCosLatFactor(self.v_key, 0): inputs[self.v_key],
+      }
+    else:
+      modal_features = {}
+    for k, v in inputs.items():
+      if k not in (self.u_key, self.v_key, 'vorticity', 'divergence'):
+        modal_features[typing.KeyWithCosLatFactor(k, 0)] = v
+
+    # Computing gradient features and adjusting cos_lat factors.
+    modal_features = parallelism.with_dycore_sharding(
+        self.ylm_map.mesh, modal_features
+    )
+    diff_operator_features = self.compute_grads_transform(modal_features)
+    # Computing all features in nodal space.
+    features = {}
+    for k, v in (diff_operator_features | modal_features).items():
+      value = self.ylm_map.to_nodal(v)
+      lat_power = k.factor_order
+      sec_lat_scale = 1 / self.ylm_map.cos_lat(value) ** lat_power
+      features[k.name] = value * sec_lat_scale
+    features = parallelism.with_dycore_sharding(self.ylm_map.mesh, features)
+    return features
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    inputs = self.pre_process(inputs)
+    return self._extract_features(inputs)
 
 
 @nnx.dataclass
