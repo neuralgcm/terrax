@@ -534,9 +534,60 @@ class Sequential(TransformABC):
   transforms: Sequence[Transform] = nnx.data()
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    source = inputs
     for transform in self.transforms:
-      inputs = transform(inputs)
+      if isinstance(transform, MergeFromSource):
+        merge_from_source: MergeFromSource = transform  # pytype narrowing.
+        extra = merge_from_source.transform(source)
+        conflicts = set(inputs) & set(extra)
+        if conflicts:
+          raise ValueError(
+              f'MergeFromSource key conflict with current state: {conflicts}'
+          )
+        inputs = inputs | extra
+      else:
+        inputs = transform(inputs)
     return inputs
+
+
+@nnx.dataclass
+class MergeFromSource(TransformABC):
+  """Marker transform for use inside ``Sequential``.
+
+  When encountered by a ``Sequential``, applies ``transform`` to the original
+  inputs of the Sequential (before any transforms were applied) and merges the
+  result into the current state. Raises ``ValueError`` on key conflicts.
+
+  Insertion of MergeFromSource transforms into a Sequential captures a common
+  pattern of Merging multiple transforms as a part of processing step, avoiding
+  potentially nested ``Merge``/``Sequential`` chaining.
+
+  This transform is not intended to be called directly. Calling it outside of
+  a ``Sequential`` raises ``RuntimeError``.
+
+  Args:
+    transform: Transform to apply to the source (original) inputs.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {'a': cx.field(jnp.ones(2)), 'b': cx.field(jnp.zeros(2))}
+    >>> seq = transforms.Sequential([
+    ...     transforms.SelectKeys('a'),
+    ...     transforms.MergeFromSource(transforms.SelectKeys('b')),
+    ... ])
+    >>> sorted(seq(inputs).keys())
+    ['a', 'b']
+  """
+
+  transform: Transform = nnx.data()
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    raise RuntimeError(
+        'MergeFromSource is a marker transform and should only be used inside'
+        ' a Sequential. It cannot be called directly.'
+    )
 
 
 @nnx.dataclass

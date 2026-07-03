@@ -1215,6 +1215,92 @@ class TransformsTest(parameterized.TestCase):
     out5 = tx5(inputs)
     np.testing.assert_allclose(out5['scaled_a'].data, jnp.array([0.5, 1.0]))
 
+  def test_merge_from_source_in_sequential(self):
+    """MergeFromSource merges transform(original_inputs) into current state."""
+    inputs = {
+        'a': cx.field(jnp.ones(2)),
+        'b': cx.field(jnp.zeros(2)),
+        'c': cx.field(jnp.full(2, 3.0)),
+    }
+    seq = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.MergeFromSource(transforms.SelectKeys('b')),
+    ])
+    actual = seq(inputs)
+    self.assertEqual(sorted(actual.keys()), ['a', 'b'])
+    cx.testing.assert_fields_allclose(actual['a'], inputs['a'])
+    cx.testing.assert_fields_allclose(actual['b'], inputs['b'])
+
+  def test_multiple_merge_from_source_in_sequential(self):
+    """Multiple MergeFromSource steps each pull from original inputs."""
+    inputs = {
+        'a': cx.field(jnp.ones(2)),
+        'b': cx.field(jnp.zeros(2)),
+        'c': cx.field(jnp.full(2, 3.0)),
+    }
+    seq = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.MergeFromSource(transforms.SelectKeys('b')),
+        transforms.MergeFromSource(transforms.SelectKeys('c')),
+    ])
+    actual = seq(inputs)
+    self.assertEqual(sorted(actual.keys()), ['a', 'b', 'c'])
+
+  def test_merge_from_source_key_conflict_raises(self):
+    """MergeFromSource raises ValueError on key conflict with current state."""
+    inputs = {
+        'a': cx.field(jnp.ones(2)),
+        'b': cx.field(jnp.zeros(2)),
+    }
+    seq = transforms.Sequential([
+        transforms.SelectKeys(['a', 'b']),
+        transforms.MergeFromSource(transforms.SelectKeys('a')),
+    ])
+    with self.assertRaisesRegex(ValueError, 'MergeFromSource key conflict'):
+      seq(inputs)
+
+  def test_merge_from_source_standalone_raises(self):
+    """MergeFromSource raises RuntimeError when called outside Sequential."""
+    tx = transforms.MergeFromSource(transforms.SelectKeys('a'))
+    with self.assertRaises(RuntimeError):
+      tx({'a': cx.field(jnp.ones(2))})
+
+  def test_merge_from_source_nested_sequential(self):
+    """In nested Sequential, MergeFromSource refers to the inner source."""
+    inputs = {
+        'a': cx.field(jnp.ones(2)),
+        'b': cx.field(jnp.zeros(2)),
+        'c': cx.field(jnp.full(2, 3.0)),
+    }
+    # Inner Sequential: source is {'a', 'b'} (output of SelectKeys(['a', 'b'])).
+    # Inner SelectKeys('a') -> {'a'}.
+    # MergeFromSource() merges all non-'a' keys from inner source -> {'a', 'b'}.
+    inner = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.MergeFromSource(transforms.SelectKeys('a', invert=True)),
+    ])
+    outer = transforms.Sequential([
+        transforms.SelectKeys(['a', 'b']),
+        inner,
+    ])
+    actual = outer(inputs)
+    self.assertEqual(sorted(actual.keys()), ['a', 'b'])
+    cx.testing.assert_fields_allclose(actual['a'], inputs['a'])
+    cx.testing.assert_fields_allclose(actual['b'], inputs['b'])
+
+  def test_merge_from_source_output_shapes(self):
+    """output_shapes works correctly with MergeFromSource."""
+    inputs = {
+        'a': cx.shape_struct_field(cx.Scalar()),
+        'b': cx.shape_struct_field(cx.Scalar()),
+    }
+    seq = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.MergeFromSource(transforms.SelectKeys('b')),
+    ])
+    actual = seq.output_shapes(inputs)
+    self.assertEqual(sorted(actual.keys()), ['a', 'b'])
+
 
 class ExtractLocalPatchFromGridTest(parameterized.TestCase):
 
