@@ -291,7 +291,7 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
 
   def reset_diagnostic_state(self):
     """Resets the internal diagnostic state."""
-    self.dt_mod_freq.set_value(cx.field(jdt.Timedelta()))
+    self.dt_mod_freq.set_value(cx.field(jdt.Timedelta()))  # pyrefly: ignore[bad-argument-type]
     zeros_like = lambda v: cx.field(
         jnp.zeros_like(v.get_value().data), v.get_value().coordinate
     )
@@ -453,7 +453,7 @@ class TimeOffsetDiagnostic(TemporalDiagnosticModule):
 
   def reset_diagnostic_state(self):
     """Resets the internal diagnostic state."""
-    self.dt_mod_freq.set_value(cx.field(jdt.Timedelta()))
+    self.dt_mod_freq.set_value(cx.field(jdt.Timedelta()))  # pyrefly: ignore[bad-argument-type]
     zeros_like = lambda v: cx.field(
         jnp.zeros_like(v.get_value().data), v.get_value().coordinate
     )
@@ -575,7 +575,7 @@ class ExtractFixedQueryObservations(nnx.Module):
   def __call__(self, result, *args, **kwargs) -> dict[str, cx.Field]:
     del result  # unused.
     prognostics = self._extract_prognostics(*args, **kwargs)
-    extracted = self.observation_operator.observe(prognostics, query=self.query)
+    extracted = self.observation_operator.observe(prognostics, query=self.query)  # pyrefly: ignore[bad-argument-type]
     if self.transform is not None:
       extracted = self.transform(extracted)
     return extracted

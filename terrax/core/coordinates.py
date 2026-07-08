@@ -105,7 +105,7 @@ class TimeDelta(cx.Coordinate):
   def fields(self):
     return {'timedelta': cx.field(self.deltas, self)}
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
@@ -268,12 +268,12 @@ class LonLatGrid(cx.Coordinate):
     remap = {self.axes[0]: longitudes_axis, self.axes[1]: latitudes_axis}
     axes = (longitudes_axis, latitudes_axis)
     indexers = {  # swap self.axes to LabeledAxes for both keys and idx values.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     return indexers, axes
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: coordax.experimental.SelMethod = None,
@@ -298,7 +298,7 @@ class LonLatGrid(cx.Coordinate):
     from_labeled = {l_ax: ax for l_ax, ax in zip((lon_ax, lat_ax), self.axes)}
     consumed = {from_labeled.get(ax, ax) for ax in consumed}
     mapped = {from_labeled.get(k, k): v for k, v in mapped.items()}
-    return mapped, consumed
+    return mapped, consumed  # pyrefly: ignore[bad-return]
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     indexers, l_axes = self._remap_indexers_to_labeled_axes(indexers)
@@ -608,7 +608,7 @@ class LonLatGrid(cx.Coordinate):
         latitude_nodes=latitude_nodes,
         latitude_spacing=latitude_spacing,
         longitude_offset=longitude_offset,
-        lon_lat_padding=tuple(int(x) for x in lon_lat_padding),
+        lon_lat_padding=tuple(int(x) for x in lon_lat_padding),  # pyrefly: ignore[bad-argument-type]
     )
     result_lat = np.rad2deg(result._ylm_grid.latitudes)
     if not np.allclose(result_lat, lat, atol=1e-3):
@@ -689,12 +689,12 @@ class SphericalHarmonicGrid(cx.Coordinate):
     remap = {self.axes[0]: ms_ax, self.axes[1]: ls_ax}
     axes = (ms_ax, ls_ax)
     indexers = {  # swap self.axes to LabeledAxes for both keys and idx values.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     return indexers, axes
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
@@ -720,7 +720,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
     from_labeled = {l_ax: ax for l_ax, ax in zip((ms_ax, ls_ax), self.axes)}
     consumed = {from_labeled.get(ax, ax) for ax in consumed}
     mapped = {from_labeled.get(k, k): v for k, v in mapped.items()}
-    return mapped, consumed
+    return mapped, consumed  # pyrefly: ignore[bad-return]
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     indexers, l_axes = self._remap_indexers_to_labeled_axes(indexers)
@@ -736,7 +736,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
   ) -> cx.Field:
     """Adds the constant `c` to the field `x` in the spectral basis."""
     if not cx.is_field(c):
-      c = cx.field(jnp.squeeze(c))
+      c = cx.field(jnp.squeeze(c))  # pyrefly: ignore[bad-argument-type]
     assert isinstance(c, cx.Field)  # make pytype happy.
     if c.positional_shape:
       raise ValueError(
@@ -795,7 +795,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
       ylm_grid: spherical_harmonic.Grid,
   ):
     cls_to_method = {v: k for k, v in SPHERICAL_HARMONICS_METHODS.items()}
-    method_name = cls_to_method[ylm_grid.spherical_harmonics_impl]
+    method_name = cls_to_method[ylm_grid.spherical_harmonics_impl]  # pyrefly: ignore[bad-index]
     method_name = cast(SphericalHarmonicsMethodNames, method_name)
     return cls(
         longitude_wavenumbers=ylm_grid.longitude_wavenumbers,
@@ -1003,7 +1003,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
         longitude_wavenumbers=longitude_wavenumbers,
         total_wavenumbers=coords.sizes['total_wavenumber'],
         spherical_harmonics_method=spherical_harmonics_method,
-        wavenumber_padding=tuple(int(x) for x in wavenumber_padding),
+        wavenumber_padding=tuple(int(x) for x in wavenumber_padding),  # pyrefly: ignore[bad-argument-type]
     )
 
     expected = candidate.fields['longitude_wavenumber'].data
@@ -1075,7 +1075,7 @@ class SigmaLevels(cx.Coordinate):
   def sigma_boundaries(self) -> SigmaBoundaries:
     return SigmaBoundaries(boundaries=self.boundaries)
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
@@ -1083,20 +1083,20 @@ class SigmaLevels(cx.Coordinate):
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.sigma_levels.centers)
     remap = {self: sigma_labeled}
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     i_indexers, consumed = sigma_labeled.map_indexers(indexers, method)
     from_labeled = {sigma_labeled: self}
-    consumed = {from_labeled.get(k, k) for k in consumed}
-    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}
+    consumed = {from_labeled.get(k, k) for k in consumed}  # pyrefly: ignore[no-matching-overload]
+    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}  # pyrefly: ignore[no-matching-overload]
     return i_indexers, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.sigma_levels.centers)
     remap = {self: sigma_labeled}
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     l_isel = sigma_labeled.isel(indexers)
@@ -1239,20 +1239,20 @@ class SigmaBoundaries(SigmaLevels):
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.boundaries)
     remap = {self: sigma_labeled}
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     i_indexers, consumed = sigma_labeled.map_indexers(indexers, method)
     from_labeled = {sigma_labeled: self}
-    consumed = {from_labeled.get(k, k) for k in consumed}
-    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}
+    consumed = {from_labeled.get(k, k) for k in consumed}  # pyrefly: ignore[no-matching-overload]
+    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}  # pyrefly: ignore[no-matching-overload]
     return i_indexers, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.boundaries)
     remap = {self: sigma_labeled}
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     l_isel = sigma_labeled.isel(indexers)
@@ -1284,7 +1284,7 @@ class SigmaBoundaries(SigmaLevels):
           f'dimension {dim!r} != "sigma_boundaries"'
       )
     sigma_dim = dim.removesuffix('_boundaries')
-    return cls.from_sigma_levels(SigmaLevels.from_xarray((sigma_dim,), coords))
+    return cls.from_sigma_levels(SigmaLevels.from_xarray((sigma_dim,), coords))  # pyrefly: ignore[bad-argument-type]
 
 
 @jax.tree_util.register_static
@@ -1320,7 +1320,7 @@ class PressureLevels(cx.Coordinate):
   def fields(self):
     return {'pressure': cx.field(self.centers, self)}
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
@@ -1487,7 +1487,7 @@ class HybridLevels(cx.Coordinate):
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     hybrid_labeled = cx.LabeledAxis(self.dims[0], self.fields['hybrid'].data)
-    idxrs = {{self: hybrid_labeled}.get(k, k): v for k, v in indexers.items()}
+    idxrs = {{self: hybrid_labeled}.get(k, k): v for k, v in indexers.items()}  # pyrefly: ignore[no-matching-overload]
     return hybrid_labeled.isel(idxrs)
 
   def asdict(self) -> dict[str, Any]:
@@ -1519,12 +1519,12 @@ class HybridLevels(cx.Coordinate):
       a_boundaries = sim_units.nondimensionalize(a_boundaries * typing.units.Pa)
 
     def _boundaries(p_surface: jax.Array) -> jax.Array:
-      return a_boundaries + b_boundaries * p_surface
+      return a_boundaries + b_boundaries * p_surface  # pyrefly: ignore[bad-return]
 
     # TODO(dkochkov): Consider adding HybridLevelsBoundaries coordinate and
     # tagging this output with it.
-    out_axes = {k: v + 1 for k, v in surface_pressure.named_axes}
-    return cx.cmap(_boundaries(surface_pressure), out_axes)
+    out_axes = {k: v + 1 for k, v in surface_pressure.named_axes}  # pyrefly: ignore[unsupported-operation]
+    return cx.cmap(_boundaries(surface_pressure), out_axes)  # pyrefly: ignore[bad-argument-type, bad-return]
 
   def pressure_centers(
       self,
@@ -1548,7 +1548,7 @@ class HybridLevels(cx.Coordinate):
       a_nondim = sim_units.nondimensionalize(a * typing.units.hPa)
     else:
       a_nondim = a * 100  # default hPa -> Pa conversion.
-    nondim_hybrid_levels = hybrid_coordinates.HybridCoordinates(a_nondim, b)
+    nondim_hybrid_levels = hybrid_coordinates.HybridCoordinates(a_nondim, b)  # pyrefly: ignore[bad-argument-type]
     integral_fn = functools.partial(
         hybrid_coordinates.integral_over_pressure,
         coordinates=nondim_hybrid_levels,
@@ -1708,7 +1708,7 @@ class LayerLevels(cx.Coordinate):
   def fields(self):
     return {self.name: cx.field(np.arange(self.n_layers), self)}
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
@@ -1716,20 +1716,20 @@ class LayerLevels(cx.Coordinate):
     labeled_layers = cx.LabeledAxis(self.name, np.arange(self.n_layers))
     remap = {self: labeled_layers}
     indexers = {  # remaped to labeled_layers.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     i_indexers, consumed = labeled_layers.map_indexers(indexers, method)
     from_labeled = {labeled_layers: self}
-    consumed = {from_labeled.get(k, k) for k in consumed}
-    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}
+    consumed = {from_labeled.get(k, k) for k in consumed}  # pyrefly: ignore[no-matching-overload]
+    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}  # pyrefly: ignore[no-matching-overload]
     return i_indexers, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     labeled_layers = cx.LabeledAxis(self.name, np.arange(self.n_layers))
     remap = {self: labeled_layers}
     indexers = {  # remaped to labeled_layers.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
         for k, v in indexers.items()
     }
     l_isel = labeled_layers.isel(indexers)
@@ -1758,12 +1758,12 @@ class LayerLevels(cx.Coordinate):
 
 
 def validate_nonnegative_depth(centers: Iterable[float] | np.ndarray):
-  if not np.min(centers) >= 0:
+  if not np.min(centers) >= 0:  # pyrefly: ignore[no-matching-overload]
     raise ValueError('SoilLevels coordinate should have non-negative depth.')
 
 
 def validate_increasing_depth(centers: Iterable[float] | np.ndarray):
-  if not np.min(np.diff(centers)) > 0:
+  if not np.min(np.diff(centers)) > 0:  # pyrefly: ignore[no-matching-overload]
     raise ValueError(
         'SoilLevels coordinate should have monotonically increasing depth,'
         ' starting at the soil surface.'
@@ -1800,7 +1800,7 @@ class SoilLevels(cx.Coordinate):
   def fields(self):
     return {'soil_levels': cx.field(self.centers, self)}
 
-  def map_indexers(
+  def map_indexers(  # pyrefly: ignore[bad-override]
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
@@ -1889,7 +1889,7 @@ class CoordinateWithPadding(cx.Coordinate):
   @property
   def shape(self) -> tuple[int, ...]:
     dims_and_shapes = zip(self.coordinate.dims, self.coordinate.shape)
-    return tuple(s + sum(self.pad_sizes[d]) for d, s in dims_and_shapes)
+    return tuple(s + sum(self.pad_sizes[d]) for d, s in dims_and_shapes)  # pyrefly: ignore[bad-index]
 
   @property
   def fields(self):

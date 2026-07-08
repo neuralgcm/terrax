@@ -74,8 +74,9 @@ class Stencil(Generic[T]):
     if self.closed not in {'left', 'right', 'both', 'neither'}:
       raise ValueError(f'invalid value for closed: {self.closed!r}')
     if self.start == self.stop:
-      if self.step != self.stop - self.start:  # check step is zero.
+      if self.step != self.stop - self.start:  # check step is zero.  # pyrefly: ignore[unsupported-operation]
         raise ValueError(
+            # pyrefly: ignore[unsupported-operation]
             'For single value stencil ``step`` must equal zero: '
             f'{self.step=} vs {self.stop - self.start=}'
         )
@@ -84,7 +85,7 @@ class Stencil(Generic[T]):
             'For single value stencil ``closed`` must be "both": '
             f'{self.closed=}'
         )
-    elif self.start > self.stop:
+    elif self.start > self.stop:  # pyrefly: ignore[unsupported-operation]
       raise ValueError(
           f'start must not be greater than stop: {self.start} vs {self.stop}'
       )
@@ -102,8 +103,8 @@ class Stencil(Generic[T]):
   @property
   def points(self) -> np.ndarray:
     """Returns the points at which the stencil is defined."""
-    num = _divide_evenly(self.stop - self.start, self.step) if self.step else 0
-    result = self.start + self.step * np.arange(num + 1)
+    num = _divide_evenly(self.stop - self.start, self.step) if self.step else 0  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+    result = self.start + self.step * np.arange(num + 1)  # pyrefly: ignore[no-matching-overload]
     if not self.includes_start and self.step:
       result = result[1:]
     if not self.includes_stop and self.step:
@@ -130,7 +131,7 @@ def _to_timedelta64(value: str | np.timedelta64) -> np.timedelta64:
   match = re.match(r'([+-]?\d+) ?([a-zA-Z]+)', value)
   if not match:
     raise ValueError(f'invalid time delta string: {value}')
-  value = int(match.group(1))
+  value = int(match.group(1))  # pyrefly: ignore[bad-assignment]
   unit = _normalize_time_unit(match.group(2))
   return np.timedelta64(value, unit)
 

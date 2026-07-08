@@ -122,7 +122,7 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
         stacklevel=2,
     )
     if compute_gradients_transform is None:
-      compute_gradients_transform = lambda x: {}
+      compute_gradients_transform = lambda x: {}  # pyrefly: ignore[bad-assignment]
     self.ylm_map = ylm_map
     self.surface_field_names = surface_field_names
     self.volume_field_names = volume_field_names
@@ -183,7 +183,7 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
     modal_features = parallelism.with_dycore_sharding(
         self.ylm_map.mesh, modal_features
     )
-    diff_operator_features = self.compute_gradients_transform(modal_features)
+    diff_operator_features = self.compute_gradients_transform(modal_features)  # pyrefly: ignore[not-callable]
     # Computing all features in nodal space.
     features = {}
     for k, v in (diff_operator_features | modal_features).items():

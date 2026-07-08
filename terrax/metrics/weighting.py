@@ -168,11 +168,11 @@ class PerVariableWeighting(Weighting):
   ) -> PerVariableWeighting:
     """Returns a PerVariableWeighting with ConstantWeightings."""
     weightings = {
-        name: ConstantWeighting(constant=w if cx.is_field(w) else cx.field(w))
+        name: ConstantWeighting(constant=w if cx.is_field(w) else cx.field(w))  # pyrefly: ignore[bad-argument-type]
         for name, w in variable_weights.items()
     }
     return cls(
-        weightings_by_name=weightings, default_weighting=default_weighting
+        weightings_by_name=weightings, default_weighting=default_weighting  # pyrefly: ignore[bad-argument-type]
     )
 
 

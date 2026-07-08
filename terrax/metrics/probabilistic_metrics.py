@@ -82,7 +82,7 @@ def _all_pairs_ens_spread(
     return cx.cmap(jnp.mean)(_abs_beta(err, beta).untag(ens_dim))
 
   total_spread = sum(shift_spread(s) for s in range(1, n))
-  return total_spread * (1.0 / (n - 1))
+  return total_spread * (1.0 / (n - 1))  # pyrefly: ignore[bad-return]
 
 
 def _ring_chain_ens_spread(
@@ -107,7 +107,7 @@ def _ring_chain_ens_spread(
     else:
       total_spread = total_spread + spread_s
 
-  return total_spread * (1.0 / (n - 1))
+  return total_spread * (1.0 / (n - 1))  # pyrefly: ignore[bad-return, unsupported-operation]
 
 
 @dataclasses.dataclass

@@ -128,8 +128,8 @@ class ForwardTowerTransform(transforms.TransformABC, nnx.Module):
       target_split_axes: dict[str, cx.Coordinate],
       tower_factory: towers.ForwardTowerFactory,
       concat_dims: tuple[str | cx.Coordinate, ...] = (),
-      inputs_transform: typing.Transform = transforms.Identity(),
-      out_transform: typing.Transform = transforms.Identity(),
+      inputs_transform: typing.Transform = transforms.Identity(),  # pyrefly: ignore[bad-function-definition]
+      out_transform: typing.Transform = transforms.Identity(),  # pyrefly: ignore[bad-function-definition]
       feature_sharding_schema: str | None = None,
       result_sharding_schema: str | None = None,
       *,
@@ -283,8 +283,8 @@ class RecurrentTowerTransform(transforms.TransformABC, nnx.Module):
         target_split_axes=target_split_axes,
         tower=tower,
         concat_dims=concat_dims,
-        inputs_transform=inputs_transform,
-        out_transform=out_transform,
+        inputs_transform=inputs_transform,  # pyrefly: ignore[bad-argument-type]
+        out_transform=out_transform,  # pyrefly: ignore[bad-argument-type]
         state_keys=state_keys,
         feature_sharding_schema=feature_sharding_schema,
         result_sharding_schema=result_sharding_schema,
@@ -371,10 +371,10 @@ class TransformerTowerTransform(transforms.TransformABC, nnx.Module):
       target_split_axes: dict[str, cx.Coordinate],
       tower_factory: towers.TransformerTowerFactory,
       concat_dims: tuple[str | cx.Coordinate, ...],
-      inputs_transform: typing.Transform = transforms.Identity(),
+      inputs_transform: typing.Transform = transforms.Identity(),  # pyrefly: ignore[bad-function-definition]
       latents_transform: typing.Transform = transforms.Empty(),
       mask_values_transform: typing.Transform = transforms.Empty(),
-      out_transform: typing.Transform = transforms.Identity(),
+      out_transform: typing.Transform = transforms.Identity(),  # pyrefly: ignore[bad-function-definition]
       latents_concat_dims: tuple[str | cx.Coordinate, ...] | None = None,
       feature_sharding_schema: str | None = None,
       result_sharding_schema: str | None = None,

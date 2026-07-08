@@ -400,7 +400,7 @@ class CnnLevel(nnx.Module):
               input_size=din,
               output_size=dout,
               kernel_size=kernel,
-              strides=strides,
+              strides=strides,  # pyrefly: ignore[bad-argument-type]
               input_dilation=input_dilation,
               kernel_dilation=dilation,
               padding=padding,
@@ -525,15 +525,15 @@ class Epd(nnx.Module):
 
   def __call__(self, inputs: Array) -> Array:
     """Applies all EPD layers to inputs."""
-    encoded = self.encode(inputs)
+    encoded = self.encode(inputs)  # pyrefly: ignore[bad-argument-type]
     if self.post_encode_activation is not None:
       encoded = self.post_encode_activation(encoded)
     current = encoded
     for process_block in self.process_blocks:
-      current = current + process_block(current)
+      current = current + process_block(current)  # pyrefly: ignore[bad-argument-type]
     if self.pre_decode_activation is not None:
       current = self.pre_decode_activation(current)
-    out = self.decode(current)
+    out = self.decode(current)  # pyrefly: ignore[bad-argument-type]
     if self.final_activation is not None:
       return self.final_activation(out)
     return out
@@ -580,7 +580,7 @@ class Sequential(nnx.Module, pytree=False):
   def __call__(self, inputs: Array) -> Array:
     current = inputs
     for layer in self.layers:
-      current = layer(current)
+      current = layer(current)  # pyrefly: ignore[bad-argument-type]
     return current
 
 
@@ -623,13 +623,13 @@ class CnnLonLat(nnx.Module, pytree=False):
       )
     return cls(
         conv_layers=tuple(layers),
-        activation=activation,
+        activation=activation,  # pyrefly: ignore[bad-argument-type]
         activation_final=activation_final,
     )
 
   def __call__(self, inputs: Array) -> Array:
     for i, layer in enumerate(self.conv_layers):
-      inputs = layer(inputs)
+      inputs = layer(inputs)  # pyrefly: ignore[bad-argument-type]
       if i != len(self.conv_layers) - 1:
         inputs = self.activation(inputs)
     return self.activation_final(inputs)

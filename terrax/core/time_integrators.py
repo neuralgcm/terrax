@@ -100,7 +100,7 @@ class DinosaurIntegrator(nnx.Module):
     return self.integrator(self.equation, self.time_step)(inputs)
 
   def __init_subclasses__(self, **kwargs):
-    super().__init__(pytree=False, **kwargs)
+    super().__init__(pytree=False, **kwargs)  # pyrefly: ignore[unexpected-keyword]
 
 
 # Note: we don't use functools.partial here because it would cause issues with
@@ -115,7 +115,7 @@ class ImexRk3Sil(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=time_integration.imex_rk_sil3,
+        integrator=time_integration.imex_rk_sil3,  # pyrefly: ignore[bad-argument-type]
     )
 
 
@@ -129,7 +129,7 @@ class ExplicitEuler(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=forward_euler,
+        integrator=forward_euler,  # pyrefly: ignore[bad-argument-type]
     )
 
 
@@ -143,5 +143,5 @@ class RungeKutta4(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=rk4,
+        integrator=rk4,  # pyrefly: ignore[bad-argument-type]
     )

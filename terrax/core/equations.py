@@ -54,7 +54,7 @@ class ExplicitTransformEquation(time_integrators.ExplicitODE):
 
 def _sum_non_nones(*args: cx.Field | None) -> cx.Field:
   terms = [x for x in args if x is not None]
-  return sum(terms) if terms else cx.field(0.0)
+  return sum(terms) if terms else cx.field(0.0)  # pyrefly: ignore[bad-return]
 
 
 @nnx.dataclass

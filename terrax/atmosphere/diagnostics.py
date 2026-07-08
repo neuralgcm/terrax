@@ -90,8 +90,8 @@ class ExtractPrecipitationPlusEvaporation(nnx.Module):
       prognostics = args[self.prognostics_arg_key]
     else:
       prognostics = kwargs.get(self.prognostics_arg_key)
-    p_plus_e_rate = self._compute_p_plus_e_rate(tendencies, prognostics)
-    return {'precipitation_plus_evaporation_rate': p_plus_e_rate}
+    p_plus_e_rate = self._compute_p_plus_e_rate(tendencies, prognostics)  # pyrefly: ignore[bad-argument-type]
+    return {'precipitation_plus_evaporation_rate': p_plus_e_rate}  # pyrefly: ignore[bad-return]
 
 
 PrecipitationScales = Literal['rate', 'cumulative', 'mass_rate']
@@ -216,7 +216,7 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
     [p_plus_e] = self.extract_p_plus_e(tendencies, *args, **kwargs).values()
     prognostics = self._extract_prognostics(*args, **kwargs)
     observation = self.observation_operator.observe(
-        prognostics, query=self.operator_query
+        prognostics, query=self.operator_query  # pyrefly: ignore[bad-argument-type]
     )
     observation = observation[self.observe_key]
     precipitation_and_evaporation = {
@@ -249,7 +249,7 @@ class ExtractPrecipitationAndEvaporationWithConstraints(
     [p_plus_e] = self.extract_p_plus_e(tendencies, *args, **kwargs).values()
     prognostics = self._extract_prognostics(*args, **kwargs)
     observation = self.observation_operator.observe(
-        prognostics, query=self.operator_query
+        prognostics, query=self.operator_query  # pyrefly: ignore[bad-argument-type]
     )
     observation = observation[self.observe_key]
     if self.observe_key == self.precipitation_key:
@@ -315,7 +315,7 @@ class ExtractColumnDryAirMass(nnx.Module):
     assert isinstance(q_total, (cx.Field, float, int))
 
     column_dry_air_mass = (1 / g) * self.levels.integrate_over_pressure(
-        1.0 - q_total, p_surface_field, self.sim_units
+        1.0 - q_total, p_surface_field, self.sim_units  # pyrefly: ignore[bad-argument-type]
     )
     return {'column_dry_air_mass': column_dry_air_mass}
 
@@ -489,7 +489,7 @@ class ExtractEnergyResiduals(nnx.Module):
     )
 
     net_energy_terms = self.observation_operator.observe(
-        prognostics, query=self.energy_fluxes_query
+        prognostics, query=self.energy_fluxes_query  # pyrefly: ignore[bad-argument-type]
     )
 
     # Assuming observation_operator returns RT and FS fluxes in J/m^2
@@ -656,7 +656,7 @@ class ExtractColumnEnergyBudget(nnx.Module):
             ' provided.'
         )
       net_energy_terms = self.observation_operator.observe(
-          prognostics, query=self.energy_fluxes_query
+          prognostics, query=self.energy_fluxes_query  # pyrefly: ignore[bad-argument-type]
       )
 
       # Assuming observation_operator returns RT and FS fluxes in J/m^2

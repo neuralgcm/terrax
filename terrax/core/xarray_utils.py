@@ -124,9 +124,9 @@ def ensure_timedelta_axis(
         is_leaf=lambda x: isinstance(x, xarray.Dataset),
     )
   if 'time' in ds.dims:
-    ds = swap_time_to_timedelta(ds, timedelta_origin)
-  if 'time' in ds.coords:
-    ds = ds.reset_coords('time')
+    ds = swap_time_to_timedelta(ds, timedelta_origin)  # pyrefly: ignore[bad-argument-type, bad-assignment]
+  if 'time' in ds.coords:  # pyrefly: ignore[missing-attribute]
+    ds = ds.reset_coords('time')  # pyrefly: ignore[missing-attribute]
   return ds
 
 
@@ -138,7 +138,7 @@ def time_field_from_xarray_coords(
     raise ValueError(f'No `time` in {coords.keys()=}')
   timedelta = coordinates.TimeDelta.from_xarray(('timedelta',), coords)
   time = coords['time']
-  return cx.field(jdt.to_datetime(time.data), timedelta)
+  return cx.field(jdt.to_datetime(time.data), timedelta)  # pyrefly: ignore[bad-argument-type]
 
 
 def xarray_to_fields(
@@ -179,7 +179,7 @@ def field_from_xarray(
     additional_coord_types: tuple[cx.Coordinate, ...] = (),
 ) -> cx.Field:
   """Converts an xarray.DataArray to a Field using NeuralGCM coordinates."""
-  return cx.from_xarray(data_array, CORE_COORD_TYPES + additional_coord_types)
+  return cx.from_xarray(data_array, CORE_COORD_TYPES + additional_coord_types)  # pyrefly: ignore[bad-argument-type]
 
 
 def validate_xarray_inputs(
@@ -237,7 +237,7 @@ def read_from_xarray(
     coord_types = data_specs.get_coord_types(spec)
     if not strict_matches:
       coord_types += (cx.LabeledAxis,)
-    return field_from_xarray(da, coord_types)
+    return field_from_xarray(da, coord_types)  # pyrefly: ignore[bad-argument-type]
 
   result = {}
   for data_key, data_spec in in_spec.items():
@@ -313,10 +313,10 @@ def read_sharded_from_xarray(
       replace_dict = {exact: replaced}
       exact_to_replaced = lambda v: replace_dict.get(v, v)
       new_dim_match_rules = {
-          dim: exact_to_replaced(coord_or_spec.dim_match_rules.get(dim, exact))
+          dim: exact_to_replaced(coord_or_spec.dim_match_rules.get(dim, exact))  # pyrefly: ignore[no-matching-overload]
           for dim in coord_or_spec.coord.dims
       }
-      return data_specs.CoordSpec(coord, new_dim_match_rules)
+      return data_specs.CoordSpec(coord, new_dim_match_rules)  # pyrefly: ignore[bad-argument-type]
     elif isinstance(coord_or_spec, cx.Coordinate):
       return wrap_coordinate_shard(data_specs.CoordSpec(coord_or_spec))
     else:

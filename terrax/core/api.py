@@ -223,7 +223,7 @@ class Model(nnx.Module, abc.ABC):
     """Builds a model from a fiddle config with updated mesh properties."""
     # TODO(shoyer): Consider moving this method into a dedicated config module
     # (maybe also with some utilities from checkpointing).
-    if not issubclass(config.__fn_or_cls__, Model):
+    if not issubclass(config.__fn_or_cls__, Model):  # pyrefly: ignore[bad-argument-type]
       raise ValueError(
           f'Fiddle config defines {config.__fn_or_cls__} '
           'which does not inherit from the Model class'
@@ -592,7 +592,7 @@ class InferenceModel:
         model, typing.SimulationVariable, ...
     )
     dummy_model_sim_state = pytree_utils.shape_structure(model_sim_state)
-    return cls(graph_def, model_state, dummy_model_sim_state, fiddle_config)
+    return cls(graph_def, model_state, dummy_model_sim_state, fiddle_config)  # pyrefly: ignore[bad-argument-type]
 
   @functools.cached_property
   def dynamic_inputs_spec(
@@ -720,7 +720,7 @@ def _unroll_for_queries(
   """
   dt = model.timestep
   if dt != timedelta[0]:
-    timedelta = (dt,) + timedelta
+    timedelta = (dt,) + timedelta  # pyrefly: ignore[bad-assignment]
     queries = ({},) + queries
 
   if np.any(np.diff(timedelta) <= np.timedelta64(0, 's')):
@@ -930,15 +930,15 @@ def unroll_from_advance(
   [is_nested] = is_nested  # pylint: disable=unbalanced-tuple-unpacking
 
   if not is_nested:
-    timedelta = (timedelta,)
-    queries = (queries,)
+    timedelta = (timedelta,)  # pyrefly: ignore[bad-assignment]
+    queries = (queries,)  # pyrefly: ignore[bad-assignment]
 
-  final_timedelta = timedelta[-1] * steps
+  final_timedelta = timedelta[-1] * steps  # pyrefly: ignore[bad-index]
   return _unroll_for_queries(
       model,
       initial_state,
-      queries,
-      timedelta,
+      queries,  # pyrefly: ignore[bad-argument-type]
+      timedelta,  # pyrefly: ignore[bad-argument-type]
       final_timedelta,
       process_observations_fn,
       dynamic_inputs,
@@ -1066,7 +1066,7 @@ def unroll_for_template(
     )
   final_leadtime = scan_utils.shared_final_leadtime(combined_coords)
 
-  dt_and_specs = scan_utils.group_by_timedeltas(combined_coords, dt=dt)
+  dt_and_specs = scan_utils.group_by_timedeltas(combined_coords, dt=dt)  # pyrefly: ignore[bad-argument-type]
   # Construct queries and timedeltas replacing coordinates with template values.
   timedeltas = []
   queries = []

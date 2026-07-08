@@ -43,7 +43,7 @@ def get_geopotential(
       and 'specific_cloud_liquid_water_content' in inputs
   ):
     clouds = (
-        inputs['specific_cloud_ice_water_content'].data
+        inputs['specific_cloud_ice_water_content'].data  # pyrefly: ignore[unsupported-operation]
         + inputs['specific_cloud_liquid_water_content'].data
     )
   levels = cx.coords.extract(
@@ -69,7 +69,7 @@ def get_geopotential(
   elif isinstance(levels, coordinates.HybridLevels):
     a, b = levels.a_boundaries, levels.b_boundaries
     a_nondim = sim_units.nondimensionalize(a * typing.units.hPa)
-    nondim_hybrid_levels = hybrid_coordinates.HybridCoordinates(a_nondim, b)
+    nondim_hybrid_levels = hybrid_coordinates.HybridCoordinates(a_nondim, b)  # pyrefly: ignore[bad-argument-type]
     dino_get_geopotential = functools.partial(
         dinosaur_primitive_equations.get_geopotential_on_hybrid,
         nodal_orography=orography.nodal_orography.data,
@@ -87,7 +87,7 @@ def get_geopotential(
         temperature=temperature.data,
         specific_humidity=specific_humidity.data,
         clouds=clouds,
-        surface_pressure=jnp.expand_dims(surface_pressure.data, axis=0),
+        surface_pressure=jnp.expand_dims(surface_pressure.data, axis=0),  # pyrefly: ignore[bad-argument-type]
     )
   else:
     raise ValueError(

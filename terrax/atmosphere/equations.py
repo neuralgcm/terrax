@@ -210,9 +210,9 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
             f'reference_temperatures provided on levels different from {levels}'
         )
       assert isinstance(reference_temperatures, cx.Field)  # make pytype happy.
-      t_ref_tuple = tuple(float(t) for t in reference_temperatures.data)
+      t_ref_tuple = tuple(float(t) for t in reference_temperatures.data)  # pyrefly: ignore[bad-argument-type]
     else:
-      t_ref_tuple = tuple(reference_temperatures)
+      t_ref_tuple = tuple(reference_temperatures)  # pyrefly: ignore[bad-argument-type]
       reference_temperatures = cx.field(np.array(t_ref_tuple), levels)
 
     self.ylm_map = ylm_map
@@ -236,7 +236,7 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
       self.equation_cls = primitive_equations.PrimitiveEquationsSigma
       self.dinosaur_coords = coordinate_systems.CoordinateSystem(
           horizontal=self.ylm_map.dinosaur_grid,
-          vertical=self.levels.sigma_levels,
+          vertical=self.levels.sigma_levels,  # pyrefly: ignore[missing-attribute]
           spmd_mesh=self.ylm_map.dinosaur_spmd_mesh,
       )
       if vertical_advection is None:
@@ -247,7 +247,7 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
       self.equation_cls = primitive_equations.PrimitiveEquationsHybrid
       self.dinosaur_coords = coordinate_systems.CoordinateSystem(
           horizontal=self.ylm_map.dinosaur_grid,
-          vertical=self.levels.hybrid_levels,
+          vertical=self.levels.hybrid_levels,  # pyrefly: ignore[missing-attribute]
           spmd_mesh=self.ylm_map.dinosaur_spmd_mesh,
       )
       if vertical_advection is None:
@@ -273,10 +273,10 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
   def primitive_equation(self):
     return self.equation_cls(
         coords=self.dinosaur_coords,
-        physics_specs=self.sim_units,
+        physics_specs=self.sim_units,  # pyrefly: ignore[bad-argument-type]
         reference_temperature=np.asarray(self.t_ref_tuple),
-        orography=self.orography_module.modal_orography.data,
-        vertical_advection=self.vertical_advection,
+        orography=self.orography_module.modal_orography.data,  # pyrefly: ignore[bad-argument-type]
+        vertical_advection=self.vertical_advection,  # pyrefly: ignore[bad-argument-type]
         include_vertical_advection=self.include_vertical_advection,
         humidity_key=self.humidity_key,
         cloud_keys=self.cloud_keys,
@@ -295,11 +295,11 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
     tracers_dict = {k: inputs[k].data for k in self.tracer_names}
     log_surface_pressure = inputs['log_surface_pressure'].data[np.newaxis]
     return primitive_equations.State(
-        divergence=inputs['divergence'].data,
-        vorticity=inputs['vorticity'].data,
-        temperature_variation=inputs['temperature_variation'].data,
-        tracers=tracers_dict,
-        log_surface_pressure=log_surface_pressure,
+        divergence=inputs['divergence'].data,  # pyrefly: ignore[unexpected-keyword]
+        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[unexpected-keyword]
+        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[unexpected-keyword]
+        tracers=tracers_dict,  # pyrefly: ignore[unexpected-keyword]
+        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[unexpected-keyword]
     )
 
   def _from_primitive_equations_state(
@@ -395,9 +395,9 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
             f'reference_temperatures provided on levels different from {levels}'
         )
       assert isinstance(reference_temperatures, cx.Field)  # make pytype happy.
-      t_ref_tuple = tuple(float(t) for t in reference_temperatures.data)
+      t_ref_tuple = tuple(float(t) for t in reference_temperatures.data)  # pyrefly: ignore[bad-argument-type]
     else:
-      t_ref_tuple = tuple(reference_temperatures)
+      t_ref_tuple = tuple(reference_temperatures)  # pyrefly: ignore[bad-argument-type]
       reference_temperatures = cx.field(np.array(t_ref_tuple), levels)
 
     self.ylm_map = ylm_map
@@ -441,7 +441,7 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
     )
     return self.forcing_cls(
         coords=dinosaur_coords,
-        physics_specs=self.sim_units,
+        physics_specs=self.sim_units,  # pyrefly: ignore[bad-argument-type]
         reference_temperature=np.asarray(self.t_ref_tuple),
         p0=self.p0,
         sigma_b=self.sigma_b,
@@ -462,10 +462,10 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
     inputs = self.linearize_transform(inputs)  # temperature -> variation.
     log_surface_pressure = inputs['log_surface_pressure'].data[np.newaxis]
     return primitive_equations.State(
-        divergence=inputs['divergence'].data,
-        vorticity=inputs['vorticity'].data,
-        temperature_variation=inputs['temperature_variation'].data,
-        log_surface_pressure=log_surface_pressure,
+        divergence=inputs['divergence'].data,  # pyrefly: ignore[unexpected-keyword]
+        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[unexpected-keyword]
+        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[unexpected-keyword]
+        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[unexpected-keyword]
     )
 
   def _from_primitive_equations_state(
@@ -484,6 +484,6 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
   def explicit_terms(
       self, state: primitive_equations.StateWithTime
   ) -> primitive_equations.StateWithTime:
-    return self._from_primitive_equations_state(
-        self.forcing.explicit_terms(self._to_primitive_equations_state(state))
+    return self._from_primitive_equations_state(  # pyrefly: ignore[bad-return]
+        self.forcing.explicit_terms(self._to_primitive_equations_state(state))  # pyrefly: ignore[bad-argument-type]
     )

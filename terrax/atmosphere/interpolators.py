@@ -240,7 +240,7 @@ class LinearOnPressure(nnx.Module):
     inputs = inputs.copy()  # avoid mutating inputs.
     surface_pressure = inputs.pop('surface_pressure', None)
     out = {
-        k: self.interpolate_f(v, surface_pressure) for k, v in inputs.items()
+        k: self.interpolate_f(v, surface_pressure) for k, v in inputs.items()  # pyrefly: ignore[bad-argument-type]
     }
     if self.include_surface_pressure_in_output and surface_pressure is not None:
       out['surface_pressure'] = surface_pressure
@@ -330,7 +330,7 @@ class ConservativeOnPressure(nnx.Module):
     out_axes = {
         d: i for i, d in enumerate(f.coordinate.dims) if d not in level.dims
     }
-    regrid_fn = cx.cmap(self.regrid_array, out_axes=out_axes)
+    regrid_fn = cx.cmap(self.regrid_array, out_axes=out_axes)  # pyrefly: ignore[bad-argument-type]
     result = regrid_fn(
         target_bounds.untag(sigma_b),
         source_bounds.untag(axis),

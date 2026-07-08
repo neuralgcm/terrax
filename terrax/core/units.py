@@ -95,7 +95,7 @@ class SimUnits:
     base_unit = 's'  # return value is rounded down to nearest base_unit
     dt = self.scale.dimensionalize(value, typing.units(base_unit)).m
     if isinstance(dt, np.ndarray):
-      return dt.astype(f'timedelta64[{base_unit}]')
+      return dt.astype(f'timedelta64[{base_unit}]')  # pyrefly: ignore[bad-return]
     else:
       return np.timedelta64(int(dt), base_unit)
 
@@ -146,16 +146,16 @@ class SimUnits:
   ) -> SimUnits:
     """Constructs `SimUnits` from SI constants."""
     return cls(
-        scale.nondimensionalize(radius_si),
-        scale.nondimensionalize(angular_velocity_si),
-        scale.nondimensionalize(gravity_acceleration_si),
-        scale.nondimensionalize(ideal_gas_constant_si),
-        scale.nondimensionalize(water_vapor_gas_constant_si),
-        scale.nondimensionalize(water_vapor_isobaric_heat_capacity_si),
-        scale.nondimensionalize(water_density_si),
-        scale.nondimensionalize(latent_heat_vaporization_si),
-        scale.nondimensionalize(latent_heat_fusion_si),
-        scale.nondimensionalize(kappa_si),
+        scale.nondimensionalize(radius_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(angular_velocity_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(gravity_acceleration_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(ideal_gas_constant_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(water_vapor_gas_constant_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(water_vapor_isobaric_heat_capacity_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(water_density_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(latent_heat_vaporization_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(latent_heat_fusion_si),  # pyrefly: ignore[bad-argument-type]
+        scale.nondimensionalize(kappa_si),  # pyrefly: ignore[bad-argument-type]
         reference_datetime=reference_datetime,
         scale=scale,
     )

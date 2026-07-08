@@ -65,7 +65,7 @@ def combine_fields(
       (c,) if isinstance(c, str) else c.dims for c in dims_to_align
   ]
   aligned_dims = tuple(itertools.chain(*aligned_dims_tuples))
-  _validate_aligned_dims(aligned_dims)
+  _validate_aligned_dims(aligned_dims)  # pyrefly: ignore[bad-argument-type]
 
   def _get_concat_axis(f: cx.Field) -> cx.Coordinate | None:
     """Returns Coordinate | None representing the axis to concatenate over."""
@@ -91,7 +91,7 @@ def combine_fields(
   concat_axes = {k: _get_concat_axis(v) for k, v in fields.items()}
   expand = cx.cmap(lambda x: x[np.newaxis])
   add_positional = lambda f, c: expand(f) if c is None else f.untag(*c.dims)
-  fields = [
+  fields = [  # pyrefly: ignore[bad-assignment]
       add_positional(f, concat_axes[k]) for k, f in sorted(fields.items())
   ]
   try:
@@ -301,7 +301,7 @@ def in_axes_for_coord(
     raise ValueError(f'idx can be computed only for 1d coord, got {coord}')
   dim = coord.dims[0]
   leaves, treedef = jax.tree.flatten(inputs, is_leaf=cx.is_field)
-  indices = [x.named_axes.get(dim) if cx.is_field(x) else None for x in leaves]
+  indices = [x.named_axes.get(dim) if cx.is_field(x) else None for x in leaves]  # pyrefly: ignore[bad-argument-type]
   return jax.tree.unflatten(treedef, indices)
 
 
@@ -312,7 +312,7 @@ def nest_in_axes(*in_axes_to_nest: typing.Pytree) -> tuple[typing.Pytree, ...]:
 
   def _validate_in_axes_for_leaf(*original_axes: Sequence[int | None]):
     non_none_axes = [ax for ax in original_axes if ax is not None]
-    if any(ax < 0 for ax in non_none_axes):
+    if any(ax < 0 for ax in non_none_axes):  # pyrefly: ignore[unsupported-operation]
       raise ValueError(f'Negative axes are not allowed. Got: {original_axes}')
     if len(set(non_none_axes)) != len(non_none_axes):
       raise ValueError(
@@ -361,11 +361,11 @@ def zero_mask_axis_outliers(
   if [upper, lower].count(None) == 2:
     raise ValueError('Must specify at least one of `lower` or `upper`.')
   ticks = get_tick_fn(axis).data
-  mask = jnp.ones_like(ticks, dtype=bool)
+  mask = jnp.ones_like(ticks, dtype=bool)  # pyrefly: ignore[bad-argument-type]
   if lower is not None:
-    mask &= ticks >= lower
+    mask &= ticks >= lower  # pyrefly: ignore[unsupported-operation]
   if upper is not None:
-    mask &= ticks <= upper
+    mask &= ticks <= upper  # pyrefly: ignore[unsupported-operation]
   return field * cx.field(mask, axis)
 
 
@@ -387,14 +387,14 @@ def reconstruct_1d_field_from_ref_values(
   """Reconstructs 1D Field via interpolation of reference values."""
   ticks = get_tick_fn(axis).data
   if interpolation_space == 'log':
-    log_values = np.interp(ticks, ref_ticks, np.log(ref_values))
+    log_values = np.interp(ticks, ref_ticks, np.log(ref_values))  # pyrefly: ignore[no-matching-overload]
     values = np.exp(log_values)
   elif interpolation_space == 'sqrt':
-    values = np.square(np.interp(ticks, ref_ticks, np.sqrt(ref_values)))
+    values = np.square(np.interp(ticks, ref_ticks, np.sqrt(ref_values)))  # pyrefly: ignore[no-matching-overload]
   elif interpolation_space == 'square':
-    values = np.sqrt(np.interp(ticks, ref_ticks, np.square(ref_values)))
+    values = np.sqrt(np.interp(ticks, ref_ticks, np.square(ref_values)))  # pyrefly: ignore[no-matching-overload]
   elif interpolation_space == 'linear':
-    values = np.interp(ticks, ref_ticks, ref_values)
+    values = np.interp(ticks, ref_ticks, ref_values)  # pyrefly: ignore[no-matching-overload]
   else:
     raise ValueError(f'Unsupported interpolation space: {interpolation_space}')
   return cx.field(values, axis)

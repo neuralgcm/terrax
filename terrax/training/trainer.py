@@ -166,7 +166,7 @@ def _on_host[T: Callable[..., Any]](fn: T) -> T:
     with compute_on.compute_on('device_host'):
       return fn(*args, **kwargs)
 
-  return _fn
+  return _fn  # pyrefly: ignore[bad-return]
 
 
 def _maybe_on_host[T: Callable[..., Any]](fn: T, compute_on_host: bool) -> T:
@@ -322,7 +322,7 @@ def _compute_aggregation(
   else:
     targets_slice = cx.tag(loaded_targets_slice, batch_axis)
 
-  queries = data_specs.construct_query(targets_slice, query_spec)
+  queries = data_specs.construct_query(targets_slice, query_spec)  # pyrefly: ignore[bad-argument-type]
   targets_only_slice = data_loading.filter_inputs_by_queries(
       targets_slice, query_spec
   )
@@ -372,7 +372,7 @@ def create_nested_evaluators(
     """Swaps dummy axis with TimeDelta."""
     if timedelta_replica_name in f.dims:
       dummy = f.axes[timedelta_replica_name]
-      td = coordinates.TimeDelta(dummy.ticks)
+      td = coordinates.TimeDelta(dummy.ticks)  # pyrefly: ignore[missing-attribute]
       return cx.field(f.data, cx.coords.replace_axes(f.coordinate, dummy, td))
     return f
 
@@ -403,7 +403,7 @@ def create_nested_evaluators(
       context_fields, dt=dt, ref_t0=np.timedelta64(0, 's')
   )
   nested_context_fields = tuple(
-      {k.removesuffix(f'_{i}'): _swap_replica(v) for k, v in d.items()}
+      {k.removesuffix(f'_{i}'): _swap_replica(v) for k, v in d.items()}  # pyrefly: ignore[bad-argument-type]
       for i, d in enumerate(nested_context_fields)
   )
   return tuple(
@@ -552,7 +552,7 @@ def _construct_full_queries_spec(
     for var_name, q_spec in specs.items():
       input_coord = inputs_spec[source][var_name]
       q_spec_coord = q_spec.spec if is_field_in_query(q_spec) else q_spec
-      if not cx.contains_dims(input_coord, q_spec_coord):
+      if not cx.contains_dims(input_coord, q_spec_coord):  # pyrefly: ignore[bad-argument-type]
         raise ValueError(
             f'query entry {source}/{var_name} has inconsistent coordinates with'
             f' {input_coord=}.'
@@ -789,19 +789,19 @@ class RolloutTrainer:
     """Returns nested steps and specs from `flat_spec` with timedelta coords."""
     dt = self.model.timestep  # pytype: disable=attribute-error
     t0 = np.timedelta64(0, 's')
-    nested_specs = scan_utils.nested_scan_specs(flat_spec, dt=dt, ref_t0=t0)
-    steps = scan_utils.nested_scan_steps(flat_spec, dt=dt, ref_t0=t0)
-    return steps, nested_specs
+    nested_specs = scan_utils.nested_scan_specs(flat_spec, dt=dt, ref_t0=t0)  # pyrefly: ignore[bad-argument-type]
+    steps = scan_utils.nested_scan_steps(flat_spec, dt=dt, ref_t0=t0)  # pyrefly: ignore[bad-argument-type]
+    return steps, nested_specs  # pyrefly: ignore[bad-return]
 
   def _setup_callbacks(
       self, stage: EvalSchema | TrainStage
   ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     """Returns tuples of retrieve_fns and buffers for a given stage."""
     data_spec = data_loading.filter_inputs_by_queries(
-        stage.inputs_spec, stage.queries_spec, include_field_in_query=True
+        stage.inputs_spec, stage.queries_spec, include_field_in_query=True  # pyrefly: ignore[bad-argument-type]
     )
     nested_steps, nested_data_specs = self._get_nested_steps_and_specs(
-        data_spec
+        data_spec  # pyrefly: ignore[bad-argument-type]
     )
     # idx_steps starts with 1 for most frequent and follows the product of
     # nested step frequencies for each subsequent level.
@@ -972,7 +972,7 @@ class RolloutTrainer:
     )
     process_fn = lambda proc_module, target_slice: proc_module(target_slice)
     target_struct = nnx.eval_shape(process_fn, process_obs, target_slice_struct)
-    queries_struct = data_specs.construct_query(data_slice_struct, queries_spec)
+    queries_struct = data_specs.construct_query(data_slice_struct, queries_spec)  # pyrefly: ignore[bad-argument-type]
     dummy_observe = lambda model, proc_module, q: proc_module(
         _drop_field_in_queries_outputs(model.observe(q), q)
     )
@@ -1173,7 +1173,7 @@ class RolloutTrainer:
           run_evaluator_fn=self.run_evaluator,
           combine_agg_states_fn=self.combine_agg_states,
           training_mesh=self.training_mesh,
-          batch_axis=batch_axis,
+          batch_axis=batch_axis,  # pyrefly: ignore[bad-argument-type]
       )
 
       # Combine inner and current agg states.
@@ -1265,18 +1265,18 @@ class RolloutTrainer:
     rollout_spec = data_loading.filter_inputs_by_queries(
         rollout_spec, train_stage.queries_spec, include_field_in_query=True
     )
-    _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)
+    _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)  # pyrefly: ignore[bad-argument-type]
     # include_field_in_query is False for targets as field-in-query is not
     # included in model predictions (only contains dynamic query details).
     targets_spec = data_loading.filter_inputs_by_queries(
-        inputs_spec, train_stage.queries_spec, include_field_in_query=False
+        inputs_spec, train_stage.queries_spec, include_field_in_query=False  # pyrefly: ignore[bad-argument-type]
     )
-    _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)
+    _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)  # pyrefly: ignore[bad-argument-type]
     full_queries_spec = _construct_full_queries_spec(  # include timedelta now.
-        rollout_spec, train_stage.queries_spec
+        rollout_spec, train_stage.queries_spec  # pyrefly: ignore[bad-argument-type]
     )
     nested_steps, nested_timed_queries_specs = self._get_nested_steps_and_specs(
-        full_queries_spec
+        full_queries_spec  # pyrefly: ignore[bad-argument-type]
     )
     nested_queries_specs = jax.tree.map(
         _remove_timedelta, nested_timed_queries_specs, is_leaf=_is_coord
@@ -1300,7 +1300,7 @@ class RolloutTrainer:
           self.model.timestep,  # pytype: disable=attribute-error
           retrieve_fns,
           train_stage.queries_spec,
-          batch_axis,
+          batch_axis,  # pyrefly: ignore[bad-argument-type]
       )
 
       # Initializing the model state.
@@ -1317,7 +1317,7 @@ class RolloutTrainer:
           rng,
           init_slice,
           dynamic_data,
-          batch_axis,
+          batch_axis,  # pyrefly: ignore[bad-argument-type]
           ensemble_axis,
       )
       eb_model_state = nnx.state(eb_model, typing.SimulationVariable)
@@ -1380,7 +1380,7 @@ class RolloutTrainer:
       full_agg_state = functools.reduce(
           _merge_agg_states, loss_agg_state_tuple, {}
       )
-      loss_value = loss_evaluator.evaluate_total({}, {}, full_agg_state).data
+      loss_value = loss_evaluator.evaluate_total({}, {}, full_agg_state).data  # pyrefly: ignore[bad-argument-type]
       return loss_value
 
     # We would use donate_argnums here to update experiment_state in-place, but
@@ -1436,16 +1436,16 @@ class RolloutTrainer:
     rollout_spec = data_loading.filter_inputs_by_queries(
         rollout_spec, eval_schema.queries_spec, include_field_in_query=True
     )
-    _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)
+    _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)  # pyrefly: ignore[bad-argument-type]
     targets_spec = data_loading.filter_inputs_by_queries(
-        inputs_spec, eval_schema.queries_spec
+        inputs_spec, eval_schema.queries_spec  # pyrefly: ignore[bad-argument-type]
     )
-    _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)
+    _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)  # pyrefly: ignore[bad-argument-type]
     full_queries_spec = _construct_full_queries_spec(  # include timedelta now.
-        rollout_spec, eval_schema.queries_spec
+        rollout_spec, eval_schema.queries_spec  # pyrefly: ignore[bad-argument-type]
     )
     nested_steps, nested_timed_queries_specs = self._get_nested_steps_and_specs(
-        full_queries_spec
+        full_queries_spec  # pyrefly: ignore[bad-argument-type]
     )
     nested_queries_specs = jax.tree.map(
         _remove_timedelta, nested_timed_queries_specs, is_leaf=_is_coord
@@ -1470,12 +1470,12 @@ class RolloutTrainer:
           self.model.timestep,  # pytype: disable=attribute-error
           retrieve_fns,
           eval_schema.queries_spec,
-          batch_axis,
+          batch_axis,  # pyrefly: ignore[bad-argument-type]
       )
 
       # Initializing the model state.
       [batch_size], [ensemble_size] = (
-          batch_axis.shape,
+          batch_axis.shape,  # pyrefly: ignore[missing-attribute]
           self.ensemble_axis.shape,
       )
       rng = train_utils.batch_and_ensemble_parallel_rng_key(
@@ -1498,7 +1498,7 @@ class RolloutTrainer:
           rng,
           init_slice,
           dynamic_data,
-          batch_axis,
+          batch_axis,  # pyrefly: ignore[bad-argument-type]
           ensemble_axis,
       )
       evaluators_seq, agg_states_seq = [], []
@@ -1657,7 +1657,7 @@ class RolloutTrainer:
             train_iter,
             train_step_fn,
             evaluation_fns,
-        ) = self.build_train_and_eval_iterators(schedule_idx)
+        ) = self.build_train_and_eval_iterators(schedule_idx)  # pyrefly: ignore[bad-argument-type]
 
       # restart on NaN loss
       if (
@@ -1689,7 +1689,7 @@ class RolloutTrainer:
 
       if (
           auto_restart.iteration
-          and step - self.max_lookback_interval > auto_restart.began_at
+          and step - self.max_lookback_interval > auto_restart.began_at  # pyrefly: ignore[unsupported-operation]
       ):
         logging.info(
             f'Significant progress made since {auto_restart.began_at=}.'
@@ -1835,7 +1835,7 @@ class RolloutTrainer:
       logging.info('Resuming training from saved checkpoint')
       args = self.get_checkpoint_state(restore=True)
       ckpt = self.checkpoint_manager.restore(latest_step, args=args)
-      return self._initialize_from_checkpoint(ckpt)
+      return self._initialize_from_checkpoint(ckpt)  # pyrefly: ignore[bad-argument-type]
 
     elif initial_dir is not None:
       logging.info('Starting training with weights from another experiment')
@@ -1857,7 +1857,7 @@ class RolloutTrainer:
       logging.info('Starting training with new weights')
       if self.calibration_modules:
         for calibrator in self.calibration_modules:
-          self.model = calibrator(
+          self.model = calibrator(  # pyrefly: ignore[bad-assignment]
               self.model, self.data_loader, self.train_schedule
           )
       split_state = model_checkpointing.split_model_state_for_saving(self.model)
@@ -1903,7 +1903,7 @@ class RolloutTrainer:
     )
     args = self.get_checkpoint_state(restore=True)
     ckpt = self.checkpoint_manager.restore(saved_step, args=args)
-    start_step, _, experiment_state = self._initialize_from_checkpoint(ckpt)
+    start_step, _, experiment_state = self._initialize_from_checkpoint(ckpt)  # pyrefly: ignore[bad-argument-type]
     return (start_step, experiment_state)
 
   def save_checkpoint(
@@ -2025,7 +2025,7 @@ class RolloutTrainer:
     if eval_schema.loss_evaluator is not None:
       loss_evaluator = eval_schema.loss_evaluator
       loss_val = float(
-          loss_evaluator.evaluate_total({}, {}, total_loss_agg).data
+          loss_evaluator.evaluate_total({}, {}, total_loss_agg).data  # pyrefly: ignore[bad-argument-type]
       )
       key = '.'.join([eval_schema.name, 'total'])
       values_to_record[key] = loss_val
@@ -2060,7 +2060,7 @@ class RolloutTrainer:
               f'{eval_schema.name}_relative_contributions/{data_key}_{term_key}'
           )
           loss_term_value = w * float(
-              term_metric.total(term_metric_values).data
+              term_metric.total(term_metric_values).data  # pyrefly: ignore[bad-argument-type]
           )
           if loss_val != 0:
             values_to_record[relative_value_key] = loss_term_value / loss_val
@@ -2073,7 +2073,7 @@ class RolloutTrainer:
           for debug_term_name in sorted(debug_terms.keys()):
             v = debug_terms[debug_term_name]
             key = f'{eval_schema.name}_{data_key}/{debug_term_name}'
-            values_to_record[key] = float(v.data)
+            values_to_record[key] = float(v.data)  # pyrefly: ignore[bad-argument-type]
 
       _collect_loss_terms(loss_evaluator, total_loss_agg, [])
 

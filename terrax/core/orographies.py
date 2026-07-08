@@ -75,7 +75,7 @@ class ModalOrography(nnx.Module):
         nodal_orography, sim_units
     )
     grid = data_ylm_map.nodal_grid
-    nodal_orography = xarray_utils.field_from_xarray(nodal_orography)
+    nodal_orography = xarray_utils.field_from_xarray(nodal_orography)  # pyrefly: ignore[bad-argument-type]
     nodal_orography.untag(grid).tag(grid)  # ensure that coordinates match.
     if not isinstance(spatial_filter, spatial_filters.ModalSpatialFilter):
       nodal_orography = spatial_filter(nodal_orography)
@@ -158,7 +158,7 @@ class Orography(nnx.Module):
     nodal_orography = xarray_utils.xarray_nondimensionalize(
         nodal_orography, sim_units
     )
-    nodal_orography = xarray_utils.field_from_xarray(nodal_orography)
+    nodal_orography = xarray_utils.field_from_xarray(nodal_orography)  # pyrefly: ignore[bad-argument-type]
     data_grid = nodal_orography.coordinate
     nodal_orography = spatial_filter(nodal_orography)
     if data_grid != self.grid:

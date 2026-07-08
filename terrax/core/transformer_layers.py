@@ -94,9 +94,9 @@ class MultiHeadAttention(nnx.Module):
       out_features: int | None = None,
       in_kv_features: int | None = None,
       *,
-      dtype: nnx.Dtype | None = None,
-      param_dtype: nnx.Dtype = jnp.float32,
-      precision: nnx.PrecisionLike = None,
+      dtype: nnx.Dtype | None = None,  # pyrefly: ignore[missing-attribute]
+      param_dtype: nnx.Dtype = jnp.float32,  # pyrefly: ignore[missing-attribute]
+      precision: nnx.PrecisionLike = None,  # pyrefly: ignore[missing-attribute]
       kernel_init: nnx.initializers.Initializer = default_kernel_init,
       out_kernel_init: nnx.initializers.Initializer | None = None,
       bias_init: nnx.initializers.Initializer = nnx.initializers.zeros_init(),
@@ -251,9 +251,9 @@ class MultiHeadAttention(nnx.Module):
           f'but module expects {self.in_features}.'
       )
 
-    query = self.query(inputs_q)
-    key = self.key(inputs_k)
-    value = self.value(inputs_v)
+    query = self.query(inputs_q)  # pyrefly: ignore[bad-argument-type]
+    key = self.key(inputs_k)  # pyrefly: ignore[bad-argument-type]
+    value = self.value(inputs_v)  # pyrefly: ignore[bad-argument-type]
 
     if self.normalize_qk:
       assert self.query_ln is not None and self.key_ln is not None
@@ -276,7 +276,7 @@ class MultiHeadAttention(nnx.Module):
         dtype=self.dtype,
         precision=self.precision,
     )
-    out = self.out(x)  # post-attention projection.
+    out = self.out(x)  # post-attention projection.  # pyrefly: ignore[bad-argument-type]
     return out
 
 
@@ -557,16 +557,16 @@ class TransformerBase(nnx.Module, abc.ABC):
     parts = zip(self.attentions, self.dense_layers, strict=True)
     for i, (attention, dense) in enumerate(parts):
       x_norm = pre_norms[2 * i](x)
-      keys = self.attention_key_source(x_norm, z, x_pos_enc, z_pos_enc)
-      values = self.attention_value_source(x_norm, z, x_pos_enc, z_pos_enc)
+      keys = self.attention_key_source(x_norm, z, x_pos_enc, z_pos_enc)  # pyrefly: ignore[bad-argument-type]
+      values = self.attention_value_source(x_norm, z, x_pos_enc, z_pos_enc)  # pyrefly: ignore[bad-argument-type]
       x_attn = self.apply_attention(
           attention=attention,
           query=x_norm,
-          key=keys,
-          value=values,
-          query_pos_encoding=x_pos_enc,
-          kv_pos_encoding=z_pos_enc,
-          mask=mask,
+          key=keys,  # pyrefly: ignore[bad-argument-type]
+          value=values,  # pyrefly: ignore[bad-argument-type]
+          query_pos_encoding=x_pos_enc,  # pyrefly: ignore[bad-argument-type]
+          kv_pos_encoding=z_pos_enc,  # pyrefly: ignore[bad-argument-type]
+          mask=mask,  # pyrefly: ignore[bad-argument-type]
           layer_idx=i,
       )
       x = gates[2 * i](x, self.activation(x_attn))
@@ -1168,7 +1168,7 @@ class WindowTransformerBlocks(TransformerBase):
     return result
 
   @classmethod
-  def build_using_factories(
+  def build_using_factories(  # pyrefly: ignore[bad-override]
       cls,
       input_size: int,
       output_size: int | None = None,
@@ -1275,7 +1275,7 @@ def spherical_harmonic_lon_lat_encodings(
     zeros = np.zeros(ylm_map.modal_grid.shape)
     # TODO(dkochkov): use sel semantic once it is added to coordax.
     zeros[2 * abs(m) + int(m < 0), l] = 1
-    return ylm_map.to_nodal_array(zeros)
+    return ylm_map.to_nodal_array(zeros)  # pyrefly: ignore[bad-argument-type]
 
   pe_maps = []
   for l in range(l_min, l_max):
@@ -1300,7 +1300,7 @@ class PositionalEncoder(Protocol):
 def _dim_names(*dims: str | cx.Coordinate) -> tuple[str, ...]:
   """Returns dimension names for a sequence of names and coordinates."""
   dim_tuples = [(c,) if isinstance(c, str) else c.dims for c in dims]
-  return tuple(itertools.chain(*dim_tuples))
+  return tuple(itertools.chain(*dim_tuples))  # pyrefly: ignore[bad-return]
 
 
 @nnx.dataclass
@@ -1379,7 +1379,7 @@ class EpdTransformer(nnx.Module, pytree=False):
     return cls(
         encode=encode,
         decode=decode,
-        process_blocks=process_blocks,
+        process_blocks=process_blocks,  # pyrefly: ignore[bad-argument-type]
         post_encode_activation=post_encode_activation,
         pre_decode_activation=pre_decode_activation,
         final_activation=final_activation,
@@ -1394,7 +1394,7 @@ class EpdTransformer(nnx.Module, pytree=False):
       mask: typing.Array | None = None,
   ) -> typing.Array:
     """Applies all EPD layers to inputs."""
-    encoded = self.encode(inputs)
+    encoded = self.encode(inputs)  # pyrefly: ignore[bad-argument-type]
     if self.post_encode_activation is not None:
       encoded = self.post_encode_activation(encoded)
     current = encoded
@@ -1408,7 +1408,7 @@ class EpdTransformer(nnx.Module, pytree=False):
       )
     if self.pre_decode_activation is not None:
       current = self.pre_decode_activation(current)
-    out = self.decode(current)
+    out = self.decode(current)  # pyrefly: ignore[bad-argument-type]
     if self.final_activation is not None:
       return self.final_activation(out)
     return out

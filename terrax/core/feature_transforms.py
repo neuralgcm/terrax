@@ -58,7 +58,7 @@ class RadiationFeatures(transforms.PytreeTransformABC):
     features = {}
     features['radiation'] = cx.field(
         jax_solar.normalized_radiation_flux(
-            time=inputs['time'].data, longitude=self.lon, latitude=self.lat
+            time=inputs['time'].data, longitude=self.lon, latitude=self.lat  # pyrefly: ignore[bad-argument-type]
         ),
         self.grid,
     )
@@ -120,13 +120,13 @@ class DynamicInputFeatures(transforms.TransformABC):
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     time_offsets = self.time_offsets or np.timedelta64(0, 's')
     if isinstance(time_offsets, np.timedelta64):
-      time = cx.field(jdt.to_timedelta(time_offsets)) + inputs['time']
+      time = cx.field(jdt.to_timedelta(time_offsets)) + inputs['time']  # pyrefly: ignore[bad-argument-type]
       data_features = self.dynamic_input_module(time)
       return {k: data_features[k] for k in self.keys}
     assert isinstance(time_offsets, dict)  # Make pytype happy.
     features = {}
     for suffix, offset in time_offsets.items():
-      offset_time = inputs['time'] + cx.field(jdt.to_timedelta(offset))
+      offset_time = inputs['time'] + cx.field(jdt.to_timedelta(offset))  # pyrefly: ignore[bad-argument-type]
       data_features = self.dynamic_input_module(offset_time)
       for k in self.keys:
         features[f'{k}_{suffix}'] = data_features[k]
@@ -264,7 +264,7 @@ class ClimatologyFeatures(transforms.PytreeTransformABC):
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     time = inputs['time']
     if self.time_offset != np.timedelta64(0, 's'):
-      time = time + cx.field(jdt.to_timedelta(self.time_offset))
+      time = time + cx.field(jdt.to_timedelta(self.time_offset))  # pyrefly: ignore[bad-argument-type]
 
     day_idx = cx.cpmap(self._get_day_index)(time)
     slice_array = functools.partial(
@@ -299,6 +299,6 @@ class ClimatologyFeatures(transforms.PytreeTransformABC):
             raise ValueError(f'Unsupported {reduce_hour_method=}')
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da, (cx.LabeledAxis,))
+        candidate = xarray_utils.field_from_xarray(da, (cx.LabeledAxis,))  # pyrefly: ignore[bad-argument-type]
         full_coord = cx.coords.compose(day_axis, self.coords[key])
         feature.set_value(candidate.order_as(full_coord).data)

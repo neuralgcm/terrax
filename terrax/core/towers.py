@@ -73,7 +73,7 @@ class ForwardTower(nnx.Module):
       rngs: nnx.Rngs,
   ):
     network = neural_net_factory(input_size, output_size, rngs=rngs)
-    return cls(network, inputs_in_dims, out_dims, apply_remat)
+    return cls(network, inputs_in_dims, out_dims, apply_remat)  # pyrefly: ignore[bad-argument-type]
 
 
 # Factory typically expects input_size, output_size args, and rngs kwarg.
@@ -278,8 +278,8 @@ class TransformerTower(nnx.Module):
   ) -> cx.Field:
     x_dims = self.inputs_in_dims
     z_dims = self.latents_in_dims if self.latents_in_dims else x_dims
-    x, x_pe = self._prep_field(inputs, self.positional_encoder, x_dims)
-    z, z_pe = self._prep_field(latents, self.latents_positional_encoder, z_dims)
+    x, x_pe = self._prep_field(inputs, self.positional_encoder, x_dims)  # pyrefly: ignore[bad-argument-type]
+    z, z_pe = self._prep_field(latents, self.latents_positional_encoder, z_dims)  # pyrefly: ignore[bad-argument-type]
     assert isinstance(x, cx.Field)  # make pytype happy.
     if mask is not None:
       mask = mask.untag(*z_dims)
@@ -324,7 +324,7 @@ class TransformerTower(nnx.Module):
   ):
     transformer = neural_net_factory(input_size, output_size, rngs=rngs)
     return cls(
-        neural_net=transformer,
+        neural_net=transformer,  # pyrefly: ignore[bad-argument-type]
         inputs_in_dims=inputs_in_dims,
         out_dims=out_dims,
         positional_encoder=positional_encoder,

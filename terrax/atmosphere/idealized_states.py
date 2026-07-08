@@ -38,7 +38,7 @@ def _dino_state_to_neuralgcm_dict(
     temperature_format: Literal['absolute', 'variation'] = 'absolute',
 ) -> dict[str, cx.Field]:
   """Converts dinosaur state to neuralgcm state dict."""
-  state_dict = state.asdict()
+  state_dict = state.asdict()  # pyrefly: ignore[missing-attribute]
   state_dict |= state_dict.pop('tracers')
   if temperature_format == 'absolute':
     if not aux_features or 'ref_temperatures' not in aux_features:
@@ -62,15 +62,15 @@ def _dino_state_to_neuralgcm_dict(
   }
   if as_nodal:
     state_dict = transforms.ToNodal(ylm_map)(state_dict)
-  if 'orography' in aux_features:
-    state_dict['orography'] = cx.field(aux_features['orography'], grid)
-  if 'ref_temperatures' in aux_features:
-    ref_temperatures = cx.field(aux_features['ref_temperatures'], levels)
-    state_dict['ref_temperatures'] = ref_temperatures
-  if 'geopotential' in aux_features:
-    geopotential = cx.field(aux_features['geopotential'], levels, grid)
-    state_dict['geopotential'] = geopotential
-  return state_dict
+  if 'orography' in aux_features:  # pyrefly: ignore[not-iterable]
+    state_dict['orography'] = cx.field(aux_features['orography'], grid)  # pyrefly: ignore[unsupported-operation]
+  if 'ref_temperatures' in aux_features:  # pyrefly: ignore[not-iterable]
+    ref_temperatures = cx.field(aux_features['ref_temperatures'], levels)  # pyrefly: ignore[unsupported-operation]
+    state_dict['ref_temperatures'] = ref_temperatures  # pyrefly: ignore[unsupported-operation]
+  if 'geopotential' in aux_features:  # pyrefly: ignore[not-iterable]
+    geopotential = cx.field(aux_features['geopotential'], levels, grid)  # pyrefly: ignore[unsupported-operation]
+    state_dict['geopotential'] = geopotential  # pyrefly: ignore[unsupported-operation]
+  return state_dict  # pyrefly: ignore[bad-return]
 
 
 def to_si_units(
@@ -121,7 +121,7 @@ def isothermal_rest_atmosphere(
   )
   init_state_fn, aux = primitive_equations_states.isothermal_rest_atmosphere(
       coords=dinosaur_coords,
-      physics_specs=sim_units,
+      physics_specs=sim_units,  # pyrefly: ignore[bad-argument-type]
       tref=tref,
       p0=p0,
       p1=p1,
@@ -165,7 +165,7 @@ def steady_state_jw(
   )
   init_state_fn, aux = primitive_equations_states.steady_state_jw(
       dinosaur_coords,  # coords
-      sim_units,  # physics_specs
+      sim_units,  # physics_specs  # pyrefly: ignore[bad-argument-type]
       u0,  # u0
       p0,  # p0
       t0,  # t0
@@ -216,7 +216,7 @@ def perturbed_jw(
   )
   init_state_fn, aux = primitive_equations_states.steady_state_jw(
       dinosaur_coords,  # coords
-      sim_units,  # physics_specs
+      sim_units,  # physics_specs  # pyrefly: ignore[bad-argument-type]
       u0,  # u0
       p0,  # p0
       t0,  # t0
@@ -229,7 +229,7 @@ def perturbed_jw(
   dino_steady_state = init_state_fn(rng)
   dino_perturbation = primitive_equations_states.baroclinic_perturbation_jw(
       dinosaur_coords,
-      sim_units,
+      sim_units,  # pyrefly: ignore[bad-argument-type]
       u_perturb=u_perturb,
       lon_location=lon_location,
       lat_location=lat_location,

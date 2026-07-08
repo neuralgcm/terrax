@@ -108,7 +108,7 @@ class ExponentialModalFilter(ModalSpatialFilter):
       )
     return cls(
         ylm_map=ylm_map,
-        attenuation=(dt / timescale),
+        attenuation=(dt / timescale),  # pyrefly: ignore[bad-argument-type, unsupported-operation]
         order=order,
         cutoff=cutoff,
     )

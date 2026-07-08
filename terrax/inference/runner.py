@@ -52,11 +52,11 @@ def _queries_to_dummy_datatree(queries: typing.Queries) -> xarray.DataTree:
     for var, c in sub_query.items():
       if isinstance(c, data_specs.FieldInQuerySpec):
         c = c.spec
-      coords = c.coordinate.to_xarray() if cx.is_field(c) else c.to_xarray()
+      coords = c.coordinate.to_xarray() if cx.is_field(c) else c.to_xarray()  # pyrefly: ignore[missing-attribute]
       ds[var] = xarray.DataArray(
           # TODO(shoyer): include dtype as part of the query spec?
-          data=dask.array.zeros(c.shape, np.float32),
-          dims=c.dims,
+          data=dask.array.zeros(c.shape, np.float32),  # pyrefly: ignore[missing-attribute]
+          dims=c.dims,  # pyrefly: ignore[missing-attribute]
           coords=coords,
       )
     outputs[group] = ds
@@ -266,15 +266,15 @@ class InferenceRunner:
 
   @property
   def steps_per_unroll(self) -> int:
-    return self.unroll_duration // self.output_freq
+    return self.unroll_duration // self.output_freq  # pyrefly: ignore[bad-return]
 
   @property
   def max_steps_per_write(self) -> int:
-    return self.write_duration // self.output_freq
+    return self.write_duration // self.output_freq  # pyrefly: ignore[bad-return]
 
   @property
   def steps_per_checkpoint(self) -> int:
-    return self.checkpoint_duration // self.output_freq
+    return self.checkpoint_duration // self.output_freq  # pyrefly: ignore[bad-return]
 
   def _checkpoints_path(self) -> epath.Path:
     # names beginning with __ are reserved for Zarr v3 extensions:
@@ -286,7 +286,7 @@ class InferenceRunner:
   ) -> dict[str, tuple[int, ...]]:
     """Return encoding for a DataArray."""
     chunks = tuple(
-        self.zarr_chunks.get(dim, size) for dim, size in array.sizes.items()
+        self.zarr_chunks.get(dim, size) for dim, size in array.sizes.items()  # pyrefly: ignore[no-matching-overload]
     )
     # TODO(shoyer): Remove fill_value after Xarray defaults to NaN:
     # https://github.com/pydata/xarray/pull/10757
@@ -294,10 +294,10 @@ class InferenceRunner:
     zarr_shards = self.zarr_shards
     if zarr_shards is not None:
       encoding['shards'] = tuple(
-          zarr_shards.get(dim, chunksize)
+          zarr_shards.get(dim, chunksize)  # pyrefly: ignore[no-matching-overload]
           for dim, chunksize in zip(array.dims, chunks)
       )
-    return encoding
+    return encoding  # pyrefly: ignore[bad-return]
 
   def setup(self) -> None:
     """Call once to setup metadata in output Zarr(s)."""
@@ -423,7 +423,7 @@ class InferenceRunner:
     # Use individual task_ids for each realization in the batch.
     # This matches the RNG sequence of the unbatched execution setup.
     task_ids = (
-        realization_start
+        realization_start  # pyrefly: ignore[unsupported-operation]
         + np.arange(self.ensemble_batch_size)
         + init_time_index * self.ensemble_size
         + retry_offset
@@ -524,7 +524,7 @@ class InferenceRunner:
       )
       dynamic_inputs = xarray_utils.model_dynamic_inputs_from_xarray(
           dynamic_inputs_forecast.get_data(
-              np.timedelta64(0), self.model.timestep
+              np.timedelta64(0), self.model.timestep  # pyrefly: ignore[bad-argument-type]
           ),
           model=self.model,
       )
@@ -568,9 +568,9 @@ class InferenceRunner:
         )
         queries_data = xarray_utils.ensure_timedelta_axis(queries_data)
         query_fields = xarray_utils.read_from_xarray(
-            queries_data, self._dynamic_queries_read_spec, strict_matches=False
+            queries_data, self._dynamic_queries_read_spec, strict_matches=False  # pyrefly: ignore[bad-argument-type]
         )
-      queries = data_specs.construct_query(query_fields, self.output_query)
+      queries = data_specs.construct_query(query_fields, self.output_query)  # pyrefly: ignore[bad-argument-type]
       return data, queries
 
     @timing.Timed
@@ -659,7 +659,7 @@ class InferenceRunner:
     for trajectory_slice in output_buffer:
       if self.ensemble_size is not None and self.ensemble_batch_size > 1:
         r_axis = cx.LabeledAxis(
-            'realization', np.arange(realization_start, realization_end)
+            'realization', np.arange(realization_start, realization_end)  # pyrefly: ignore[no-matching-overload]
         )
         trajectory_slice = cx.tag(trajectory_slice, r_axis)
 
@@ -672,7 +672,7 @@ class InferenceRunner:
       outputs_tree = _datatree_rename(outputs_tree, {'timedelta': 'lead_time'})
       trees.append(outputs_tree)
 
-    tree = xarray.map_over_datasets(
+    tree = xarray.map_over_datasets(  # pyrefly: ignore[no-matching-overload]
         lambda *xs: xarray.concat(xs, dim='lead_time'), *trees
     )
     tree = _coordinate_to_root(tree, 'lead_time')
@@ -690,13 +690,13 @@ class InferenceRunner:
     if realization_start is not None:
       if self.ensemble_batch_size == 1:
         tree = _datatree_expand_dims(tree, realization=[realization_start])
-      region['realization'] = slice(realization_start, realization_end)
+      region['realization'] = slice(realization_start, realization_end)  # pyrefly: ignore[bad-assignment]
     # Remove variables that don't have an init_time dimension. These shouldn't
     # be written to disk again.
     for node in tree.subtree:
       for name, variable in node.variables.items():
         if not any(dim in variable.dims for dim in region):
-          del node[name]
+          del node[name]  # pyrefly: ignore[unsupported-operation]
 
     logging.info('setting up zarr outputs')
     delayed = tree.chunk().to_zarr(

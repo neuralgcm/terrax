@@ -472,7 +472,7 @@ class UniformUncorrelated(RandomProcessModule):
   def sampler(self) -> Sampler:
     return self.samplers['uniform']
 
-  def unconditional_sample(self, rng: cx.Field) -> None:
+  def unconditional_sample(self, rng: cx.Field) -> None:  # pyrefly: ignore[bad-override]
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k)))(rng)
     self.state_rng.set_value(rng)
     self.rng_step.set_value(
@@ -525,7 +525,7 @@ class NormalUncorrelated(RandomProcessModule):
   def sampler(self) -> Sampler:
     return self.samplers['normal']
 
-  def unconditional_sample(self, rng: cx.Field):
+  def unconditional_sample(self, rng: cx.Field):  # pyrefly: ignore[bad-override]
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k)))(rng)
     self.state_rng.set_value(rng)
     self.rng_step.set_value(
@@ -609,11 +609,11 @@ class GaussianRandomFieldCore(nnx.Module):
         numerical stability.
     """
     nondimensionalize = lambda x: units.maybe_nondimensionalize(x, sim_units)
-    dt = nondimensionalize(dt)
+    dt = nondimensionalize(dt)  # pyrefly: ignore[bad-assignment]
     assert dt is not None
     correlation_time = nondimensionalize(correlation_time)
     correlation_length = nondimensionalize(correlation_length)
-    variance = nondimensionalize(variance)
+    variance = nondimensionalize(variance)  # pyrefly: ignore[bad-assignment]
     # we make parameters 1d to streamline broadcasting when code is vmapped.
     as_1d_param = lambda x, t: t(jnp.array([x]))
     self.ylm_map = ylm_map
@@ -693,7 +693,7 @@ class GaussianRandomFieldCore(nnx.Module):
     )
     # The factor of coords.horizontal.radius appears because our basis vectors
     # have L2 norm = radius.
-    return normalization * sigmas_unnormed / dinosaur_grid.radius
+    return normalization * sigmas_unnormed / dinosaur_grid.radius  # pyrefly: ignore[unsupported-operation]
 
   def _sigma_array(self) -> jax.Array:
     """Array of σₙ from Appendix 8 in [Palmer] http://shortn/_56HCcQwmSS."""
@@ -715,7 +715,7 @@ class GaussianRandomFieldCore(nnx.Module):
     sigmas = self._stationary_sigma_array()
     weights = jnp.where(
         dinosaur_grid.mask,
-        sampler.draw(cx.field(rng)).data,
+        sampler.draw(cx.field(rng)).data,  # pyrefly: ignore[bad-argument-type]
         jnp.zeros(modal_shape),
     )
     return sigmas * weights
@@ -737,7 +737,7 @@ class GaussianRandomFieldCore(nnx.Module):
     rng = _advance_prng_key(state_key, state_step)
     eta = sampler.draw(cx.field(rng)).data
     return state_core * self.phi + self._sigma_array() * jnp.where(
-        dinosaur_grid.mask, eta, jnp.zeros(modal_shape)
+        dinosaur_grid.mask, eta, jnp.zeros(modal_shape)  # pyrefly: ignore[bad-argument-type]
     )
 
   @property
@@ -820,7 +820,7 @@ class GaussianRandomField(RandomProcessModule):
   def sampler(self) -> Sampler:
     return self.samplers['modal_normal']
 
-  def unconditional_sample(self, rng: cx.Field) -> None:
+  def unconditional_sample(self, rng: cx.Field) -> None:  # pyrefly: ignore[bad-override]
     """Returns a randomly initialized state for the autoregressive process."""
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k)))(rng)
     self.state_rng.set_value(rng)
@@ -894,15 +894,15 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       )
 
     nondimensionalize = lambda x: units.maybe_nondimensionalize(x, sim_units)
-    dt = nondimensionalize(dt)
+    dt = nondimensionalize(dt)  # pyrefly: ignore[bad-assignment]
     assert dt is not None
-    correlation_times = np.array(
+    correlation_times = np.array(  # pyrefly: ignore[bad-assignment]
         [nondimensionalize(tau) for tau in correlation_times]
     )
     correlation_lengths = np.array(
         [nondimensionalize(length) for length in correlation_lengths]
     )
-    variances = np.array(
+    variances = np.array(  # pyrefly: ignore[bad-assignment]
         [nondimensionalize(variance) for variance in variances]
     )
     make_grf = lambda length, tau, variance: GaussianRandomFieldCore(
@@ -986,7 +986,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
         self.batch_grf_core, self.sampler, rngs.untag(self.axis)
     ).tag(self.axis, self.batch_grf_core.core_grid)
 
-  def unconditional_sample(self, rng: cx.Field) -> None:
+  def unconditional_sample(self, rng: cx.Field) -> None:  # pyrefly: ignore[bad-override]
     k, next_rng = cx.cmap(lambda k: tuple(jax.random.split(k, 2)))(rng)
     self.state_rng.set_value(next_rng)
     self.rng_step.set_value(
@@ -1088,7 +1088,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       VectorizedGaussianRandomField instance with specified fields.
     """
     if isinstance(dt, np.timedelta64):
-      dt = sim_units.nondimensionalize_timedelta64(dt)
+      dt = sim_units.nondimensionalize_timedelta64(dt)  # pyrefly: ignore[bad-assignment]
     times = list(
         int(t)
         for t in (

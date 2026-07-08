@@ -331,7 +331,7 @@ class YlmMapper:
     elif isinstance(grid, coordinates.SphericalHarmonicGrid):
       shape = tuple(s - p for s, p in zip(grid.shape, grid.wavenumber_padding))
       constructors = MODAL_SHAPE_TO_GRID[self.spherical_harmonics_method]
-      grid_constructor = constructors[self.truncation_rule][shape]
+      grid_constructor = constructors[self.truncation_rule][shape]  # pyrefly: ignore[bad-index]
     else:
       raise ValueError(
           f'Unsupported {type(grid)=}, expected LonLatGrid or'

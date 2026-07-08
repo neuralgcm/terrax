@@ -405,7 +405,7 @@ def training_iterator(
   # fetching it all at once.
   dataset = grain.MapDataset.source(grain_source)
   dataset = dataset[shard_index::shard_count]
-  dataset = dataset.shuffle(global_seed)
+  dataset = dataset.shuffle(global_seed)  # pyrefly: ignore[bad-argument-type]
   dataset = dataset.repeat(num_epochs)
   dataset = dataset.to_iter_dataset(read_options=read_options)
   dataset = dataset.map(functools.partial(_split_block, sample_dim))
@@ -416,7 +416,7 @@ def training_iterator(
     dataset = grain.experimental.WindowShuffleIterDataset(
         dataset,
         window_size=shuffle_window,
-        seed=window_seed,
+        seed=window_seed,  # pyrefly: ignore[bad-argument-type]
     )
 
   return dataset

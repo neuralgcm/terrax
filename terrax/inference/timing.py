@@ -94,7 +94,7 @@ class Timer:
   def finish_step(self):
     if not self.running():
       raise RuntimeError('Timer is not running a step')
-    elapsed = self._counter() - self._start
+    elapsed = self._counter() - self._start  # pyrefly: ignore[unsupported-operation]
     self._last = elapsed
     self._total += elapsed
     self._start = None

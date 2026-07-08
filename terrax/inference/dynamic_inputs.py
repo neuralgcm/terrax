@@ -64,9 +64,9 @@ def _get_climatology(
   times = np.asarray(times)
   match times.ndim:
     case 0:
-      times = xarray.DataArray(times)
+      times = xarray.DataArray(times)  # pyrefly: ignore[bad-assignment]
     case 1:
-      times = xarray.DataArray(times, dims=['time'], coords={'time': times})
+      times = xarray.DataArray(times, dims=['time'], coords={'time': times})  # pyrefly: ignore[bad-assignment]
     case _:
       raise ValueError(f'Times must have 0 or 1 dimensions. Got {times.ndim=}')
 
@@ -95,10 +95,10 @@ def _align_datasets(
     aligned_a = {}
     aligned_b = {}
     for key in a:
-      aligned_a[key], aligned_b[key] = xarray.align(
-          a[key], b[key], join='override'
+      aligned_a[key], aligned_b[key] = xarray.align(  # pyrefly: ignore[no-matching-overload]
+          a[key], b[key], join='override'  # pyrefly: ignore[unsupported-operation]
       )
-    return aligned_a, aligned_b
+    return aligned_a, aligned_b  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -150,7 +150,7 @@ class DynamicInputs(abc.ABC, Generic[XarrayData]):
   @abc.abstractmethod
   def get_forecast(self, init_time: np.datetime64) -> _Forecast[XarrayData]:
     """Returns a forecast of dynamic inputs for a fixed initial time."""
-    return NotImplementedError()
+    return NotImplementedError()  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -214,7 +214,7 @@ def _get_forecast(
   return forecast_cls(
       full_data=model.full_data,
       climatology=model.climatology,
-      update_freq=model.update_freq,
+      update_freq=model.update_freq,  # pyrefly: ignore[bad-argument-type]
       init_time=init_time,
   )
 
@@ -245,7 +245,7 @@ class _EmptyForecast(_Forecast[XarrayData]):  # pylint: disable=missing-class-do
   def get_data(
       self, lead_start: np.timedelta64, lead_stop: np.timedelta64
   ) -> XarrayData:
-    return {}
+    return {}  # pyrefly: ignore[bad-return]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -307,7 +307,7 @@ class _ClimatologyForecast(_Forecast[XarrayData]):
   ) -> XarrayData:
     lead_times = self._get_lead_times(lead_start, lead_stop)
     times = self.init_time + lead_times
-    return self._read_in_parallel(_get_climatology(self.climatology, times))
+    return self._read_in_parallel(_get_climatology(self.climatology, times))  # pyrefly: ignore[bad-argument-type, bad-specialization]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -339,7 +339,7 @@ class _AnomalyPersistenceForecast(_Forecast[XarrayData]):  # pylint: disable=mis
   def init_anomaly(self) -> XarrayData:
     assert (full_data := self.full_data) is not None
     init_climatology = self._read_in_parallel(
-        _get_climatology(self.climatology, self.init_time)
+        _get_climatology(self.climatology, self.init_time)  # pyrefly: ignore[bad-argument-type, bad-specialization]
     )
     init_data = self._read_in_parallel(
         _map_over_datasets(lambda x: x.sel(time=self.init_time), full_data)
@@ -351,14 +351,14 @@ class _AnomalyPersistenceForecast(_Forecast[XarrayData]):  # pylint: disable=mis
   ) -> XarrayData:
     lead_times = self._get_lead_times(lead_start, lead_stop)
     valid_clim = self._read_in_parallel(
-        _get_climatology(self.climatology, self.init_time + lead_times)
+        _get_climatology(self.climatology, self.init_time + lead_times)  # pyrefly: ignore[bad-argument-type, bad-specialization]
     )
     forecast = _map_over_datasets(operator.add, self.init_anomaly, valid_clim)
     # Ensure time is the first dimension.
     forecast = _map_over_datasets(lambda x: x.transpose('time', ...), forecast)
     # TODO(shoyer): Make a more generic solution for clipping anomaly forecasts.
     if 'sea_ice_cover' in forecast:
-      forecast['sea_ice_cover'] = forecast['sea_ice_cover'].clip(0, 1)
+      forecast['sea_ice_cover'] = forecast['sea_ice_cover'].clip(0, 1)  # pyrefly: ignore[unsupported-operation]
     return forecast
 
 

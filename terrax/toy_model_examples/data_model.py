@@ -67,12 +67,12 @@ class DataModel(api.Model):
     for k, c in self.keys_to_coords.items():
       value = jnp.nan * jnp.zeros(c.shape)
       prognostics[k] = cx.field(value, c)
-    prognostics['time'] = cx.field(jdt.Datetime(jdt.Timedelta()))
+    prognostics['time'] = cx.field(jdt.Datetime(jdt.Timedelta()))  # pyrefly: ignore[bad-argument-type]
     self._prognostic_vars = typing.Prognostic(prognostics)
     if self.observation_key not in self.operators:
       self.operators[self.observation_key] = (
           observation_operators.TransformObservationOperator(
-              transforms.Identity()
+              transforms.Identity()  # pyrefly: ignore[bad-argument-type]
           )
       )
 
@@ -120,10 +120,10 @@ class DataModel(api.Model):
 
     for diagnostic in self.state_diagnostics.values():
       if isinstance(diagnostic, diagnostics.TemporalDiagnosticModule):
-        diagnostic.advance_diagnostic_clock({'timedelta': dt_timedelta})
+        diagnostic.advance_diagnostic_clock({'timedelta': dt_timedelta})  # pyrefly: ignore[missing-attribute]
     for diagnostic in self.tendency_dependent_diagnostics.values():
       if isinstance(diagnostic, diagnostics.TemporalDiagnosticModule):
-        diagnostic.advance_diagnostic_clock({'timedelta': dt_timedelta})
+        diagnostic.advance_diagnostic_clock({'timedelta': dt_timedelta})  # pyrefly: ignore[missing-attribute]
 
     self._prognostic_vars.set_value(new_prognostics)
 
@@ -144,7 +144,7 @@ class DataModel(api.Model):
     return result
 
   @property
-  def inputs_spec(
+  def inputs_spec(  # pyrefly: ignore[bad-override]
       self,
   ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordSpec]]:
     specs = {}

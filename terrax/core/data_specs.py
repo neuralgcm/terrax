@@ -116,7 +116,7 @@ class CoordSpec:
 
     for ax, expected_ax in zip(candidate.axes, self.coord.axes, strict=True):
       [dim] = expected_ax.dims
-      match_schema = self.dim_match_rules.get(dim, AxisMatchRules.EXACT)
+      match_schema = self.dim_match_rules.get(dim, AxisMatchRules.EXACT)  # pyrefly: ignore[no-matching-overload]
       if (
           match_schema == AxisMatchRules.EXACT
           or match_schema == AxisMatchRules.REPLACED
@@ -139,11 +139,11 @@ class CoordSpec:
               f'Coordinate axis {ax} for dimension {dim} is not'
               f' of the expected type {type(expected_ax)}.'
           )
-        required_ticks = expected_ax.fields.get(dim)
-        present_ticks = ax.fields.get(dim)
+        required_ticks = expected_ax.fields.get(dim)  # pyrefly: ignore[bad-argument-type]
+        present_ticks = ax.fields.get(dim)  # pyrefly: ignore[bad-argument-type]
         if required_ticks is not None:
           if present_ticks is None or not np.all(
-              np.isin(required_ticks.data, present_ticks.data)
+              np.isin(required_ticks.data, present_ticks.data)  # pyrefly: ignore[bad-argument-type]
           ):
             raise ValueError(
                 f'Coordinate axis {ax} for dimension {dim} does'
@@ -178,7 +178,7 @@ class CoordSpec:
     """Constructs CoordSpec with added timedelta and type match rule."""
     if dim_match_rules is None:
       dim_match_rules = {}
-    dummy_timedelta = coordinates.TimeDelta(np.timedelta64(0, 's')[None])
+    dummy_timedelta = coordinates.TimeDelta(np.timedelta64(0, 's')[None])  # pyrefly: ignore[bad-index]
     delta_dim = dummy_timedelta.dims[0]
     if (
         delta_dim in dim_match_rules
@@ -198,7 +198,7 @@ class CoordSpec:
   def with_given_timedelta(
       cls,
       coord: cx.Coordinate,
-      timedelta: np.ndarray = np.timedelta64(0, 's')[None],
+      timedelta: np.ndarray = np.timedelta64(0, 's')[None],  # pyrefly: ignore[bad-index]
       dim_match_rules: dict[str, AxisMatchRules] | None = None,
   ):
     """Constructs CoordSpec with added timedelta and superset match rule."""
@@ -292,14 +292,14 @@ def finalize_spec(
   for dim, spec_ax, coord_ax in dims_and_axes:
     if (
         spec_ax.shape == coord_ax.shape
-        and coord_spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)
+        and coord_spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)  # pyrefly: ignore[no-matching-overload]
         == AxisMatchRules.REPLACED
     ):
       coord_axes.append(spec_ax)
     else:
       if is_shard(spec_ax) and not is_shard(coord_ax):
-        spmd_shape = spec_ax.spmd_mesh_shape
-        partitions = spec_ax.dimension_partitions
+        spmd_shape = spec_ax.spmd_mesh_shape  # pyrefly: ignore[missing-attribute]
+        partitions = spec_ax.dimension_partitions  # pyrefly: ignore[missing-attribute]
         coord_axes.append(
             parallelism.CoordinateShard(coord_ax, spmd_shape, partitions)
         )
@@ -391,7 +391,7 @@ def get_coord_types(
   is_cartesian_prod = lambda x: isinstance(x, cx.CartesianProduct)
   if is_cartesian_prod(coordinate):
     # using dict.fromkeys to preserve order of appearance.
-    types = list(dict.fromkeys(type(x) for x in coordinate.coordinates))
+    types = list(dict.fromkeys(type(x) for x in coordinate.coordinates))  # pyrefly: ignore[missing-attribute]
   else:
     types = [type(coordinate)]
   # if LabeledAxis is present, move it to the end of the list to ensure that we
@@ -470,7 +470,7 @@ def validate_inputs(
       if isinstance(inner_spec, cx.Coordinate):
         inner_spec = CoordSpec(inner_spec)
       if isinstance(inner_spec, CoordSpec):
-        inner_spec.validate_compatible(data_coord)
+        inner_spec.validate_compatible(data_coord)  # pyrefly: ignore[bad-argument-type]
       else:
         raise ValueError(
             f'Got in_spec entry {var_spec} of unsupported type'

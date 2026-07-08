@@ -234,15 +234,16 @@ def nest_data_for_scans(
           'scan_steps and scan_specs must be either both provided or inferred'
       )
 
-  if len(scan_steps) != len(scan_specs):
+  if len(scan_steps) != len(scan_specs):  # pyrefly: ignore[bad-argument-type]
     raise ValueError(
+        # pyrefly: ignore[bad-argument-type]
         'scan_steps and scan_specs must have the same length, '
         f'got {len(scan_steps)=} and {len(scan_specs)=}.'
     )
 
   nested_data = []
-  for i, spec in enumerate(scan_specs):
-    shape = scan_steps[i:][::-1]
+  for i, spec in enumerate(scan_specs):  # pyrefly: ignore[bad-argument-type]
+    shape = scan_steps[i:][::-1]  # pyrefly: ignore[unsupported-operation]
     dummy_td = cx.coords.compose(*[cx.DummyAxis(None, s) for s in shape])
 
     # pylint: disable=cell-var-from-loop

@@ -74,7 +74,7 @@ class StandardVariablesObservationOperator(
         inputs=inputs,
         ylm_map=self.ylm_map,
         levels=self.levels,
-        orography=self.orography,
+        orography=self.orography,  # pyrefly: ignore[bad-argument-type]
         sim_units=self.sim_units,
     )
     interpolated = parallelism.with_physics_sharding(self.mesh, interpolated)

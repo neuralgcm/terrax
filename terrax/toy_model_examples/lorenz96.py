@@ -68,11 +68,11 @@ class Lorenz96Base(api.Model):
     # Adds input-like obs-operators if not set explicitly for dmeo purposes.
     if 'slow' not in self.operators and hasattr(self, 'x'):
       sel_x_and_t = transforms.SelectKeys(['x', 'time'])
-      obs_op = observation_operators.TransformObservationOperator(sel_x_and_t)
+      obs_op = observation_operators.TransformObservationOperator(sel_x_and_t)  # pyrefly: ignore[bad-argument-type]
       self.operators['slow'] = obs_op
     if 'fast' not in self.operators and hasattr(self, 'y'):
       sel_y_and_t = transforms.SelectKeys(['y', 'time'])
-      obs_op = observation_operators.TransformObservationOperator(sel_y_and_t)
+      obs_op = observation_operators.TransformObservationOperator(sel_y_and_t)  # pyrefly: ignore[bad-argument-type]
       self.operators['fast'] = obs_op
 
   @property
@@ -82,7 +82,7 @@ class Lorenz96Base(api.Model):
       prognostic_fields['x'] = self.x.get_value()
     if hasattr(self, 'y'):
       prognostic_fields['y'] = self.y.get_value()
-    prognostic_fields['time'] = self.time.get_value()
+    prognostic_fields['time'] = self.time.get_value()  # pyrefly: ignore[missing-attribute]
     return prognostic_fields
 
   @module_utils.ensure_unchanged_state_structure
@@ -167,7 +167,7 @@ class Lorenz96WithTwoScales(Lorenz96Base):
     # fmt: on
     full_ode = time_integrators.ExplicitODE.from_functions(all_terms_fn)
     x, y = self.x.get_value(), self.y.get_value()
-    next_xy = self.time_integrator_cls(full_ode, self.dt)({'x': x, 'y': y})
+    next_xy = self.time_integrator_cls(full_ode, self.dt)({'x': x, 'y': y})  # pyrefly: ignore[bad-argument-type]
     self.x.set_value(next_xy['x'])
     self.y.set_value(next_xy['y'])
     # treated separately to avoid round off.
@@ -248,7 +248,7 @@ class Lorenz96(Lorenz96Base):
     x_ode = time_integrators.ExplicitODE.from_functions(
         lambda s: x_dot_fn(s.untag(k)).tag(k)
     )
-    next_x = self.time_integrator_cls(x_ode, self.dt)(x)
+    next_x = self.time_integrator_cls(x_ode, self.dt)(x)  # pyrefly: ignore[bad-argument-type]
     for parameterization in self.parameterizations:
       next_x += parameterization({'x': x, 'time': time}, self.dt)
     self.x.set_value(next_x)
@@ -289,7 +289,7 @@ class Lorenz96FastMode(Lorenz96Base):
     y_ode = time_integrators.ExplicitODE.from_functions(
         lambda s: y_dot_fn(s.untag(kjs)).tag(kjs)
     )
-    next_y = self.time_integrator_cls(y_ode, self.dt)(y)
+    next_y = self.time_integrator_cls(y_ode, self.dt)(y)  # pyrefly: ignore[bad-argument-type]
     for parameterization in self.parameterizations:
       next_y += parameterization({'y': y, 'time': time}, self.dt)
     self.y.set_value(next_y)

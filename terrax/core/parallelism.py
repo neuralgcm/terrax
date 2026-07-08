@@ -106,7 +106,7 @@ class CoordinateShard(cx.Coordinate):
 
   @property
   def dims(self) -> tuple[str, ...]:
-    return self.coordinate.dims  # sharding only affects the shape.
+    return self.coordinate.dims  # sharding only affects the shape.  # pyrefly: ignore[bad-return]
 
   @property
   def shape(self) -> tuple[int, ...]:
@@ -117,7 +117,7 @@ class CoordinateShard(cx.Coordinate):
       axes = self.dimension_partitions.get(dim, None)
       if not isinstance(axes, tuple):
         axes = (axes,)
-      n_shards = math.prod(self.spmd_mesh_shape.get(axis, 1) for axis in axes)
+      n_shards = math.prod(self.spmd_mesh_shape.get(axis, 1) for axis in axes)  # pyrefly: ignore[no-matching-overload]
       size, reminder = divmod(full_size, n_shards)
       if reminder:
         raise ValueError(
@@ -343,7 +343,7 @@ class Mesh:
     """
     p_specs = P(*self.array_partitions[schema])
     sharding = jax.sharding.NamedSharding(
-        self.spmd_mesh, p_specs, memory_kind=self.memory_kind
+        self.spmd_mesh, p_specs, memory_kind=self.memory_kind  # pyrefly: ignore[bad-argument-type]
     )
     return jax.lax.with_sharding_constraint(array, sharding)
 
@@ -353,7 +353,7 @@ class Mesh:
     dim_partitions = self.field_partitions[schema]
     p_specs = get_partition_spec(dims, dim_partitions)
     return jax.sharding.NamedSharding(
-        self.spmd_mesh, p_specs, memory_kind=self.memory_kind
+        self.spmd_mesh, p_specs, memory_kind=self.memory_kind  # pyrefly: ignore[bad-argument-type]
     )
 
   def _with_sharding_constraint_field(
@@ -368,7 +368,7 @@ class Mesh:
     Returns:
       Field with sharding constraint applied.
     """
-    sharding = self._get_named_sharding(field.dims, schema)
+    sharding = self._get_named_sharding(field.dims, schema)  # pyrefly: ignore[bad-argument-type]
     return jax.lax.with_sharding_constraint(field, sharding)
 
   def unshard(
@@ -387,7 +387,7 @@ class Mesh:
     """
 
     example_field = next(iter(field_shards.values()))
-    sharding = self._get_named_sharding(example_field.dims, schema)
+    sharding = self._get_named_sharding(example_field.dims, schema)  # pyrefly: ignore[bad-argument-type]
 
     coord = cx.get_coordinate(example_field)
     unsharded_coord = get_unsharded(coord)
@@ -458,7 +458,7 @@ def with_dycore_sharding(
 
   if mesh is None or mesh.spmd_mesh is None:
     return inputs
-  return pytree_utils.tree_map_over_nonscalars(f, inputs)
+  return pytree_utils.tree_map_over_nonscalars(f, inputs)  # pyrefly: ignore[bad-argument-type]
 
 
 def with_physics_sharding(
@@ -480,7 +480,7 @@ def with_physics_sharding(
 
   if mesh is None or mesh.spmd_mesh is None:
     return inputs
-  return pytree_utils.tree_map_over_nonscalars(f, inputs)
+  return pytree_utils.tree_map_over_nonscalars(f, inputs)  # pyrefly: ignore[bad-argument-type]
 
 
 def with_dycore_to_physics_sharding(

@@ -94,7 +94,7 @@ class PerVariableScaler(ScaleFactor):
   scalers_by_name: dict[str, ScaleFactor]
   default_scaler: ScaleFactor | None = None
 
-  def scales(
+  def scales(  # pyrefly: ignore[bad-override]
       self,
       field: cx.Field,
       field_name: str | None = None,
@@ -124,10 +124,10 @@ class PerVariableScaler(ScaleFactor):
   ) -> PerVariableScaler:
     """Returns a PerVariableScaler with ConstantScalers."""
     scalers = {
-        name: ConstantScaler(constant=w if cx.is_field(w) else cx.field(w))
+        name: ConstantScaler(constant=w if cx.is_field(w) else cx.field(w))  # pyrefly: ignore[bad-argument-type]
         for name, w in variable_weights.items()
     }
-    return cls(scalers_by_name=scalers, default_scaler=default_scaler)
+    return cls(scalers_by_name=scalers, default_scaler=default_scaler)  # pyrefly: ignore[bad-argument-type]
 
 
 @dataclasses.dataclass
@@ -219,7 +219,7 @@ class PressureLevelAtmosphericMassScaler(ScaleFactor):
     pressure = field.axes['pressure']
     padded = np.concatenate([
         np.asarray([0.0]),
-        pressure.centers,
+        pressure.centers,  # pyrefly: ignore[missing-attribute]
         np.asarray([self.standard_pressure]),
     ])
     # thickness is estimated as 0.5 * |p_{k+1} - p_{k-1}|.
@@ -319,22 +319,22 @@ class CoordinateMaskScaler(ScaleFactor):
             f'Coordinate for {dim_name!r} not found on {field=} or in context.'
         )
 
-      mask_values_field = self.mask_coord.fields[dim_name]
+      mask_values_field = self.mask_coord.fields[dim_name]  # pyrefly: ignore[bad-index]
       if in_context:
-        current_value = context[dim_name]
+        current_value = context[dim_name]  # pyrefly: ignore[bad-index, unsupported-operation]
         if current_value.ndim != 0:
           raise ValueError(
               f'Expected scalar {dim_name!r} in context, got '
               f'{current_value.shape=}'
           )
-        mask_values = mask_values_field.untag(dim_name)
+        mask_values = mask_values_field.untag(dim_name)  # pyrefly: ignore[bad-argument-type]
         is_present = (current_value == mask_values).data.any()
         mask = cx.field(is_present)
         all_masks.append(mask)
       elif in_field:
-        coord_from_field = field.axes[dim_name]
-        field_values = coord_from_field.fields[dim_name]
-        mask_values_data = mask_values_field.untag(dim_name)
+        coord_from_field = field.axes[dim_name]  # pyrefly: ignore[bad-index]
+        field_values = coord_from_field.fields[dim_name]  # pyrefly: ignore[bad-index]
+        mask_values_data = mask_values_field.untag(dim_name)  # pyrefly: ignore[bad-argument-type]
         is_present_broadcasted = field_values == mask_values_data
         mask_for_dim = cx.cmap(lambda x: x.any())(is_present_broadcasted)
         all_masks.append(mask_for_dim)
@@ -413,13 +413,13 @@ class LeadTimeScaler(ScaleFactor):
               'Both "timedelta" and "times" must be present in the context'
               f' when normalize_weights is True, but got: {context.keys()=}'
           )
-        all_timedeltas = context['times'].data / one_hr_delta
+        all_timedeltas = context['times'].data / one_hr_delta  # pyrefly: ignore[unsupported-operation]
       timedelta_now = context['timedelta'].data
       if timedelta_now.ndim != 0:
         raise ValueError(
             f'Expected scalar timedelta in context, got {timedelta_now.shape=}'
         )
-      t = timedelta_now / one_hr_delta
+      t = timedelta_now / one_hr_delta  # pyrefly: ignore[unsupported-operation]
     else:
       t = time_coord.deltas / one_hr_delta
       all_timedeltas = t
@@ -531,12 +531,12 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
             f' got: {context.keys()=}'
         )
       timedelta_now = context['timedelta'].data
-      all_timedeltas = context['times'].data / one_hr_delta
+      all_timedeltas = context['times'].data / one_hr_delta  # pyrefly: ignore[unsupported-operation]
       if timedelta_now.ndim != 0:
         raise ValueError(
             f'Expected scalar timedelta in context, got {timedelta_now.shape=}'
         )
-      t = timedelta_now / one_hr_delta
+      t = timedelta_now / one_hr_delta  # pyrefly: ignore[unsupported-operation]
     else:
       t = time_coord.deltas / one_hr_delta
       all_timedeltas = t

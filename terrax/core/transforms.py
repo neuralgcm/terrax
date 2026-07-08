@@ -103,7 +103,7 @@ class FieldTransformABC(TransformABC):
   ) -> dict[str, cx.Field] | cx.Field:
     if cx.is_field(inputs):
       return self._transform_field(inputs)
-    return {k: self._transform_field(v) for k, v in inputs.items()}
+    return {k: self._transform_field(v) for k, v in inputs.items()}  # pyrefly: ignore[missing-attribute]
 
   @abc.abstractmethod
   def _transform_field(self, field: cx.Field) -> cx.Field:
@@ -291,7 +291,7 @@ class PrescribedFields(PytreeTransformABC):
         da = dataset[key]
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da, extra_types)
+        candidate = xarray_utils.field_from_xarray(da, extra_types)  # pyrefly: ignore[bad-argument-type]
         candidate = candidate.order_as(*f.dims)
         if strict_matches:
           candidate = candidate.untag(f.coordinate).tag(f.coordinate)
@@ -481,7 +481,7 @@ class FilterByCoord(PytreeTransformABC):
       raise ValueError('At least one of `coords` or `types` must be provided.')
     # Standardize `coords` and `types` representation.
     coords = () if self.coords is None else self.coords
-    self.coords = (coords,) if cx.is_coord(coords) else tuple(coords)
+    self.coords = (coords,) if cx.is_coord(coords) else tuple(coords)  # pyrefly: ignore[bad-argument-type]
     types = () if self.types is None else self.types
     self.types = (types,) if isinstance(types, type) else tuple(types)
 
@@ -491,12 +491,12 @@ class FilterByCoord(PytreeTransformABC):
       match = False
       v_axes = set(v.coordinate.axes)
       v_components = set(cx.coords.canonicalize(*v.coordinate.axes))
-      for c in self.coords:
+      for c in self.coords:  # pyrefly: ignore[not-iterable]
         if set(c.axes).issubset(v_axes):
           match = True
           break
       if not match:
-        for t in self.types:
+        for t in self.types:  # pyrefly: ignore[not-iterable]
           if any(isinstance(ax, t) for ax in v_components):
             match = True
             break
@@ -713,7 +713,7 @@ class ReduceMean(PytreeFieldTransformABC):
     if dim_names:
       # Sort dimensions to untag based on their order in the field.
       ordered_dims = [d for d in field.dims if d in dim_names]
-      return cx.cmap(jnp.mean)(field.untag(*ordered_dims))
+      return cx.cmap(jnp.mean)(field.untag(*ordered_dims))  # pyrefly: ignore[bad-argument-type]
     else:
       return field
 
@@ -786,7 +786,7 @@ class ExpandDims(PytreeFieldTransformABC):
     else:
       if cx.contains_dims(field, self.loc):
         axis_to_the_right = cx.get_coordinate_part(field, self.loc)
-        loc = field.named_axes[axis_to_the_right.dims[0]]
+        loc = field.named_axes[axis_to_the_right.dims[0]]  # pyrefly: ignore[bad-index]
       else:
         raise ValueError(f'Axis {self.loc} not present in {field=}')
     out_coord = cx.coords.insert_axes(field.coordinate, {loc: self.axis})
@@ -802,7 +802,7 @@ def _get_shared_axis(
     raise ValueError(f'shared axis must be 1d, got {axis.ndim=}')
   ax_name = axis if isinstance(axis, str) else axis.dims[0]
   candidates = set(
-      v.axes.get(ax_name, ax_name if ax_name in v.dims else None)
+      v.axes.get(ax_name, ax_name if ax_name in v.dims else None)  # pyrefly: ignore[no-matching-overload]
       for v in inputs.values()
   )
   candidates = candidates | set([ax_name])  # add fallback to ax_name.
@@ -817,7 +817,7 @@ def _get_shared_axis(
     raise ValueError(f'Encountered multiple {candidates=} for axis {ax_name}')
   if len(candidates) == 1:
     ax = candidates.pop()
-  return ax
+  return ax  # pyrefly: ignore[bad-return]
 
 
 @nnx.dataclass
@@ -1072,7 +1072,7 @@ class WrapFn(TransformABC):
             'out_keys must be a sequence of the same length as the returned'
             ' sequence.'
         )
-      outputs = dict(zip(self.out_keys, result))
+      outputs = dict(zip(self.out_keys, result))  # pyrefly: ignore[bad-argument-type]
     else:
       raise TypeError(f'Unexpected return type {type(result)} from {self.fn}')
     return outputs
@@ -1121,7 +1121,7 @@ class ScanOverAxis(TransformABC):
     original_order = {k: v.dims for k, v in inputs.items()}
     inputs = {k: v.order_as(self.axis, ...) for k, v in inputs.items()}
     inputs = cx.untag(
-        inputs, ax.dims[0] if isinstance(ax, cx.Coordinate) else ax
+        inputs, ax.dims[0] if isinstance(ax, cx.Coordinate) else ax  # pyrefly: ignore[bad-argument-type]
     )  # already checked ax.ndim == 1.
 
     def _process(transform, x):
@@ -1139,7 +1139,7 @@ class ScanOverAxis(TransformABC):
     self.transform, scanned = scan_over_axis(self.transform, inputs)
     scanned = cx.tag(scanned, ax)
     scanned = {
-        k: v.order_as(*self._out_dims_order(original_order[k], v.dims))
+        k: v.order_as(*self._out_dims_order(original_order[k], v.dims))  # pyrefly: ignore[bad-argument-type]
         for k, v in scanned.items()
     }
     return scanned
@@ -1355,12 +1355,12 @@ class InpaintHarmonics(TransformABC):
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     masks = self.compute_masks(inputs)
-    masks = {k: masks.get(k, masks.get(self.default_mask_key)) for k in inputs}
+    masks = {k: masks.get(k, masks.get(self.default_mask_key)) for k in inputs}  # pyrefly: ignore[bad-argument-type]
     for k, mask in masks.items():
       if mask is None:
         raise ValueError(f'No mask found for {k=}')
     # Initialize masked values with mean of valid data.
-    current_guess = {k: _masked_to_mean(v, masks[k]) for k, v in inputs.items()}
+    current_guess = {k: _masked_to_mean(v, masks[k]) for k, v in inputs.items()}  # pyrefly: ignore[bad-argument-type]
 
     # Helper to reset valid pixels: where(mask, current, original)
     # mask is True for pixels to be inpainted, False is to be reset with inputs.
@@ -1467,7 +1467,7 @@ class ComputeMasks(PytreeTransformABC):
 
     outputs = {}
     for k in mask_keys:
-      m = compute_mask_fn(inputs[k], self.threshold_value)
+      m = compute_mask_fn(inputs[k], self.threshold_value)  # pyrefly: ignore[bad-index]
       if self.reduce_dims is not None:
         axes = _align_axes_order(
             *self.reduce_dims, reference=m, allow_missing=True
@@ -1481,7 +1481,7 @@ class ComputeMasks(PytreeTransformABC):
         raise ValueError('No masks computed to combine.')
       combine = jnp.logical_and if combine_method == 'all' else jnp.logical_or
       combined = functools.reduce(cx.cmap(combine), outputs.values())
-      return {self.output_key: combined}
+      return {self.output_key: combined}  # pyrefly: ignore[bad-return]
     return outputs
 
 
@@ -1524,7 +1524,7 @@ class ApplyOverMasks(TransformABC):
     )
     outputs = {}
     for k, v in inputs.items():
-      mask = masks.get(k, masks.get(self.default_mask_key))
+      mask = masks.get(k, masks.get(self.default_mask_key))  # pyrefly: ignore[bad-argument-type]
       if mask is None:
         raise ValueError(f'No mask found for {k=}')
       outputs[k] = apply_mask_fn(v, mask)
@@ -1568,7 +1568,7 @@ class Nondimensionalize(PytreeTransformABC):
     return self.sim_units.nondimensionalize(quantity * x)
 
   def _nondim_field(self, x: cx.Field, k: str):
-    nondim_value = self._nondim_numeric(x.data, k)
+    nondim_value = self._nondim_numeric(x.data, k)  # pyrefly: ignore[bad-argument-type]
     return cx.field(nondim_value, x.coordinate)
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -1613,7 +1613,7 @@ class Redimensionalize(PytreeTransformABC):
     return self.sim_units.dimensionalize(x, unit, as_quantity=False)
 
   def _redim_field(self, x: cx.Field, k: str):
-    dim_value = self._redim_numeric(x.data, k)
+    dim_value = self._redim_numeric(x.data, k)  # pyrefly: ignore[bad-argument-type]
     return cx.field(dim_value, x.coordinate)
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -1726,7 +1726,7 @@ class Relu(PytreeTransformABC):
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     return ApplyFnToKeys(
         fn=cx.cpmap(jax.nn.relu),
-        keys=self.keys,
+        keys=self.keys,  # pyrefly: ignore[bad-argument-type]
         invert=self.invert,
         include_remaining=self.include_remaining,
     )(inputs)
@@ -2092,13 +2092,13 @@ class ConstrainToCoarse(TransformABC):
 
       coarse_field = coarse_outputs[key]
       hres_field = hres_outputs[key]
-      downsampled_hres = self.regrid_to_coarse({key: hres_field})[key]
+      downsampled_hres = self.regrid_to_coarse({key: hres_field})[key]  # pyrefly: ignore[bad-index]
       ratio = coarse_field / (
           downsampled_hres
           + self.epsilon
           * cx.cmap(lambda x: jnp.where(x >= 0, 1.0, -1.0))(downsampled_hres)
       )
-      upsampled_ratio = self.regrid_to_hres({key: ratio})[key]
+      upsampled_ratio = self.regrid_to_hres({key: ratio})[key]  # pyrefly: ignore[bad-index]
       conserved_hres_field = hres_field * upsampled_ratio
       hres_outputs[key] = conserved_hres_field
     return hres_outputs
@@ -2235,8 +2235,8 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
       lat_query: cx.Field,
   ) -> tuple[cx.Field, cx.Field, cx.Coordinate]:
     """Returns longitude and latitude indices and patch coordinate."""
-    get_lon_indices = lambda q: self._1d_indices(q, lon_grid.data, 360.0)
-    get_lat_indices = lambda q: self._1d_indices(q, lat_grid.data)
+    get_lon_indices = lambda q: self._1d_indices(q, lon_grid.data, 360.0)  # pyrefly: ignore[bad-argument-type]
+    get_lat_indices = lambda q: self._1d_indices(q, lat_grid.data)  # pyrefly: ignore[bad-argument-type]
     lon_indices = cx.cmap(get_lon_indices)(lon_query)
     lat_indices = cx.cmap(get_lat_indices)(lat_query)
 
@@ -2558,7 +2558,7 @@ class EntrywiseBinaryOp(TransformABC):
     first_operand = {
         k: v for k, v in self.inputs_transform(inputs).items() if k in keys
     }
-    mapped_op = cx.cmap(op)
+    mapped_op = cx.cmap(op)  # pyrefly: ignore[bad-argument-type]
     result = {k: mapped_op(first_operand[k], second_operand[k]) for k in keys}
     if self.include_remaining:
       result.update({k: v for k, v in inputs.items() if k not in keys})
@@ -2569,7 +2569,7 @@ class EntrywiseBinaryOp(TransformABC):
       cls,
       op,
       fields: dict[str, cx.Field],
-      inputs_transform: Transform = Identity(),
+      inputs_transform: Transform = Identity(),  # pyrefly: ignore[bad-function-definition]
       include_remaining: bool = False,
   ):
     return cls(
@@ -2666,7 +2666,7 @@ class NestedTransform(nnx.Module, pytree=False):
         if isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], str):
           self.transforms[k] = v
         else:
-          self.transforms[k] = (k, v)
+          self.transforms[k] = (k, v)  # pyrefly: ignore[unsupported-operation]
     else:
       if default_transform is not None:
         raise ValueError(
@@ -2688,7 +2688,7 @@ class NestedTransform(nnx.Module, pytree=False):
           raise ValueError(
               f'No default or key-specific transform for {in_key=}.'
           )
-        outputs[in_key] = self.default_transform(v)
+        outputs[in_key] = self.default_transform(v)  # pyrefly: ignore[not-callable]
     return outputs
 
   def output_shapes(self, input_shapes: dict[str, Any]) -> dict[str, Any]:

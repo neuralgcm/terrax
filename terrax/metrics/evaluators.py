@@ -72,7 +72,7 @@ class Evaluator(Generic[M]):
       targets = getter(targets)
     metrics_group = {key: self.metrics[key] for key in metric_keys}
     unique_stats = base.compute_unique_statistics_for_all_metrics(
-        metrics_group, predictions, targets
+        metrics_group, predictions, targets  # pyrefly: ignore[bad-argument-type]
     )
     # TODO(dkochkov): Consider supporting direct aggregator comparison.
     aggregator_groups = collections.defaultdict(list)
@@ -93,7 +93,7 @@ class Evaluator(Generic[M]):
       group_agg_state = aggregator.aggregate_statistics(stats_for_group)
       group_metrics = {k: self.metrics[k] for k in keys}
       agg_states |= aggregation.split_aggregation_state_for_metrics(
-          group_metrics, group_agg_state
+          group_metrics, group_agg_state  # pyrefly: ignore[bad-argument-type]
       )  # results in agg_states indexed by metric keys.
     return agg_states
 

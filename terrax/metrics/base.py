@@ -264,7 +264,7 @@ class PerVariableLoss(Loss, PerVariableMetric):
     ws = collections.defaultdict(lambda: 1.0) | (self.variable_weights or {})
     for var_name, value in sorted(metric_values.items()):
       total_loss += ws[var_name] * value
-    return total_loss
+    return total_loss  # pyrefly: ignore[bad-return]
 
   def debug_terms(
       self,
@@ -334,7 +334,7 @@ class SumLoss(Loss):
     ws = collections.defaultdict(lambda: 1.0) | (self.term_weights or {})
     for term_name, term_total_loss in sorted(term_totals.items()):
       final_loss += ws[term_name] * term_total_loss
-    return final_loss
+    return final_loss  # pyrefly: ignore[bad-return]
 
   def debug_terms(
       self,

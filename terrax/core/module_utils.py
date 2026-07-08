@@ -211,7 +211,7 @@ def tag_module_state(
 
 
 def _are_certainly_disjoint_predicates(
-    p1: nnx.Predicate, p2: nnx.Predicate
+    p1: nnx.Predicate, p2: nnx.Predicate  # pyrefly: ignore[missing-attribute]
 ) -> bool:
   """Returns True if we can guarantee that two predicates are disjoint."""
   # Note this implementation assumes deconstruction of p1, some cases can be
@@ -251,7 +251,7 @@ def _are_certainly_disjoint_predicates(
 
 
 def _is_certainly_subset_predicate(
-    p1: nnx.Predicate, p2: nnx.Predicate
+    p1: nnx.Predicate, p2: nnx.Predicate  # pyrefly: ignore[missing-attribute]
 ) -> bool:
   """Returns True if we can guarantee that p1 is a subset of p2."""
   if isinstance(p2, nnx.filterlib.Everything):
@@ -513,6 +513,7 @@ def vectorize_module_fn(
     elif is_sequence(spmd_axis_names):
       if len(spmd_axis_names) != len(axes_seq):
         raise ValueError(
+            # pyrefly: ignore[bad-argument-type]
             'custom_spmd_axis_names must have length equal to the rank of '
             f'axes_to_vectorize, got {len(custom_spmd_axis_names)=} and '
             f'{len(axes_seq)=}'
@@ -595,7 +596,7 @@ def format_callbacks(callback_specs):
     return callback_specs
   if isinstance(callback_specs, nnx.Module):  # single callback.
     return ModuleAndMethod(callback_specs, '__call__')  # call default method.
-  if isinstance(callback_specs, Iterable) and (len(callback_specs) == 2):
+  if isinstance(callback_specs, Iterable) and (len(callback_specs) == 2):  # pyrefly: ignore[bad-argument-type]
     return ModuleAndMethod(*callback_specs)
   raise TypeError(f'Unexpected {type(callback_specs)=}')
 
@@ -647,7 +648,7 @@ def with_callback(
   }
   if dataclasses.is_dataclass(base_class):
     for field in dataclasses.fields(base_class):
-      attrs[field.name] = property(
+      attrs[field.name] = property(  # pyrefly: ignore[unsupported-operation]
           lambda self, field=field: getattr(self.wrapped_instance, field.name)
       )
   cls = type(

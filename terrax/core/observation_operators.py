@@ -65,7 +65,7 @@ class DataObservationOperator(ObservationOperatorABC):
     observations = {}
     valid_keys = list(self.fields.keys())
     for k, raw_entry in query.items():
-      entry, is_aux = typing.unwrap_auxiliary(raw_entry)
+      entry, is_aux = typing.unwrap_auxiliary(raw_entry)  # pyrefly: ignore[bad-argument-type]
       if is_aux:
         continue
       if cx.is_field(entry):
@@ -129,7 +129,7 @@ class TransformObservationOperator(ObservationOperatorABC):
     unwrapped_query = {}
     auxiliary_keys = set()
     for k, v in query.items():
-      inner, is_aux = typing.unwrap_auxiliary(v)
+      inner, is_aux = typing.unwrap_auxiliary(v)  # pyrefly: ignore[bad-argument-type]
       unwrapped_query[k] = inner
       if is_aux:
         auxiliary_keys.add(k)

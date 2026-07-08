@@ -104,7 +104,7 @@ def _get_datetime_forecast_starts(
     return np.array(candidates[indices])
 
   candidates = pd.to_datetime(candidates)
-  offsets = candidates - candidates.floor('1D')
+  offsets = candidates - candidates.floor('1D')  # pyrefly: ignore[missing-attribute]
   unique_offsets = np.sort(pd.unique(offsets))
   num_offsets = len(unique_offsets)
 
@@ -159,7 +159,7 @@ def _get_train_sample_origins(
     time_sample_offset: np.timedelta64,
 ) -> np.ndarray:
   return _get_sample_origins(
-      time_axis=_get_shared_time_axis(all_data),
+      time_axis=_get_shared_time_axis(all_data),  # pyrefly: ignore[bad-argument-type]
       time_slices=dataset_time_slice,
       stencil=stencil,
       time_sample_offset=time_sample_offset,
@@ -178,7 +178,7 @@ def _get_eval_sample_origins(
   """Get sample origins for evaluation."""
   time = _get_shared_time_axis(all_data)
   sample_origins = _get_sample_origins(
-      time_axis=time,
+      time_axis=time,  # pyrefly: ignore[bad-argument-type]
       time_slices=time_slices,
       stencil=stencil,
       time_sample_offset=time_sample_offset,
@@ -195,7 +195,7 @@ def _get_eval_sample_origins(
 
   sample_count = global_batch_size * batch_count
   return _get_datetime_forecast_starts(
-      sample_count, sample_origins, balance_diurnal_cycle
+      sample_count, sample_origins, balance_diurnal_cycle  # pyrefly: ignore[bad-argument-type]
   )
 
 
@@ -240,14 +240,14 @@ def _get_sample_origins(
 
   # Convert to a list of slice objects.
   if time_slices is None:
-    time_slices = [time_slices]
+    time_slices = [time_slices]  # pyrefly: ignore[bad-assignment]
   elif all(isinstance(x, str) for x in time_slices) and len(time_slices) == 2:
-    time_slices = [time_slices]
+    time_slices = [time_slices]  # pyrefly: ignore[bad-assignment]
   else:
     if not all(isinstance(x, Sequence) and len(x) == 2 for x in time_slices):
       raise ValueError(f'Unsupported time_slices: {time_slices=}')
 
-  time_slices = [_make_slice(x) for x in time_slices]
+  time_slices = [_make_slice(x) for x in time_slices]  # pyrefly: ignore[bad-assignment, not-iterable]
   time_axis_step = np.unique(np.diff(time_axis.values))
   if time_axis_step.size != 1:
     raise ValueError(
@@ -263,7 +263,7 @@ def _get_sample_origins(
   stride_between_windows = stride_between_windows.item()  # get int value.
   # Collect origin times from each slice.
   sample_origins = []
-  for ts in time_slices:
+  for ts in time_slices:  # pyrefly: ignore[not-iterable]
     slice_times = pd.Series(time_axis, index=time_axis).loc[ts].index
     candidates = slice_times[::stride_between_windows]
 
@@ -323,7 +323,7 @@ def sel_timedelta_fields(
     else:
       raise ValueError(f'Unexpected type {type(in_timedelta_axis)}')
 
-    deltas = td_axis.deltas
+    deltas = td_axis.deltas  # pyrefly: ignore[missing-attribute]
 
     if isinstance(values, slice):
       if values.step is not None:
@@ -343,7 +343,7 @@ def sel_timedelta_fields(
         stop_idx = np.searchsorted(deltas, stop_val, side='right')
 
       get_slice = lambda x: x[start_idx:stop_idx]
-      out_td = td_axis[start_idx:stop_idx]
+      out_td = td_axis[start_idx:stop_idx]  # pyrefly: ignore[bad-index]
 
     else:
       # Scalar value
@@ -354,7 +354,7 @@ def sel_timedelta_fields(
       idx = indices[0]
       # Using slice [idx:idx+1] to preserve dimension.
       get_slice = lambda x: x[idx : idx + 1]
-      out_td = td_axis[idx : idx + 1]
+      out_td = td_axis[idx : idx + 1]  # pyrefly: ignore[bad-index]
 
     if wrap_as_shard:
       out_td = parallelism.CoordinateShard(
@@ -504,7 +504,7 @@ def slice_leading_timedelta(inputs: PyTree, length: int) -> PyTree:
     in_timedelta_axis = x.axes['timedelta']
     if isinstance(in_timedelta_axis, parallelism.CoordinateShard):
       out_td_ax = parallelism.CoordinateShard(
-          in_timedelta_axis.coordinate[:length],
+          in_timedelta_axis.coordinate[:length],  # pyrefly: ignore[bad-index]
           in_timedelta_axis.spmd_mesh_shape,
           in_timedelta_axis.dimension_partitions,
       )
@@ -636,7 +636,7 @@ class DataLoader:
         parallelism.CoordinateShard(
             ax,
             mesh.shape,
-            mesh.field_partitions[self.loading_partition_schema],
+            mesh.field_partitions[self.loading_partition_schema],  # pyrefly: ignore[bad-index]
         )
         for ax in coord.axes
     ])
@@ -662,7 +662,7 @@ class DataLoader:
 
     stencils = {}
     for spec in input_specs:
-      spec_stencils = infer_stencils(spec)
+      spec_stencils = infer_stencils(spec)  # pyrefly: ignore[bad-argument-type]
       for k, stencil in spec_stencils.items():
         if k in stencils and stencils[k] != stencil:
           raise ValueError(
@@ -681,7 +681,7 @@ class DataLoader:
       )
       shard_count = jax.device_count() // deg_of_model_parallelism
 
-    return all_data, stencils, shard_count
+    return all_data, stencils, shard_count  # pyrefly: ignore[bad-return]
 
   def setup_targets_via_callback(
       self,
@@ -806,7 +806,7 @@ class DataLoader:
       """Retrieves a global concrete array by stitching local shards."""
       get_out_spec = lambda f: parallelism.get_partition_spec(
           f.dims,
-          mesh.field_partitions[self.loading_partition_schema],
+          mesh.field_partitions[self.loading_partition_schema],  # pyrefly: ignore[bad-index]
       )
       out_specs = jax.tree.map(
           get_out_spec, data_slice_struct, is_leaf=cx.is_field
@@ -868,7 +868,7 @@ class DataLoader:
         data,
         specs,
         mesh_shape=mesh.spmd_mesh.shape,
-        dim_partitions=mesh.field_partitions[self.loading_partition_schema],
+        dim_partitions=mesh.field_partitions[self.loading_partition_schema],  # pyrefly: ignore[bad-index]
     )
 
   def _from_xarray_fn(
@@ -928,7 +928,7 @@ class DataLoader:
 
     mesh = self.parallelism_mesh
     assert isinstance(mesh, parallelism.Mesh)  # guaranteed by spmd_mesh check.
-    partitions = mesh.field_partitions[self.loading_partition_schema]
+    partitions = mesh.field_partitions[self.loading_partition_schema]  # pyrefly: ignore[bad-index]
     if batch_size_per_device is not None:
       spec_names = ('batch',) + self.shardable_dims
     else:
@@ -953,7 +953,7 @@ class DataLoader:
       # Use .get(k, 1) for dims that may not exist in a particular dataset.
       if batch_axis is not None:
         global_shape = (
-            batch_axis.size,
+            batch_axis.size,  # pyrefly: ignore[missing-attribute]
             *(sizes.get(k, 1) for k in spatial_dims),
         )
       else:
@@ -1011,9 +1011,9 @@ class DataLoader:
 
     if batch_size_per_device is not None:
       batch_axis_shard = parallelism.CoordinateShard(
-          batch_axis,
+          batch_axis,  # pyrefly: ignore[bad-argument-type]
           spmd_mesh.shape,
-          mesh.field_partitions[self.loading_partition_schema],
+          mesh.field_partitions[self.loading_partition_schema],  # pyrefly: ignore[bad-index]
       )
 
     def prep_for_to_global_array(shards):
@@ -1185,7 +1185,7 @@ class DataLoader:
     if batch_size_per_device is not None:
       batch_axis = self.make_batch_axis(batch_size_per_device)
       assert batch_axis is not None
-      total_sample_count = batch_axis.size
+      total_sample_count = batch_axis.size  # pyrefly: ignore[missing-attribute]
     else:
       batch_axis = None
       total_sample_count = 1

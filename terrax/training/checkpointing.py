@@ -182,7 +182,7 @@ def export_training_to_model_checkpoint(
   )
   fiddle_config = copy.deepcopy(model.fiddle_config)
   fiddle_config = parallelism.update_mesh_properties(
-      fiddle_config, spmd_mesh_updates={parallelism.Mesh: None}
+      fiddle_config, spmd_mesh_updates={parallelism.Mesh: None}  # pyrefly: ignore[bad-argument-type]
   )
   model_checkpointing.save_checkpoint(
       model, model_checkpoint_path, fiddle_config=fiddle_config

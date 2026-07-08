@@ -236,7 +236,7 @@ def create_spmd_mesh(sizes: dict[str, int]) -> jax.sharding.Mesh:
     except (AssertionError, NotImplementedError):
       # create_device_mesh() doesn't work for non-megacore Pufferfish, but
       # that's what we use for testing.
-      mesh_devices = np.reshape(jax.devices(), logical_mesh_shape)
+      mesh_devices = np.reshape(jax.devices(), logical_mesh_shape)  # pyrefly: ignore[no-matching-overload]
   else:
     devices = np.empty(physical_mesh_shape, dtype=object)
     for device in jax.devices():
@@ -247,7 +247,7 @@ def create_spmd_mesh(sizes: dict[str, int]) -> jax.sharding.Mesh:
         sizes[dim] for dim in ['ensemble', 'z', 'x', 'y']
     )
     try:
-      rearrangement = _TPU_LAYOUT_REARRANGEMENTS[topology][logical_mesh_shape]
+      rearrangement = _TPU_LAYOUT_REARRANGEMENTS[topology][logical_mesh_shape]  # pyrefly: ignore[bad-index]
     except KeyError:
       if logical_mesh_shape == (1, 1, 1, 1):
         rearrangement = 'b0 b1 b2 -> (b0 b1 b2) () () () ()'
@@ -290,7 +290,7 @@ def jit_once(f: T, **jit_kwargs) -> T:
     if compiled is None:
       start_time = time.perf_counter()
       logging.info(f'Lowering {f}')
-      lowered = jax.jit(f, **jit_kwargs).lower(*args, **kwargs)
+      lowered = jax.jit(f, **jit_kwargs).lower(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
       lower_time = time.perf_counter()
       logging.info(f'Compiling {f}')
       compiled = lowered.compile()
@@ -303,4 +303,4 @@ def jit_once(f: T, **jit_kwargs) -> T:
       )
     return compiled(*args, **kwargs)
 
-  return g
+  return g  # pyrefly: ignore[bad-return]
