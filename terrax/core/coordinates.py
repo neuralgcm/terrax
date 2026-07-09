@@ -454,6 +454,43 @@ class LonLatGrid(cx.Coordinate):
     )
     return cls.from_dinosaur_grid(ylm_grid=ylm_grid)
 
+  @classmethod
+  def construct_equiangular_linear(
+      cls,
+      max_wavenumber: int,
+      longitude_offset: float = 0.0,
+      mesh: parallelism.Mesh | None = None,
+      partition_schema_key: str | None = None,
+  ) -> LonLatGrid:
+    """Constructs an equiangular linear `LonLatGrid`.
+
+    This creates a grid with equiangular_with_poles latitude spacing, where
+    latitude nodes are uniformly spaced and include both poles. The grid has
+    2 * max_wavenumber longitude nodes and max_wavenumber + 1 latitude nodes.
+
+    Args:
+      max_wavenumber: maximum wavenumber to resolve.
+      longitude_offset: the value of the first longitude node, in radians.
+      mesh: optional Mesh that specifies necessary grid padding.
+      partition_schema_key: key indicating a partition schema on `mesh` to infer
+        padding details. Used only if an appropriate `mesh` is passed in.
+
+    Returns:
+      Constructed LonLatGrid object.
+    """
+    dims = ('longitude', 'latitude')
+    ylm_grid = spherical_harmonic.Grid(
+        longitude_wavenumbers=0,
+        total_wavenumbers=0,
+        longitude_nodes=2 * max_wavenumber,
+        latitude_nodes=max_wavenumber + 1,
+        latitude_spacing='equiangular_with_poles',
+        longitude_offset=longitude_offset,
+        spherical_harmonics_impl=FastSphericalHarmonics,
+        spmd_mesh=_mesh_to_dinosaur_spmd_mesh(dims, mesh, partition_schema_key),
+    )
+    return cls.from_dinosaur_grid(ylm_grid=ylm_grid)
+
   # The factory methods below return "standard" grids that appear in the
   # literature. See, e.g. https://doi.org/10.5194/tc-12-1499-2018 and
   # https://www.ecmwf.int/en/forecasts/documentation-and-support/data-spatial-coordinate-systems
@@ -557,6 +594,14 @@ class LonLatGrid(cx.Coordinate):
   @classmethod
   def TL1279(cls, **kwargs) -> LonLatGrid:
     return cls.construct(gaussian_nodes=640, **kwargs)
+
+  # EL* grids use equiangular linear (equiangular_with_poles) latitude spacing.
+  # These grids include both poles and have uniform latitude spacing.
+
+  @classmethod
+  def EL120(cls, **kwargs) -> LonLatGrid:
+    """Equiangular linear grid resolving up to wavenumber 120."""
+    return cls.construct_equiangular_linear(max_wavenumber=120, **kwargs)
 
   def to_xarray(self) -> dict[str, xarray.Variable]:
     variables = super().to_xarray()
@@ -960,6 +1005,15 @@ class SphericalHarmonicGrid(cx.Coordinate):
   @classmethod
   def TL1279(cls, **kwargs) -> SphericalHarmonicGrid:
     return cls.construct(max_wavenumber=1279, **kwargs)
+
+  # EL* grids use equiangular linear (equiangular_with_poles) latitude spacing.
+  # The spectral representation is the same as TL grids with the same
+  # wavenumber.
+
+  @classmethod
+  def EL120(cls, **kwargs) -> SphericalHarmonicGrid:
+    """Equiangular linear grid resolving up to wavenumber 120."""
+    return cls.construct(max_wavenumber=120, **kwargs)
 
   def to_xarray(self) -> dict[str, xarray.Variable]:
     variables = super().to_xarray()

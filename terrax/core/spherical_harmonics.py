@@ -45,6 +45,35 @@ linear_dino_grid_constructors = [
 ]
 # fmt: on
 
+
+def _equiangular_240x121_grid(**kwargs) -> Grid:
+  """Constructs a dinosaur Grid for the 1.5° equiangular_with_poles grid.
+
+  This grid has 240 longitude nodes, 121 latitude nodes (including poles), and
+  resolves up to wavenumber 120 (linear truncation). It is used as extension to
+  standard linear grids and is routinely used for evaluations.
+
+  Args:
+    **kwargs: Additional keyword arguments to pass to the Grid constructor.
+
+  Returns:
+    A dinosaur Grid object.
+  """
+  return Grid(
+      longitude_wavenumbers=120,
+      total_wavenumbers=121,
+      longitude_nodes=240,
+      latitude_nodes=121,
+      latitude_spacing='equiangular_with_poles',
+      **kwargs,
+  )
+
+
+# Additional non-Gaussian linear grids.
+equiangular_linear_dino_grid_constructors = [
+    _equiangular_240x121_grid,
+]
+
 # Cubic shape-to-cls dicts.
 FAST_CUBIC_NODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=FastSphericalHarmonics).nodal_shape: grid
@@ -63,21 +92,24 @@ REAL_CUBIC_MODAL_SHAPE_TO_GRID = {
     for grid in cubic_dino_grid_constructors
 }
 # Linear shape-to-cls dicts.
+_all_linear_constructors = (
+    linear_dino_grid_constructors + equiangular_linear_dino_grid_constructors
+)
 FAST_LINEAR_NODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=FastSphericalHarmonics).nodal_shape: grid
-    for grid in linear_dino_grid_constructors
+    for grid in _all_linear_constructors
 }
 REAL_LINEAR_NODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=RealSphericalHarmonics).nodal_shape: grid
-    for grid in linear_dino_grid_constructors
+    for grid in _all_linear_constructors
 }
 FAST_LINEAR_MODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=FastSphericalHarmonics).modal_shape: grid
-    for grid in linear_dino_grid_constructors
+    for grid in _all_linear_constructors
 }
 REAL_LINEAR_MODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=RealSphericalHarmonics).modal_shape: grid
-    for grid in linear_dino_grid_constructors
+    for grid in _all_linear_constructors
 }
 NODAL_SHAPE_TO_GRID = {
     'fast': {

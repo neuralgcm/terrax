@@ -437,6 +437,69 @@ class GeometryMethodsTest(chex.TestCase):
     np.testing.assert_allclose(actual_u, expected_u)
     np.testing.assert_allclose(actual_v, expected_v)
 
+class Equiangular240x121Test(parameterized.TestCase):
+  """Tests that the equiangular_240x121 grid is recognized by YlmMapper."""
+
+  def test_ylm_mapper_resolves_equiangular_240x121(self):
+    """YlmMapper should resolve the equiangular 240x121 grid shape."""
+    grid = coordinates.LonLatGrid(
+        longitude_nodes=240,
+        latitude_nodes=121,
+        latitude_spacing='equiangular_with_poles',
+    )
+    ylm_mapper = spherical_harmonics.YlmMapper(truncation_rule='linear')
+    # This should not raise a KeyError.
+    dino_grid = ylm_mapper.dinosaur_grid(grid)
+    self.assertEqual(dino_grid.longitude_nodes, 240)
+    self.assertEqual(dino_grid.latitude_nodes, 121)
+
+  def test_ylm_mapper_modal_grid_for_equiangular_240x121(self):
+    """YlmMapper should produce a compatible modal grid."""
+    grid = coordinates.LonLatGrid(
+        longitude_nodes=240,
+        latitude_nodes=121,
+        latitude_spacing='equiangular_with_poles',
+    )
+    ylm_mapper = spherical_harmonics.YlmMapper(truncation_rule='linear')
+    modal_grid = ylm_mapper.modal_grid(grid)
+    # 120 longitude wavenumbers, matching with_wavenumbers(120).
+    self.assertEqual(modal_grid.longitude_wavenumbers, 120)
+
+  @parameterized.parameters('fast', 'real')
+  def test_ylm_mapper_roundtrip_equiangular_240x121(self, method):
+    """Roundtrip to_modal→to_nodal should preserve the grid coordinate."""
+    grid = coordinates.LonLatGrid(
+        longitude_nodes=240,
+        latitude_nodes=121,
+        latitude_spacing='equiangular_with_poles',
+    )
+    ylm_mapper = spherical_harmonics.YlmMapper(
+        truncation_rule='linear',
+        spherical_harmonics_method=method,
+    )
+    f = cx.field(np.ones(grid.shape), grid)
+    modal_f = ylm_mapper.to_modal(f)
+    restored_f = ylm_mapper.to_nodal(modal_f)
+    self.assertEqual(cx.get_coordinate(restored_f), grid)
+
+  def test_equiangular_240x121_compatible_with_ylm_grid(self):
+    """The nodal and modal grids should be compatible for transforms."""
+    nodal_grid = coordinates.LonLatGrid(
+        longitude_nodes=240,
+        latitude_nodes=121,
+        latitude_spacing='equiangular_with_poles',
+    )
+    modal_grid = coordinates.SphericalHarmonicGrid.with_wavenumbers(120)
+    ylm_map = spherical_harmonics.FixedYlmMapping(
+        lon_lat_grid=nodal_grid,
+        ylm_grid=modal_grid,
+    )
+    f = cx.field(np.ones(nodal_grid.shape), nodal_grid)
+    modal_f = ylm_map.to_modal(f)
+    restored_f = ylm_map.to_nodal(modal_f)
+    self.assertEqual(cx.get_coordinate(restored_f), nodal_grid)
+    np.testing.assert_allclose(restored_f.data, f.data, atol=1e-5)
+
 
 if __name__ == '__main__':
   chex.set_n_cpu_devices(8)
