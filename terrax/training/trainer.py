@@ -163,8 +163,11 @@ def _on_host[T: Callable[..., Any]](fn: T) -> T:
 
   @functools.wraps(fn)
   def _fn(*args, **kwargs):
-    with compute_on.compute_on('device_host'):
-      return fn(*args, **kwargs)
+    return compute_on.compute_on2(
+        lambda *a: fn(*a, **kwargs),
+        compute_type='device_host',
+        out_memory_spaces=jax.memory.Space.Device,
+    )(*args)
 
   return _fn  # pyrefly: ignore[bad-return]
 
