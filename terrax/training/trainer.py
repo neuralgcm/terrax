@@ -163,7 +163,7 @@ def _on_host[T: Callable[..., Any]](fn: T) -> T:
 
   @functools.wraps(fn)
   def _fn(*args, **kwargs):
-    return compute_on.compute_on2(
+    return compute_on.compute_on(
         lambda *a: fn(*a, **kwargs),
         compute_type='device_host',
         out_memory_spaces=jax.memory.Space.Device,
