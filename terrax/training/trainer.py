@@ -554,7 +554,7 @@ def _construct_full_queries_spec(
       targets[source] = {}
     for var_name, q_spec in specs.items():
       input_coord = inputs_spec[source][var_name]
-      q_spec_coord = q_spec.spec if is_field_in_query(q_spec) else q_spec
+      q_spec_coord = q_spec.spec if is_field_in_query(q_spec) else q_spec  # pyrefly: ignore[missing-attribute]
       if not cx.contains_dims(input_coord, q_spec_coord):  # pyrefly: ignore[bad-argument-type]
         raise ValueError(
             f'query entry {source}/{var_name} has inconsistent coordinates with'
@@ -1393,7 +1393,7 @@ class RolloutTrainer:
     def train_step(experiment_state, step, inputs, dynamic_data):
       opt_state, params, ema_state, non_params = experiment_state
       rng = train_utils.batch_and_ensemble_parallel_rng_key(
-          batch_size=batch_axis.size,
+          batch_size=batch_axis.size,  # pyrefly: ignore[missing-attribute]
           ensemble_size=self.ensemble_axis.size,
           seeds=(train_stage.random_process_rng_seed, step),
           mesh=self.spmd_mesh,

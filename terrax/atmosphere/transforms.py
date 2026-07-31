@@ -228,8 +228,8 @@ class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
 
   def __post_init__(self):
     if self.compute_grads_transform is None:
-      self.compute_grads_transform = lambda x: {}
-    self.pre_process = transforms.Sequential([
+      self.compute_grads_transform = lambda x: {}  # pyrefly: ignore[bad-assignment]
+    self.pre_process = transforms.Sequential([  # pyrefly: ignore[bad-argument-type]
         transforms.NodalToModal(self.ylm_map, include_remaining=True),
         transforms.FilterByCoord(types=coordinates.SphericalHarmonicGrid),
     ])
@@ -264,7 +264,7 @@ class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
     modal_features = parallelism.with_dycore_sharding(
         self.ylm_map.mesh, modal_features
     )
-    diff_operator_features = self.compute_grads_transform(modal_features)
+    diff_operator_features = self.compute_grads_transform(modal_features)  # pyrefly: ignore[not-callable]
     # Computing all features in nodal space.
     features = {}
     for k, v in (diff_operator_features | modal_features).items():

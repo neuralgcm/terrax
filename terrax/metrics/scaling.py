@@ -421,7 +421,7 @@ class LeadTimeScaler(ScaleFactor):
         )
       t = timedelta_now / one_hr_delta  # pyrefly: ignore[unsupported-operation]
     else:
-      t = time_coord.deltas / one_hr_delta
+      t = time_coord.deltas / one_hr_delta  # pyrefly: ignore[missing-attribute]
       all_timedeltas = t
 
     inv_variance = self._compute_inv_variance(t)
@@ -538,7 +538,7 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
         )
       t = timedelta_now / one_hr_delta  # pyrefly: ignore[unsupported-operation]
     else:
-      t = time_coord.deltas / one_hr_delta
+      t = time_coord.deltas / one_hr_delta  # pyrefly: ignore[missing-attribute]
       all_timedeltas = t
 
     weights = self._compute_raw_weights(t)

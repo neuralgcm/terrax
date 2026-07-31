@@ -248,7 +248,7 @@ class DispatchByCoordinateObservationOperator(ObservationOperatorABC):
     coord_to_sub_query = {coord: {} for coord in self.coord_to_operator}
 
     for k, raw_entry in query.items():
-      entry, _ = typing.unwrap_auxiliary(raw_entry)
+      entry, _ = typing.unwrap_auxiliary(raw_entry)  # pyrefly: ignore[bad-argument-type]
       if cx.is_field(entry):
         entry_coord = entry.coordinate
       elif cx.is_coord(entry):

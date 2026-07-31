@@ -333,7 +333,7 @@ class Broadcast(PytreeTransformABC):
     # safe to attempt broadcasting to a field with largest ndim. If coordinates
     # do not align, an error will be raised during broadcasting.
     ndims = {k: v.ndim for k, v in inputs.items()}
-    ref = inputs[max(ndims, key=ndims.get)]  # get key of the largest ndim.
+    ref = inputs[max(ndims, key=ndims.get)]  # get key of the largest ndim.  # pyrefly: ignore[no-matching-overload]
     return {k: v.broadcast_like(ref) for k, v in inputs.items()}
 
 

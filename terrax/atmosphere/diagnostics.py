@@ -160,7 +160,7 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
     [self.observe_key] = valid_keys.intersection(query_keys)
     [self.diagnosed_key] = valid_keys.difference(query_keys)
     if isinstance(self.dt, np.timedelta64):
-      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)
+      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)  # pyrefly: ignore[bad-assignment]
     # Build output key mapping for renaming results.
     self._output_key_map = {}
     if self.output_precipitation_key is not None:
@@ -559,7 +559,7 @@ class ExtractColumnEnergyBudget(nnx.Module):
 
   def __post_init__(self):
     if isinstance(self.dt, np.timedelta64):
-      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)
+      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)  # pyrefly: ignore[bad-assignment]
     if self.energy_fluxes_query is not None:
       self.rt_keys = ['top_net_thermal_radiation', 'top_net_solar_radiation']
       self.fs_keys = [

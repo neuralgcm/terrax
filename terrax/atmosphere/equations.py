@@ -295,11 +295,11 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
     tracers_dict = {k: inputs[k].data for k in self.tracer_names}
     log_surface_pressure = inputs['log_surface_pressure'].data[np.newaxis]
     return primitive_equations.State(
-        divergence=inputs['divergence'].data,  # pyrefly: ignore[unexpected-keyword]
-        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[unexpected-keyword]
-        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[unexpected-keyword]
-        tracers=tracers_dict,  # pyrefly: ignore[unexpected-keyword]
-        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[unexpected-keyword]
+        divergence=inputs['divergence'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        tracers=tracers_dict,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
     )
 
   def _from_primitive_equations_state(
@@ -307,7 +307,7 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
   ) -> dict[str, cx.Field]:
     sigma_levels, ylm_grid = self.levels, self.ylm_map.modal_grid
     tracers = {
-        k: cx.field(state.tracers[k], sigma_levels, ylm_grid)
+        k: cx.field(state.tracers[k], sigma_levels, ylm_grid)  # pyrefly: ignore[bad-argument-type]
         for k in self.tracer_names
     }
     volume_field_names = ['divergence', 'vorticity', 'temperature_variation']
@@ -319,7 +319,7 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
       volume_fields = self.linear_to_absolute_rename(volume_fields)
     else:
       volume_fields = self.delinearize_transform(volume_fields)
-    lsp = cx.field(jnp.squeeze(state.log_surface_pressure, axis=0), ylm_grid)
+    lsp = cx.field(jnp.squeeze(state.log_surface_pressure, axis=0), ylm_grid)  # pyrefly: ignore[bad-argument-type]
     return volume_fields | tracers | {'log_surface_pressure': lsp}
 
   def explicit_terms(self, state: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -462,10 +462,10 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
     inputs = self.linearize_transform(inputs)  # temperature -> variation.
     log_surface_pressure = inputs['log_surface_pressure'].data[np.newaxis]
     return primitive_equations.State(
-        divergence=inputs['divergence'].data,  # pyrefly: ignore[unexpected-keyword]
-        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[unexpected-keyword]
-        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[unexpected-keyword]
-        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[unexpected-keyword]
+        divergence=inputs['divergence'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
     )
 
   def _from_primitive_equations_state(
@@ -478,7 +478,7 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
         for k in volume_field_names
     }
     volume_fields = self.linear_to_absolute_rename(volume_fields)
-    lsp = cx.field(jnp.squeeze(state.log_surface_pressure, axis=0), ylm_grid)
+    lsp = cx.field(jnp.squeeze(state.log_surface_pressure, axis=0), ylm_grid)  # pyrefly: ignore[bad-argument-type]
     return volume_fields | {'log_surface_pressure': lsp}
 
   def explicit_terms(

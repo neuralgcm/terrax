@@ -72,9 +72,9 @@ def _get_climatology(
 
   # This uses Xarray's vectorized indexing to produce an output dataset with a
   # 'time' dimension.
-  indexers = {'dayofyear': times.dt.dayofyear}
+  indexers = {'dayofyear': times.dt.dayofyear}  # pyrefly: ignore[missing-attribute]
   if 'hour' in _get_dataset_or_datatree(climatology).dims:
-    indexers['hour'] = times.dt.hour
+    indexers['hour'] = times.dt.hour  # pyrefly: ignore[missing-attribute]
   return _map_over_datasets(
       lambda x: x.sel(indexers).reset_coords('dayofyear', drop=True),
       climatology,
