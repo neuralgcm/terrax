@@ -354,6 +354,7 @@ class InferenceRunner:
         encoding=encoding,
         mode='w',  # override if exists, to ensure robustness to preemptions
         zarr_format=3,
+        consolidated=False,
     )
 
     # Add directory for inference checkpoints. The existance of this directory
@@ -700,7 +701,8 @@ class InferenceRunner:
 
     logging.info('setting up zarr outputs')
     delayed = tree.chunk().to_zarr(
-        self.output_path, mode='r+', region=region, compute=False
+        self.output_path, mode='r+', region=region, compute=False,
+        consolidated=False,
     )
 
     logging.info(f'writing {tree.nbytes/1e6:.1f} MB to zarr')
