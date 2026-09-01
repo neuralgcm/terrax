@@ -51,12 +51,18 @@ dependencies = [
 
 [project.urls]
 source = "https://github.com/neuralgcm/terrax"
-# TODO(dkochkov): Uncomment once we have a readthedocs site.
-# documentation = "https://terrax.readthedocs.io"
+documentation = "https://terrax.readthedocs.io"
 
 [project.optional-dependencies]
 tests = [
     "absl-py",
     "chex",
     "pytest",
+]
+docs = [
+    "furo==2024.4.27",
+    "Jinja2==3.1.4",
+    "myst-nb==1.1.0",
+    "myst-parser==3.0.1",
+    "sphinx==7.3.7",
 ]
