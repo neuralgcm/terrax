@@ -135,7 +135,24 @@ MODAL_SHAPE_TO_GRID = {
 
 @dataclasses.dataclass(frozen=True)
 class FixedYlmMapping:
-  """Fixed spherical harmonic transform specified by grids."""
+  """Fixed spherical harmonic transform specified by grids.
+
+  Attributes:
+    lon_lat_grid: The nodal (lon-lat) grid.
+    ylm_grid: The modal (spherical harmonic) grid.
+    mesh: The parallelism mesh used for sharding.
+    partition_schema_key: The key specifying the partition schema in the mesh.
+    level_key: The dimension name to be used as levels in dinosaur mesh.
+    longitude_key: The dimension name to be used as longitudes in dinosaur mesh.
+    latitude_key: The dimension name to be used as latitudes in dinosaur mesh.
+    radius: The radius of the sphere.
+    basis_as_jax_arrays: controls whether the Fourier / Legendre basis matrices
+      are stored as ``jax.Array`` (de-duplicated by identity in ``jnp.einsum``)
+      or as numpy arrays (eligible for XLA constant-folding). ``None`` (default)
+      defers to the subclass default (numpy). Since a ``FixedYlmMapping`` caches
+      its ``dinosaur_grid``, setting this to ``True`` is safe: the basis is
+      allocated once and shared across all transform operations.
+  """
 
   lon_lat_grid: coordinates.LonLatGrid
   ylm_grid: coordinates.SphericalHarmonicGrid
@@ -147,6 +164,7 @@ class FixedYlmMapping:
   longitude_key: str = 'longitude'
   latitude_key: str = 'latitude'
   radius: float = 1.0
+  basis_as_jax_arrays: bool | None = None
 
   @property
   def dinosaur_spmd_mesh(self) -> jax.sharding.Mesh | None:
@@ -160,7 +178,7 @@ class FixedYlmMapping:
         self.partition_schema_key, dims_to_axes
     )
 
-  @property
+  @functools.cached_property
   def dinosaur_grid(self) -> spherical_harmonic.Grid:
     method = coordinates.SPHERICAL_HARMONICS_METHODS[
         self.ylm_grid.spherical_harmonics_method
@@ -175,6 +193,7 @@ class FixedYlmMapping:
         radius=self.radius,
         spherical_harmonics_impl=method,
         spmd_mesh=self.dinosaur_spmd_mesh,
+        basis_as_jax_arrays=self.basis_as_jax_arrays,
     )
 
   @property
@@ -325,6 +344,10 @@ class YlmMapper:
     longitude_key: The dimension name to be used as longitudes in dinosaur mesh.
     latitude_key: The dimension name to be used as latitudes in dinosaur mesh.
     radius: The radius of the sphere.
+    basis_as_jax_arrays: controls whether the Fourier / Legendre basis matrices
+      are stored as ``jax.Array`` or as numpy arrays. Passed through to
+      ``FixedYlmMapping`` instances created by this mapper. See
+      ``FixedYlmMapping.basis_as_jax_arrays`` for details.
   """
 
   truncation_rule: TruncationRules = 'cubic'
@@ -337,6 +360,7 @@ class YlmMapper:
   longitude_key: str = 'longitude'
   latitude_key: str = 'latitude'
   radius: float = 1.0
+  basis_as_jax_arrays: bool | None = None
 
   @property
   def dinosaur_spmd_mesh(self) -> jax.sharding.Mesh | None:
@@ -408,6 +432,7 @@ class YlmMapper:
         longitude_key=self.longitude_key,
         latitude_key=self.latitude_key,
         radius=self.radius,
+        basis_as_jax_arrays=self.basis_as_jax_arrays,
     )
 
   @overload
