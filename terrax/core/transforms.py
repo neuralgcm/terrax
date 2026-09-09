@@ -707,7 +707,7 @@ class ReduceMean(PytreeFieldTransformABC):
     if grid is not None:
       spatial_dims = dim_names & {'latitude', 'longitude'}
       if spatial_dims:
-        field = grid.mean(field, dims=tuple(spatial_dims))
+        field = grid.mean(field, dims=tuple(spatial_dims))  # pyrefly: ignore[missing-attribute]
         dim_names -= spatial_dims
 
     if dim_names:
@@ -1481,7 +1481,7 @@ class ComputeMasks(PytreeTransformABC):
         raise ValueError('No masks computed to combine.')
       combine = jnp.logical_and if combine_method == 'all' else jnp.logical_or
       combined = functools.reduce(cx.cmap(combine), outputs.values())
-      return {self.output_key: combined}  # pyrefly: ignore[bad-return]
+      return {self.output_key: combined}  # pyrefly: ignore[bad-assignment, bad-return]
     return outputs
 
 

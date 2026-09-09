@@ -859,7 +859,7 @@ def _unroll_for_queries(
 
     def _tag_td(f: cx.Field, coord: cx.Coordinate) -> cx.Field:
       orig_td = cx.coords.extract(coord, coordinates.TimeDelta)
-      new_td = coordinates.TimeDelta(np.concatenate([dt0, orig_td.deltas]))
+      new_td = coordinates.TimeDelta(np.concatenate([dt0, orig_td.deltas]))  # pyrefly: ignore[missing-attribute]
       return f.tag(new_td)
 
     unroll = jax.tree.map(_tag_td, combined, outputs_spec, is_leaf=cx.is_field)
@@ -1048,7 +1048,7 @@ def unroll_for_template(
       to_coord, template, is_leaf=coord_or_field
   )
   has_t0 = list({
-      cx.coords.extract(c, coordinates.TimeDelta).deltas[0]
+      cx.coords.extract(c, coordinates.TimeDelta).deltas[0]  # pyrefly: ignore[missing-attribute]
       == np.timedelta64(0)
       for c in jax.tree.leaves(combined_coords, is_leaf=cx.is_coord)
   })

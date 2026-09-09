@@ -903,7 +903,7 @@ class DataLoader:
       return isinstance(x, dict) and any(isinstance(k, jax.Device) for k in x)
 
     unshard = functools.partial(
-        mesh.unshard, schema=self.loading_partition_schema
+        mesh.unshard, schema=self.loading_partition_schema  # pyrefly: ignore[bad-argument-type]
     )
     unsharded = jax.tree.map(unshard, pytree, is_leaf=is_leaf)
     return unsharded

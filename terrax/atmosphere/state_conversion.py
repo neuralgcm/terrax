@@ -55,15 +55,15 @@ def get_geopotential(
     # consider exposing this function elsewhere in the codebase.
     dino_get_geopotential = functools.partial(
         dinosaur_primitive_equations.get_geopotential_with_moisture,
-        nodal_orography=orography.nodal_orography.data,
+        nodal_orography=orography.nodal_orography.data,  # pyrefly: ignore[bad-argument-type]
         coordinates=levels.sigma_levels,
         gravity_acceleration=sim_units.gravity_acceleration,
         ideal_gas_constant=sim_units.ideal_gas_constant,
         water_vapor_gas_constant=sim_units.water_vapor_gas_constant,
     )
     geopotential = dino_get_geopotential(
-        temperature=temperature.data,
-        specific_humidity=specific_humidity.data,
+        temperature=temperature.data,  # pyrefly: ignore[bad-argument-type]
+        specific_humidity=specific_humidity.data,  # pyrefly: ignore[bad-argument-type]
         clouds=clouds,
     )
   elif isinstance(levels, coordinates.HybridLevels):
@@ -72,7 +72,7 @@ def get_geopotential(
     nondim_hybrid_levels = hybrid_coordinates.HybridCoordinates(a_nondim, b)  # pyrefly: ignore[bad-argument-type]
     dino_get_geopotential = functools.partial(
         dinosaur_primitive_equations.get_geopotential_on_hybrid,
-        nodal_orography=orography.nodal_orography.data,
+        nodal_orography=orography.nodal_orography.data,  # pyrefly: ignore[bad-argument-type]
         coordinates=nondim_hybrid_levels,
         gravity_acceleration=sim_units.gravity_acceleration,
         ideal_gas_constant=sim_units.ideal_gas_constant,
@@ -84,8 +84,8 @@ def get_geopotential(
           ' hybrid levels.'
       )
     geopotential = dino_get_geopotential(
-        temperature=temperature.data,
-        specific_humidity=specific_humidity.data,
+        temperature=temperature.data,  # pyrefly: ignore[bad-argument-type]
+        specific_humidity=specific_humidity.data,  # pyrefly: ignore[bad-argument-type]
         clouds=clouds,
         surface_pressure=jnp.expand_dims(surface_pressure.data, axis=0),  # pyrefly: ignore[bad-argument-type]
     )

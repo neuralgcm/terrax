@@ -47,7 +47,7 @@ def _extract_timedelta(
 ) -> coordinates.TimeDelta:
   """Extracts TimeDelta axis from a spec or raises if none found."""
   coordinate = _get_coord(spec)
-  return cx.coords.extract(coordinate, coordinates.TimeDelta)
+  return cx.coords.extract(coordinate, coordinates.TimeDelta)  # pyrefly: ignore[bad-return]
 
 
 def _is_spec_leaf(x) -> bool:
@@ -242,7 +242,7 @@ def nest_data_for_scans(
     )
 
   nested_data = []
-  for i, spec in enumerate(scan_specs):  # pyrefly: ignore[bad-argument-type]
+  for i, spec in enumerate(scan_specs):  # pyrefly: ignore[bad-argument-type, not-iterable]
     shape = scan_steps[i:][::-1]  # pyrefly: ignore[unsupported-operation]
     dummy_td = cx.coords.compose(*[cx.DummyAxis(None, s) for s in shape])
 

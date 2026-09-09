@@ -159,9 +159,9 @@ class GridAreaScaler(ScaleFactor):
     lon_lat_dims = ('longitude', 'latitude')
     ylm_dims = ('longitude_wavenumber', 'total_wavenumber')
     if all(d in field.axes for d in lon_lat_dims):
-      grid = cx.coords.compose(*[field.axes.get(d) for d in lon_lat_dims])
+      grid = cx.coords.compose(*[field.axes.get(d) for d in lon_lat_dims])  # pyrefly: ignore[bad-argument-type]
     elif all(d in field.axes for d in ylm_dims):
-      grid = cx.coords.compose(*[field.axes.get(d) for d in ylm_dims])
+      grid = cx.coords.compose(*[field.axes.get(d) for d in ylm_dims])  # pyrefly: ignore[bad-argument-type]
     else:
       grid = None
 
@@ -251,7 +251,7 @@ class WavenumberScaler(ScaleFactor):
     del field_name, context  # unused.
     ylm_dims = ('longitude_wavenumber', 'total_wavenumber')
     if all(d in field.axes for d in ylm_dims):
-      grid = cx.coords.compose(*[field.axes.get(d) for d in ylm_dims])
+      grid = cx.coords.compose(*[field.axes.get(d) for d in ylm_dims])  # pyrefly: ignore[bad-argument-type]
     else:
       grid = None
 

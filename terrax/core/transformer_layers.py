@@ -1319,7 +1319,7 @@ class SphericalPositionalEncoder(nnx.Module):
   ) -> cx.Field:
     """Returns positional encodings for `inputs` over dimensions `dims`."""
     lon_lat_dims = ('longitude', 'latitude')
-    grid = cx.coords.compose(*[inputs.axes.get(d) for d in lon_lat_dims])
+    grid = cx.coords.compose(*[inputs.axes.get(d) for d in lon_lat_dims])  # pyrefly: ignore[bad-argument-type]
     if not isinstance(grid, coordinates.LonLatGrid):
       raise ValueError(
           'SphericalPositionalEncoder generates encoding for LonLatGrid data '

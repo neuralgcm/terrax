@@ -177,7 +177,7 @@ class ConservativeRegridder:
 
     x = inputs
     lon_lat_dims = ('longitude', 'latitude')
-    source_grid = cx.coords.compose(*[x.axes.get(d) for d in lon_lat_dims])
+    source_grid = cx.coords.compose(*[x.axes.get(d) for d in lon_lat_dims])  # pyrefly: ignore[bad-argument-type]
     x = inputs.untag(source_grid)
     regrid_fn = cx.cmap(self._regrid_2d, x.named_axes)
     x = regrid_fn(x, source_grid)

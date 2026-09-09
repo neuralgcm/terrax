@@ -59,7 +59,7 @@ class ExponentialModalFilter(ModalSpatialFilter):
         x.coordinate, coordinates.SphericalHarmonicGrid
     )
     ls = ylm_grid.fields['total_wavenumber']
-    k = ls / ls.data.max()
+    k = ls / ls.data.max()  # pyrefly: ignore[missing-attribute]
     a = self.attenuation
     c = self.cutoff
     p = self.order

@@ -230,7 +230,7 @@ class LinearOnPressure(nnx.Module):
     out_coord = cx.coords.replace_axes(f.coordinate, level, target_levels)
     # we specify out_axes to preserve the dimension order in the output.
     out_axes = {d: i for i, d in enumerate(out_coord.dims)}
-    regrid_fn = cx.cmap(self.interpolate_array, out_axes)
+    regrid_fn = cx.cmap(self.interpolate_array, out_axes)  # pyrefly: ignore[bad-argument-type]
     return regrid_fn(desired, pressure.untag(level), f.untag(level))
 
   def __call__(
@@ -394,7 +394,7 @@ def get_surface_pressure(
       geopotential.coordinate, levels, cx.Scalar()  # levels are reduced.
   )
   out_axes = {d: i for i, d in enumerate(out_coord.dims)}
-  surface_pressure = cx.cmap(find_intercept, out_axes=out_axes)(
+  surface_pressure = cx.cmap(find_intercept, out_axes=out_axes)(  # pyrefly: ignore[bad-argument-type]
       relative_heights.untag(levels), pressure.untag(levels)
   )
   return surface_pressure

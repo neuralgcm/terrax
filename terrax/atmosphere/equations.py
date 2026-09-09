@@ -85,7 +85,7 @@ def get_reference_temperature(
     get_ticks_fn = lambda c: c.fields['sigma'] * p_surf_ref
   elif isinstance(model_levels, coordinates.HybridLevels):
     get_ticks_fn = functools.partial(
-        coordinates.HybridLevels.pressure_centers, surface_pressure=p_surf_ref
+        coordinates.HybridLevels.pressure_centers, surface_pressure=p_surf_ref  # pyrefly: ignore[bad-argument-type]
     )
   elif isinstance(model_levels, coordinates.PressureLevels):
     get_ticks_fn = lambda c: c.fields['pressure'] * 100  # Convert to Pa.
@@ -115,7 +115,7 @@ def get_temperature_linearization_transform(
       ylm_grid = cx.coords.extract(
           abs_temp.coordinate, coordinates.SphericalHarmonicGrid
       )
-      del_temp = ylm_grid.add_constant(abs_temp, -ref_temperatures)
+      del_temp = ylm_grid.add_constant(abs_temp, -ref_temperatures)  # pyrefly: ignore[missing-attribute]
     else:
       del_temp = abs_temp - ref_temperatures
     return del_temp
@@ -144,7 +144,7 @@ def get_temperature_delinearization_transform(
       ylm_grid = cx.coords.extract(
           del_temp.coordinate, coordinates.SphericalHarmonicGrid
       )
-      abs_temp = ylm_grid.add_constant(del_temp, ref_temperatures)
+      abs_temp = ylm_grid.add_constant(del_temp, ref_temperatures)  # pyrefly: ignore[missing-attribute]
     else:
       abs_temp = del_temp + ref_temperatures
     return abs_temp

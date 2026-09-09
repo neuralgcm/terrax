@@ -481,7 +481,7 @@ def vectorize_module_fn(
     """Wrapped function that applies vectorization."""
     vmap_axes = axes_to_vectorize
     if isinstance(vmap_axes, Sequence):
-      vmap_axes = cx.coords.compose(*axes_to_vectorize)
+      vmap_axes = cx.coords.compose(*axes_to_vectorize)  # pyrefly: ignore[not-iterable]
     if isinstance(vmap_axes, cx.Coordinate):
       axes_seq = vmap_axes.axes  # ensures that axes are 1d.
     else:

@@ -91,7 +91,7 @@ class ExtractPrecipitationPlusEvaporation(nnx.Module):
     else:
       prognostics = kwargs.get(self.prognostics_arg_key)
     p_plus_e_rate = self._compute_p_plus_e_rate(tendencies, prognostics)  # pyrefly: ignore[bad-argument-type]
-    return {'precipitation_plus_evaporation_rate': p_plus_e_rate}  # pyrefly: ignore[bad-return]
+    return {'precipitation_plus_evaporation_rate': p_plus_e_rate}  # pyrefly: ignore[bad-assignment, bad-return]
 
 
 PrecipitationScales = Literal['rate', 'cumulative', 'mass_rate']

@@ -110,7 +110,7 @@ class TimeDelta(cx.Coordinate):
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
   ) -> tuple[dict[str, Any], set[str]]:
-    return coordax.experimental.map_indexers_using_ticks(
+    return coordax.experimental.map_indexers_using_ticks(  # pyrefly: ignore[bad-return]
         self, indexers, ticks_are_sorted=True, method=method
     )
 
@@ -305,7 +305,7 @@ class LonLatGrid(cx.Coordinate):
     l_isel = cx.coords.compose(*l_axes).isel(indexers)
     # If selected axis was not sliced, we preserve the original axis.
     labeled_to_orig = {ax: orig for ax, orig in zip(l_axes, self.axes)}
-    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])
+    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])  # pyrefly: ignore[no-matching-overload]
 
   def integrate(
       self,
@@ -772,7 +772,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
     l_isel = cx.coords.compose(*l_axes).isel(indexers)
     # If selected axis was not sliced, we preserve the original axis.
     labeled_to_orig = {ax: orig for ax, orig in zip(l_axes, self.axes)}
-    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])
+    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])  # pyrefly: ignore[no-matching-overload]
 
   def add_constant(
       self,
@@ -1379,7 +1379,7 @@ class PressureLevels(cx.Coordinate):
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
   ) -> tuple[dict[str, Any], set[str]]:
-    return coordax.experimental.map_indexers_using_ticks(
+    return coordax.experimental.map_indexers_using_ticks(  # pyrefly: ignore[bad-return]
         self,
         indexers,
         ticks_are_sorted=True,
@@ -1859,7 +1859,7 @@ class SoilLevels(cx.Coordinate):
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
   ) -> tuple[dict[str, Any], set[str]]:
-    return coordax.experimental.map_indexers_using_ticks(
+    return coordax.experimental.map_indexers_using_ticks(  # pyrefly: ignore[bad-return]
         self,
         indexers,
         ticks_are_sorted=True,
