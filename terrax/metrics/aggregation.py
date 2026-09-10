@@ -20,7 +20,7 @@ import collections
 import dataclasses
 import functools
 import operator
-from typing import Sequence, overload
+from typing import Callable, Sequence, overload
 
 import coordax as cx
 import jax
@@ -214,9 +214,16 @@ class Aggregator:
     if self.bin_by is not None:
       self.bin_by = tuple(self.bin_by)
 
+  def transform_context(
+      self, fn: Callable[[dict[str, cx.Field]], dict[str, cx.Field]]
+  ) -> Aggregator:
+    """Returns a copy of the aggregator with transformed context."""
+    context = fn(dict(self.context) if self.context else {})
+    return dataclasses.replace(self, context=context)
+
   def with_context(self, context: dict[str, cx.Field]) -> Aggregator:
     """Returns a copy of the aggregator with context set."""
-    return dataclasses.replace(self, context=context)
+    return self.transform_context(lambda _: context)
 
   def aggregation_fn(
       self,

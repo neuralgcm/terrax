@@ -495,6 +495,38 @@ class NestedAndFlattenedEvaluatorsTest(parameterized.TestCase):
     )
     chex.assert_trees_all_equal_structs(agg_states, zeros_agg_states)
 
+  def test_transform_context(self):
+    eval_atmo = evaluators.Evaluator(
+        metrics={'mse': deterministic_losses.MSE()},
+        aggregators=self.aggregator.with_context({'a': cx.field(1.0)}),
+    )
+    eval_ocean = evaluators.Evaluator(
+        metrics={'mae': deterministic_losses.MAE()},
+        aggregators=self.aggregator.with_context({'b': cx.field(2.0)}),
+    )
+    nested = evaluators.NestedEvaluators(
+        evaluators={'atmosphere': eval_atmo, 'ocean': eval_ocean}
+    )
+    flat = evaluators.FlattenedEvaluator(eval_atmo)
+
+    def add_prefix(ctx):
+      return {f'prefix_{k}': v for k, v in ctx.items()}
+
+    transformed_nested = nested.transform_context(add_prefix)
+    self.assertIn(
+        'prefix_a',
+        transformed_nested.evaluators['atmosphere'].aggregators.context,
+    )
+    self.assertIn(
+        'prefix_b',
+        transformed_nested.evaluators['ocean'].aggregators.context,
+    )
+
+    transformed_flat = flat.transform_context(add_prefix)
+    self.assertIn(
+        'prefix_a', transformed_flat.evaluator.aggregators.context
+    )
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')

@@ -17,7 +17,7 @@
 from __future__ import annotations
 import collections
 import dataclasses
-from typing import Any, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
 import coordax as cx
 import jax
 from terrax.core import typing
@@ -154,15 +154,21 @@ class Evaluator(Generic[M]):
       total_loss += weight * term_total
     return total_loss
 
-  def with_context(self, context: dict[str, cx.Field]) -> Evaluator:
-    """Returns a copy of the evaluator with context set in aggregators."""
+  def transform_context(
+      self, fn: Callable[[dict[str, cx.Field]], dict[str, cx.Field]]
+  ) -> Evaluator:
+    """Returns a copy of the evaluator with context transformed in aggregators."""
     if isinstance(self.aggregators, dict):
       new_aggregators = {
-          k: agg.with_context(context) for k, agg in self.aggregators.items()
+          k: agg.transform_context(fn) for k, agg in self.aggregators.items()
       }
     else:
-      new_aggregators = self.aggregators.with_context(context)
+      new_aggregators = self.aggregators.transform_context(fn)
     return dataclasses.replace(self, aggregators=new_aggregators)
+
+  def with_context(self, context: dict[str, cx.Field]) -> Evaluator:
+    """Returns a copy of the evaluator with context set in aggregators."""
+    return self.transform_context(lambda _: context)
 
   def zeros_aggregation_states(
       self,
@@ -265,11 +271,17 @@ class FlattenedEvaluator:
         _flatten_dict(predictions), _flatten_dict(targets), agg_states
     )
 
+  def transform_context(
+      self, fn: Callable[[dict[str, cx.Field]], dict[str, cx.Field]]
+  ) -> FlattenedEvaluator:
+    """Returns a copy with context transformed in the wrapped evaluator."""
+    return dataclasses.replace(
+        self, evaluator=self.evaluator.transform_context(fn)
+    )
+
   def with_context(self, context: dict[str, cx.Field]) -> FlattenedEvaluator:
     """Returns a copy with context set in the wrapped evaluator."""
-    return dataclasses.replace(
-        self, evaluator=self.evaluator.with_context(context)
-    )
+    return self.transform_context(lambda _: context)
 
   def zeros_aggregation_states(
       self,
@@ -394,13 +406,15 @@ class NestedEvaluators:
       total_loss += weights.get(key, 1.0) * term_total
     return total_loss
 
-  def with_context(self, context: dict[str, cx.Field]) -> NestedEvaluators:
-    """Returns a copy with context set in all nested evaluators."""
+  def transform_context(
+      self, fn: Callable[[dict[str, cx.Field]], dict[str, cx.Field]]
+  ) -> NestedEvaluators:
+    """Returns a copy with context transformed in all nested evaluators."""
     new_evaluators = {
-        k: ev.with_context(context) for k, ev in self.evaluators.items()
+        k: ev.transform_context(fn) for k, ev in self.evaluators.items()
     }
     new_default_evaluator = (
-        self.default_evaluator.with_context(context)
+        self.default_evaluator.transform_context(fn)
         if self.default_evaluator
         else None
     )
@@ -410,6 +424,10 @@ class NestedEvaluators:
         evaluator_weights=self.evaluator_weights,
         default_evaluator=new_default_evaluator,
     )
+
+  def with_context(self, context: dict[str, cx.Field]) -> NestedEvaluators:
+    """Returns a copy with context set in all nested evaluators."""
+    return self.transform_context(lambda _: context)
 
   def zeros_aggregation_states(
       self,
