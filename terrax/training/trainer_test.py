@@ -36,6 +36,7 @@ from terrax.metrics import aggregation
 from terrax.metrics import deterministic_metrics
 from terrax.metrics import evaluators
 from terrax.metrics import probabilistic_losses
+from terrax.metrics import scaling
 from terrax.toy_model_examples import lorenz96
 from terrax.training import data_loading
 from terrax.training import trainer
@@ -189,10 +190,11 @@ class TrainerTest(parameterized.TestCase):
         loading_partition_schema='physics',
     )
 
-  def _create_evaluators(self, dims_to_reduce):
+  def _create_evaluators(self, dims_to_reduce, scale_by=()):
     aggregator = aggregation.Aggregator(
         dims_to_reduce=dims_to_reduce,
         weight_by=[],
+        scale_by=scale_by,
     )
     mse = deterministic_metrics.MSE()
     eval_metrics = evaluators.Evaluator(
@@ -219,12 +221,24 @@ class TrainerTest(parameterized.TestCase):
       queries_specs['fixed_point'] = {'x': cx.Scalar()}
     return queries_specs
 
-  def test_trainer(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='default', include_initial_loss=False),
+      dict(testcase_name='with_initial_loss', include_initial_loss=True),
+  )
+  def test_trainer(self, include_initial_loss: bool):
     model, all_data = self.create_model_and_data(multiscale=False)
     queries_specs = self._create_queries_specs(model)
     data_loader = self._create_data_loader(all_data)
+    time_mask_coord = coordinates.TimeDelta([np.timedelta64(0, 's')])
+    masked_t0_scaler = scaling.CoordinateMaskScaler(
+        mask_coord=time_mask_coord,
+        masked_value=0.5,
+        unmasked_value=1.0,
+    )
+    leadtime_scaler = scaling.LeadTimeScaler(base_squared_error_in_hours=24.0)
     eval_metrics, loss = self._create_evaluators(
-        dims_to_reduce=('ensemble', 'batch', 'k')
+        dims_to_reduce=('ensemble', 'batch', 'k'),
+        scale_by=[masked_t0_scaler, leadtime_scaler],
     )
     eval_metrics = evaluators.FlattenedEvaluator(eval_metrics)
     loss = evaluators.FlattenedEvaluator(loss)
@@ -302,13 +316,18 @@ class TrainerTest(parameterized.TestCase):
         remat_config=remat,
         ensemble_axis=cx.SizedAxis('ensemble', 2),
         online_metrics_saver=metrics_saver,
+        include_initial_loss=include_initial_loss,
     )
     rollout_trainer.run_training()
 
     self.assertTrue(metrics_saver.metrics)
     self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'checkpoints')))
 
-  def test_trainer_nested(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='default', include_initial_loss=False),
+      dict(testcase_name='with_initial_loss', include_initial_loss=True),
+  )
+  def test_trainer_nested(self, include_initial_loss: bool):
     model, all_data = self.create_model_and_data(multiscale=True)
     queries_specs = self._create_queries_specs(model)
     data_loader = self._create_data_loader(all_data)
@@ -413,6 +432,7 @@ class TrainerTest(parameterized.TestCase):
         remat_config=remat,
         ensemble_axis=cx.SizedAxis('ensemble', 2),
         online_metrics_saver=metrics_saver,
+        include_initial_loss=include_initial_loss,
     )
     rollout_trainer.run_training()
 
@@ -574,6 +594,48 @@ class TrainerTest(parameterized.TestCase):
     self.assertIn('x', filtered['slow'])
     self.assertIn('time', filtered['slow'])
     self.assertNotIn('fast', filtered)
+
+  def test_create_initial_evaluators(self):
+    k = cx.LabeledAxis('k', np.arange(8))
+    td = coordinates.TimeDelta(np.arange(1, 5) * np.timedelta64(1, 'h'))
+    k_td = cx.coords.compose(td, k)
+    target_spec = ({'data': {'x': k_td}},)
+
+    masked_t0_scaler = scaling.CoordinateMaskScaler(
+        mask_coord=coordinates.TimeDelta([np.timedelta64(0, 's')]),
+        masked_value=0.0,
+        unmasked_value=1.0,
+    )
+    leadtime_scaler = scaling.LeadTimeScaler(base_squared_error_in_hours=24.0)
+    aggregator = aggregation.Aggregator(
+        dims_to_reduce=('k',),
+        scale_by=[masked_t0_scaler, leadtime_scaler],
+    )
+    mse = deterministic_metrics.MSE()
+    evaluator = evaluators.Evaluator(
+        metrics={'mse': mse}, aggregators={'mse': aggregator}
+    )
+
+    nested_evaluators = trainer.create_nested_evaluators(
+        evaluator, target_spec, np.timedelta64(1, 'h')
+    )
+    (initial_evaluator,) = trainer.create_initial_evaluators_from_nested(
+        nested_evaluators
+    )
+    agg = initial_evaluator.aggregators['mse']
+    cx.testing.assert_fields_equal(
+        agg.context['timedelta'], cx.field(np.timedelta64(0, 's'))
+    )
+    cx.testing.assert_fields_equal(
+        agg.context['times'], td.fields['timedelta']
+    )
+
+    pred = {'x': cx.field(jnp.ones(8), k)}
+    target = {'x': cx.field(jnp.zeros(8), k)}
+    # masked_t0_scaler sets scale to 0 at t=0, so agg_state should have 0.
+    result = initial_evaluator.evaluate(pred, target)
+    mse_val = result['mse'].metric_values(mse)
+    cx.testing.assert_fields_allclose(mse_val['x'], cx.field(0.0))
 
 
 if __name__ == '__main__':

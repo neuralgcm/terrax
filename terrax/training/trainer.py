@@ -398,7 +398,10 @@ def create_nested_evaluators(
       context_data = {f'timedelta_{nest_level}': timedeltas}
       replica = cx.LabeledAxis(timedelta_replica_name, timedelta_coord.deltas)
       replicated_coord = cx.coords.compose(timedelta_coord, replica)
-      replicated_deltas = timedeltas.broadcast_like(replicated_coord)
+      # We retag and broadcast timedeltas. Retag moves replication along the
+      # timedelta axis so that scan slices receieve full `timedeltas`.
+      replica_timedeltas = timedeltas.untag(timedelta_coord).tag(replica)
+      replicated_deltas = replica_timedeltas.broadcast_like(replicated_coord)
       context_data[f'times_{nest_level}'] = replicated_deltas
       context_fields |= context_data
 
@@ -411,6 +414,28 @@ def create_nested_evaluators(
   )
   return tuple(
       evaluator.with_context(fields) for fields in nested_context_fields
+  )
+
+
+def _to_initial_context(
+    context: dict[str, cx.Field],
+) -> dict[str, cx.Field]:
+  """Adjusts context fields for initial (t=0) evaluation."""
+  new_context = dict(context)
+  new_context['timedelta'] = cx.field(np.timedelta64(0, 's'))
+  if 'times' in new_context:
+    times = new_context['times']
+    if times.positional_shape:
+      new_context['times'] = cx.cmap(lambda x: x.reshape((-1,))[0])(times)
+  return new_context
+
+
+def create_initial_evaluators_from_nested(
+    nested_evaluators: tuple[EvaluatorLike, ...],
+) -> tuple[EvaluatorLike, ...]:
+  """Creates evaluators for t=0 loss by updating context."""
+  return tuple(
+      ev.transform_context(_to_initial_context) for ev in nested_evaluators
   )
 
 
@@ -683,6 +708,7 @@ class RolloutTrainer:
   ensemble_axis: cx.SizedAxis
   online_metrics_saver: OnlineMetricsSaver
   compute_loss_on_host: bool = False
+  include_initial_loss: bool = False
   use_data_loading_callback: bool = False
   callback_pinned_host: bool = False
   callback_spatial_dims_layout: tuple[str, ...] = ()
@@ -692,6 +718,11 @@ class RolloutTrainer:
       raise ValueError(
           'RolloutTrainer requires {data_loader.training_mesh=} to be'
           ' specified.'
+      )
+    if self.include_initial_loss and self.use_data_loading_callback:
+      raise NotImplementedError(
+          'include_initial_loss is not yet supported with'
+          ' use_data_loading_callback=True.'
       )
     self.run_evaluator = _maybe_on_host(
         _run_evaluator, self.compute_loss_on_host
@@ -1106,6 +1137,86 @@ class RolloutTrainer:
       )
     return tuple(initial_nested_agg_states)
 
+  def _compute_initial_observation_agg_states(
+      self,
+      model: api.Model,
+      process_obs: nnx.Module,
+      init_slice: PyTree,
+      nested_queries_specs: tuple[data_specs.QueriesSpec, ...],
+      nested_evaluators_groups: tuple[tuple[EvaluatorLike, ...], ...],
+      init_agg_states_seq: tuple[tuple[aggregation.AggregationState, ...], ...],
+      observe_fn: Callable[..., PyTree],
+      process_fn: Callable[..., PyTree],
+  ) -> tuple[tuple[aggregation.AggregationState, ...], ...]:
+    """Computes t=0 aggregation states by observing the model at initialization.
+
+    After assimilation, the model state represents t=0. This method calls
+    observe with queries constructed from the t=0 data, evaluates the
+    predictions against t=0 targets, and seeds the initial aggregation states
+    with these contributions. This allows accounting for t=0 predictions which
+    are otherwise not evaluated due to the nested scan structure.
+
+    Args:
+      model: The model after assimilation at t=0.
+      process_obs: The observation processing module.
+      init_slice: The t=0 data slice (from _prepare_inputs_and_targets).
+      nested_queries_specs: Tuple of queries specifications for each nesting
+        level (without TimeDelta).
+      nested_evaluators_groups: Tuple of tuples of evaluators for each nesting
+        level, with one tuple per evaluator group (e.g., loss, metrics).
+      init_agg_states_seq: Tuple of initial aggregation state tuples,
+        one per evaluator group, each containing one state per nesting level.
+      observe_fn: Function to call model.observe with.
+      process_fn: Function to process observations/targets.
+
+    Returns:
+      Updated init_agg_states_seq with t=0 contributions added to each
+      nesting level's aggregation state.
+    """
+    # Remove the timedelta dimension from t=0 data. The init_slice has
+    # a single timedelta=0 entry, which we squeeze out.
+    def _squeeze_timedelta(field: cx.Field) -> cx.Field:
+      if 'timedelta' in field.axes:
+        return cx.cmap(lambda x: x[0])(field.untag('timedelta'))
+      return field
+
+    # Compute t=0 predictions and evaluator updates per nesting level.
+    # Each level has its own query_spec covering different variables.
+    updated_agg_states_seq = [list(states) for states in init_agg_states_seq]
+    for level, query_spec in enumerate(nested_queries_specs):
+      # Filter init_slice to this level's variables and squeeze timedelta.
+      t0_targets = data_loading.filter_inputs_by_queries(
+          init_slice, query_spec, include_field_in_query=True
+      )
+      if not jax.tree.leaves(t0_targets):
+        continue
+      t0_targets = jax.tree.map(
+          _squeeze_timedelta, t0_targets, is_leaf=cx.is_field
+      )
+
+      # Construct queries and compute predictions for this level.
+      queries = data_specs.construct_query(t0_targets, query_spec)  # pyrefly: ignore[bad-argument-type]
+      targets_only = data_loading.filter_inputs_by_queries(
+          t0_targets, query_spec
+      )
+      prediction = process_fn(process_obs, observe_fn(model, queries))
+      prediction = self.training_mesh.with_sharding_constraint(
+          prediction, 'physics'
+      )
+      target = process_fn(process_obs, targets_only)
+      target = self.training_mesh.with_sharding_constraint(target, 'physics')
+
+      # Update this level's aggregation state for each evaluator group.
+      for group_idx, evaluators in enumerate(nested_evaluators_groups):
+        evaluator = evaluators[level]
+        if evaluator is not None:
+          agg_update = self.run_evaluator(evaluator, prediction, target)
+          updated_agg_states_seq[group_idx][level] = self.combine_agg_states(
+              updated_agg_states_seq[group_idx][level], agg_update
+          )
+
+    return tuple(tuple(states) for states in updated_agg_states_seq)
+
   def _recursive_scan(
       self,
       collect_inner: Callable[..., Any],
@@ -1293,6 +1404,7 @@ class RolloutTrainer:
         temporaries,
     ) = self._split_model_and_process_obs()
     step_fn, observe_fn, process_fn = self._get_step_observe_process_fns()
+    include_initial_loss = self.include_initial_loss
 
     def batched_parameter_loss_fn(
         params, non_params, rng, inputs, dynamic_data
@@ -1342,6 +1454,21 @@ class RolloutTrainer:
           nested_queries_specs,
           train_stage.batch_size_per_device,
       )
+
+      if include_initial_loss:
+        initial_evaluators = create_initial_evaluators_from_nested(
+            nested_evaluators
+        )
+        (init_agg_states,) = self._compute_initial_observation_agg_states(
+            model=eb_model,
+            process_obs=process_obs,
+            init_slice=init_slice,
+            nested_queries_specs=nested_queries_specs,
+            nested_evaluators_groups=(initial_evaluators,),
+            init_agg_states_seq=(init_agg_states,),
+            observe_fn=observe_fn,
+            process_fn=process_fn,
+        )
 
       def collect_statistics_step(
           carry, model, process_obs, loaded_targets_slice, evaluator_slice
@@ -1462,6 +1589,7 @@ class RolloutTrainer:
         temporaries,
     ) = self._split_model_and_process_obs()
     step_fn, observe_fn, process_fn = self._get_step_observe_process_fns()
+    include_initial_loss = self.include_initial_loss
 
     @train_utils.jit_once
     def batch_eval_statistics_fn(
@@ -1540,6 +1668,22 @@ class RolloutTrainer:
 
       evaluators_seq = tuple(evaluators_seq)
       agg_states_seq = tuple(agg_states_seq)
+
+      if include_initial_loss:
+        initial_evaluators_groups = tuple(
+            create_initial_evaluators_from_nested(evs)
+            for evs in evaluators_seq
+        )
+        agg_states_seq = self._compute_initial_observation_agg_states(
+            model=eb_model,
+            process_obs=process_obs,
+            init_slice=init_slice,
+            nested_queries_specs=nested_queries_specs,
+            nested_evaluators_groups=initial_evaluators_groups,
+            init_agg_states_seq=agg_states_seq,
+            observe_fn=observe_fn,
+            process_fn=process_fn,
+        )
 
       def collect_statistics_step(
           carry,
