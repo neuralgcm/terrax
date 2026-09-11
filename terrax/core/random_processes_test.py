@@ -454,6 +454,126 @@ class GaussianRandomFieldTest(BaseSphericalHarmonicRandomProcessTest):
       self.assertEqual(actual_count, expected_count)
 
 
+class GaussianRandomFieldCoreReparameterizationTest(parameterized.TestCase):
+  """Tests softplus-based reparameterization of GaussianRandomFieldCore.
+
+  The core stores a raw parameter initialized at 0 and computes effective
+  values as `init_value * softplus(raw + offset)`, where the offset is chosen
+  so that `softplus(0 + offset) == 1`. This ensures:
+    - At initialization, effective == init value (identity).
+    - After any gradient update, effective values stay positive.
+    - Additive updates to `raw` act as *multiplicative* adjustments.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.sim_units = units.DEFAULT_UNITS
+    self.dt = self.sim_units.nondimensionalize(typing.Quantity('1 hour'))
+    self.ylm_map = spherical_harmonics.FixedYlmMapping(
+        coordinates.LonLatGrid.T21(),
+        coordinates.SphericalHarmonicGrid.T21(),
+    )
+
+  def _make_core(self, **overrides):
+    """Creates a GaussianRandomFieldCore with learnable (nnx.Param) params."""
+    defaults = dict(
+        ylm_map=self.ylm_map,
+        dt=self.dt,
+        sim_units=self.sim_units,
+        correlation_time=3.0,
+        correlation_length=0.15,
+        variance=1.5,
+        correlation_time_type=nnx.Param,
+        correlation_length_type=nnx.Param,
+        variance_type=nnx.Param,
+    )
+    defaults.update(overrides)
+    return random_processes.GaussianRandomFieldCore(**defaults)
+
+  def test_make_positive_scalar_is_one_at_zero(self):
+    """softplus(0 + offset) must equal 1 so init values are preserved."""
+    np.testing.assert_allclose(
+        random_processes._make_positive_scalar(jnp.zeros([])), 1.0, atol=1e-6
+    )
+
+  def test_properties_equal_init_values_at_construction(self):
+    """At raw=0, effective values should exactly match init values."""
+    init_corr_time = 3.0
+    init_corr_length = 0.15
+    init_variance = 1.5
+    core = self._make_core(
+        correlation_time=init_corr_time,
+        correlation_length=init_corr_length,
+        variance=init_variance,
+    )
+    nondim = lambda x: units.maybe_nondimensionalize(x, self.sim_units)
+    np.testing.assert_allclose(
+        core.corr_time, nondim(init_corr_time), rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        core.corr_length, nondim(init_corr_length), rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        core.variance, nondim(init_variance), rtol=1e-5
+    )
+
+  @parameterized.parameters(-5.0, -1.0, 0.0, 1.0, 5.0)
+  def test_properties_are_positive_for_any_raw_value(self, raw_value):
+    """Softplus ensures positivity regardless of raw parameter value."""
+    core = self._make_core()
+    raw_val = jnp.array([raw_value])
+    core._raw_corr_time.value = raw_val
+    core._raw_corr_length.value = raw_val
+    core._raw_variance.value = raw_val
+    self.assertGreater(core.corr_time, 0.0)
+    self.assertGreater(core.corr_length, 0.0)
+    self.assertGreater(core.variance, 0.0)
+
+  def test_gradients_flow_through_properties(self):
+    """Raw parameters must receive gradients through the softplus transform."""
+    core = self._make_core()
+
+    @nnx.jit
+    def loss_fn(model):
+      return jnp.squeeze(model.corr_time + model.corr_length + model.variance)
+
+    grads = nnx.grad(loss_fn)(core)
+    grad_leaves = jax.tree.leaves(grads)
+    for g in grad_leaves:
+      self.assertTrue(jnp.all(jnp.isfinite(g)))
+      self.assertFalse(jnp.all(g == 0.0))
+
+  def test_positive_raw_shift_increases_effective_value(self):
+    """A positive shift in raw param must increase the effective value."""
+    core = self._make_core()
+    base_variance = jnp.squeeze(core.variance).item()
+    core._raw_variance.value = jnp.array([1.0])
+    shifted_variance = jnp.squeeze(core.variance).item()
+    self.assertGreater(shifted_variance, base_variance)
+
+  def test_fixed_params_are_not_learnable(self):
+    """Parameters with RandomnessParam type should not appear in nnx.Param."""
+    core = self._make_core(
+        correlation_time_type=random_processes.RandomnessParam,
+        correlation_length_type=random_processes.RandomnessParam,
+        variance_type=random_processes.RandomnessParam,
+    )
+    params = nnx.state(core, nnx.Param)
+    n_params = sum(np.size(x) for x in jax.tree.leaves(params))
+    self.assertEqual(n_params, 0)
+
+  def test_learnable_params_count(self):
+    """Each nnx.Param-typed parameter contributes exactly one scalar."""
+    core = self._make_core(
+        correlation_time_type=nnx.Param,
+        correlation_length_type=random_processes.RandomnessParam,
+        variance_type=nnx.Param,
+    )
+    params = nnx.state(core, nnx.Param)
+    n_params = sum(np.size(x) for x in jax.tree.leaves(params))
+    self.assertEqual(n_params, 2)  # corr_time and variance are learnable.
+
+
 class BatchGaussianRandomFieldTest(BaseSphericalHarmonicRandomProcessTest):
 
   def setUp(self):

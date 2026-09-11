@@ -32,6 +32,13 @@ from terrax.core import units
 
 Quantity = typing.Quantity
 _ADVANCE_SALT = zlib.crc32(b'advance')  # arbitrary uint32 value
+# softplus(_SOFTPLUS_INVERSE_1) == 1.0, used for reparameterization at init.
+_SOFTPLUS_INVERSE_1 = 0.5413248546129181
+
+
+def _make_positive_scalar(raw_parameter: jax.Array) -> jax.Array:
+  """Reparameterizes raw values to (0, ∞) range using softplus."""
+  return jax.nn.softplus(raw_parameter + _SOFTPLUS_INVERSE_1)
 
 
 Randomness = typing.Randomness
@@ -614,14 +621,35 @@ class GaussianRandomFieldCore(nnx.Module):
     correlation_time = nondimensionalize(correlation_time)
     correlation_length = nondimensionalize(correlation_length)
     variance = nondimensionalize(variance)  # pyrefly: ignore[bad-assignment]
-    # we make parameters 1d to streamline broadcasting when code is vmapped.
-    as_1d_param = lambda x, t: t(jnp.array([x]))
+    # Softplus-based multiplicative reparameterization: the stored raw parameter
+    # is initialized at 0 and softplus(raw + offset) == 1 at initialization,
+    # so the effective value equals the initial value.  Additive optimizer
+    # updates act as multiplicative (relative) adjustments, positivity is
+    # enforced by construction.
+    make_raw = lambda t: t(jnp.zeros([1]))
     self.ylm_map = ylm_map
     self.dt = dt
-    self.corr_time = as_1d_param(correlation_time, correlation_time_type)
-    self.corr_length = as_1d_param(correlation_length, correlation_length_type)
-    self._variance = as_1d_param(variance, variance_type)
+    self._init_corr_time = RandomnessParam(jnp.array([correlation_time]))
+    self._init_corr_length = RandomnessParam(jnp.array([correlation_length]))
+    self._init_variance = RandomnessParam(jnp.array([variance]))
+    self._raw_corr_time = make_raw(correlation_time_type)
+    self._raw_corr_length = make_raw(correlation_length_type)
+    self._raw_variance = make_raw(variance_type)
     self.clip = clip
+
+  @property
+  def corr_time(self) -> jax.Array:
+    """Correlation time in linear space (always positive)."""
+    return self._init_corr_time[...] * _make_positive_scalar(
+        self._raw_corr_time[...]
+    )
+
+  @property
+  def corr_length(self) -> jax.Array:
+    """Correlation length in linear space (always positive)."""
+    return self._init_corr_length[...] * _make_positive_scalar(
+        self._raw_corr_length[...]
+    )
 
   @property
   def _surf_area(self) -> jax.Array | float:
@@ -650,17 +678,19 @@ class GaussianRandomFieldCore(nnx.Module):
     Returns:
       Numeric estimate of pointwise variance.
     """
-    return self._variance[...]
+    return self._init_variance[...] * _make_positive_scalar(
+        self._raw_variance[...]
+    )
 
   @property
   def phi(self) -> jax.Array:
     """Correlation coefficient between two timesteps."""
-    return jnp.exp(-self.dt / self.corr_time[...])
+    return jnp.exp(-self.dt / self.corr_time)  # pyrefly: ignore[unsupported-operation]
 
   @property
   def relative_corr_len(self):
     """Correlation length of the random process relative to the radius."""
-    return self.corr_length[...] / self.ylm_map.radius
+    return self.corr_length / self.ylm_map.radius
 
   def _integrated_grf_variance(self):
     """Integral of the GRF's variance over the earth's surface."""
@@ -698,7 +728,7 @@ class GaussianRandomFieldCore(nnx.Module):
   def _sigma_array(self) -> jax.Array:
     """Array of σₙ from Appendix 8 in [Palmer] http://shortn/_56HCcQwmSS."""
     # In sampling, phi appears as 1 - phi**2 = 1 - exp(-2 dt / tau)
-    one_minus_phi2 = -jnp.expm1(-2 * self.dt / self.corr_time)
+    one_minus_phi2 = -jnp.expm1(-2 * self.dt / self.corr_time)  # pyrefly: ignore[unsupported-operation]
     return jnp.sqrt(one_minus_phi2) * self._stationary_sigma_array()
 
   def sample_core(
