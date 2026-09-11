@@ -13,6 +13,7 @@
 # limitations under the License.
 """High performance inference API for NeuralGCM models."""
 
+from collections.abc import Sequence
 import contextlib
 import dataclasses
 import functools
@@ -105,6 +106,33 @@ def device_put_to_cpu(x: typing.Pytree) -> typing.Pytree:
   return jax.device_put(x, cpu_device)
 
 
+def split_queries_by_frequency(
+    queries: typing.Queries,
+    output_freqs: dict[str, np.timedelta64],
+    unique_freqs: Sequence[np.timedelta64],
+) -> tuple[typing.Queries, ...]:
+  """Splits queries into one query per entry in `unique_freqs`.
+
+  The result is laid out to match the nesting convention of
+  `api.unroll_from_advance`, which expects one query per observation frequency,
+  ordered consistently with the frequencies it is given.
+
+  Args:
+    queries: queries to split, keyed by dataset key.
+    output_freqs: output frequency for every dataset key in `queries`.
+    unique_freqs: distinct output frequencies, ordered from finest to coarsest.
+
+  Returns:
+    A tuple of queries of the same length as `unique_freqs`, where entry `i`
+    holds the queries to be observed at frequency `unique_freqs[i]`.
+  """
+  index_by_freq = {freq: i for i, freq in enumerate(unique_freqs)}
+  split_queries = [{} for _ in unique_freqs]
+  for ds_key, sub_query in queries.items():
+    split_queries[index_by_freq[output_freqs[ds_key]]][ds_key] = sub_query
+  return tuple(split_queries)
+
+
 class BadStateError(Exception):
   """Error raised when an invalid state value (i.e., NaN) is encountered."""
 
@@ -165,7 +193,9 @@ class InferenceRunner:
   dynamic_query_inputs: dynamic_inputs_lib.DynamicInputs | None = (
       dataclasses.field(default=None, kw_only=True)
   )
-  output_freq: np.timedelta64
+  # A single frequency applies to every key in `output_query`. A dict specifies
+  # a separate frequency per dataset key, and must cover all of `output_query`.
+  output_freq: np.timedelta64 | dict[str, np.timedelta64]
   output_duration: np.timedelta64
   unroll_duration: np.timedelta64
   write_duration: np.timedelta64
@@ -188,29 +218,54 @@ class InferenceRunner:
             f'ensemble_size ({self.ensemble_size}) must be divisible by '
             f'ensemble_batch_size ({self.ensemble_batch_size})'
         )
-    if self.output_duration % self.output_freq != np.timedelta64(0):
+    if not self.output_query:
+      raise ValueError('output_query must not be empty')
+    if isinstance(self.output_freq, dict):
+      missing_keys = set(self.output_query) - set(self.output_freq)
+      unknown_keys = set(self.output_freq) - set(self.output_query)
+      if missing_keys or unknown_keys:
+        raise ValueError(
+            'output_freq given as a dict must specify a frequency for exactly '
+            'the dataset keys in output_query, but got '
+            f'{sorted(missing_keys)=} and {sorted(unknown_keys)=}'
+        )
+    unique_freqs = self.unique_output_freqs
+    for finer_freq, coarser_freq in zip(unique_freqs[:-1], unique_freqs[1:]):
+      if coarser_freq % finer_freq != np.timedelta64(0):
+        raise ValueError(
+            'output frequencies must be congruent, i.e. each frequency must be '
+            f'a multiple of every finer one, but {coarser_freq=} is not a '
+            f'multiple of {finer_freq=}'
+        )
+    coarsest_freq = self.coarsest_output_freq
+    if self.output_duration % coarsest_freq != np.timedelta64(0):
       raise ValueError(
-          f'{self.output_duration=} must be a multiple of {self.output_freq=}'
+          f'{self.output_duration=} must be a multiple of {coarsest_freq=}'
       )
-    if self.unroll_duration % self.output_freq != np.timedelta64(0):
+    if self.unroll_duration % coarsest_freq != np.timedelta64(0):
       raise ValueError(
-          f'{self.unroll_duration=} must be a multiple of {self.output_freq=}'
+          f'{self.unroll_duration=} must be a multiple of {coarsest_freq=}'
       )
-    if self.write_duration % self.output_freq != np.timedelta64(0):
+    if self.write_duration % coarsest_freq != np.timedelta64(0):
       raise ValueError(
-          f'{self.write_duration=} must be a multiple of {self.output_freq=}'
+          f'{self.write_duration=} must be a multiple of {coarsest_freq=}'
       )
     if self.max_steps_per_write % self.steps_per_unroll != 0:
       raise ValueError(
           f'write_duration in steps ({self.max_steps_per_write}) must be a '
           f'multiple of unroll_duration in steps ({self.steps_per_unroll})'
       )
-    if self.max_steps_per_write % self.zarr_chunks['lead_time'] != 0:
-      raise ValueError(
-          f'write_duration in steps ({self.max_steps_per_write}) must be a'
-          " multiple of zarr_chunks['lead_time']"
-          f" ({self.zarr_chunks['lead_time']})"
-      )
+    lead_time_chunk = self.zarr_chunks['lead_time']
+    for ds_key, freq in self.output_freqs.items():
+      # Each output group has its own lead_time axis, sampled at its own
+      # frequency, and its chunks are clipped to the length of that axis.
+      steps_per_write = self.write_duration // freq
+      group_chunk = min(lead_time_chunk, self.output_duration // freq)
+      if steps_per_write % group_chunk != 0:
+        raise ValueError(
+            f'write_duration in steps for {ds_key!r} ({steps_per_write}) must '
+            f'be a multiple of its lead_time chunk size ({group_chunk})'
+        )
     if self.checkpoint_duration % self.write_duration != np.timedelta64(0):
       raise ValueError(
           f'{self.checkpoint_duration=} must be a multiple of'
@@ -261,20 +316,56 @@ class InferenceRunner:
     self._dynamic_queries_read_spec = dynamic_queries_read_spec
 
   @property
+  def output_freqs(self) -> dict[str, np.timedelta64]:
+    """Output frequency for each dataset key in `output_query`."""
+    if isinstance(self.output_freq, dict):
+      return dict(self.output_freq)
+    return {ds_key: self.output_freq for ds_key in self.output_query}
+
+  @property
+  def unique_output_freqs(self) -> tuple[np.timedelta64, ...]:
+    """Distinct output frequencies, ordered from finest to coarsest."""
+    return tuple(sorted(set(self.output_freqs.values())))
+
+  @property
+  def finest_output_freq(self) -> np.timedelta64:
+    """Finest output frequency, which is the runner's internal step size."""
+    return self.unique_output_freqs[0]
+
+  @property
+  def coarsest_output_freq(self) -> np.timedelta64:
+    """Coarsest output frequency, at which whole unrolls are counted."""
+    return self.unique_output_freqs[-1]
+
+  # Unless noted otherwise, all step counts below are in units of
+  # `finest_output_freq`, which is the frequency at which the runner tracks
+  # progress through a simulation.
+
+  @property
   def total_steps(self) -> int:
-    return math.ceil(self.output_duration / self.output_freq)
+    return math.ceil(self.output_duration / self.finest_output_freq)
 
   @property
   def steps_per_unroll(self) -> int:
-    return self.unroll_duration // self.output_freq  # pyrefly: ignore[bad-return]
+    return self.unroll_duration // self.finest_output_freq  # pyrefly: ignore[bad-return]
+
+  @property
+  def scan_steps_per_unroll(self) -> int:
+    """Steps per unroll at `coarsest_output_freq`.
+
+    This is the number of steps of the outermost scan in
+    `api.unroll_from_advance`, which counts steps at the coarsest of the
+    frequencies it is given rather than at the finest.
+    """
+    return self.unroll_duration // self.coarsest_output_freq  # pyrefly: ignore[bad-return]
 
   @property
   def max_steps_per_write(self) -> int:
-    return self.write_duration // self.output_freq  # pyrefly: ignore[bad-return]
+    return self.write_duration // self.finest_output_freq  # pyrefly: ignore[bad-return]
 
   @property
   def steps_per_checkpoint(self) -> int:
-    return self.checkpoint_duration // self.output_freq  # pyrefly: ignore[bad-return]
+    return self.checkpoint_duration // self.finest_output_freq  # pyrefly: ignore[bad-return]
 
   def _checkpoints_path(self) -> epath.Path:
     # names beginning with __ are reserved for Zarr v3 extensions:
@@ -313,7 +404,7 @@ class InferenceRunner:
       # If using streaming dynamic queries, we fetch metadata & finalize specs.
       first_time = self.init_times[0].astype('datetime64[ns]')
       q_stream = self.dynamic_query_inputs.get_forecast(first_time)
-      q_data = q_stream.get_data(np.timedelta64(0), self.output_freq)
+      q_data = q_stream.get_data(np.timedelta64(0), self.finest_output_freq)
       q_data = {k: v.isel(time=0, drop=True) for k, v in q_data.items()}
       c_types = data_specs.get_nested_coord_types(
           self._dynamic_queries_read_spec
@@ -323,12 +414,23 @@ class InferenceRunner:
           self.output_query, coord_sources
       )
     template = _queries_to_dummy_datatree(sample_queries)
-    lead_times = np.arange(0, self.output_duration, self.output_freq)
+
+    # `lead_time` is attached to each group rather than to the root of the
+    # tree, because groups may be sampled at different output frequencies.
+    # It is expanded before the shared dimensions below so that the resulting
+    # dimension order stays (realization, init_time, lead_time, ...).
+    subtrees = {}
+    for ds_key, child in template.children.items():
+      lead_times = np.arange(0, self.output_duration, self.output_freqs[ds_key])
+      subtrees[ds_key] = _datatree_expand_dims(
+          child, lead_time=lead_times.astype('timedelta64[ns]')
+      )
+    template = xarray.DataTree.from_dict(subtrees)
+
     expanded_dims = {}
     if self.ensemble_size is not None:
       expanded_dims['realization'] = np.arange(self.ensemble_size)
     expanded_dims['init_time'] = self.init_times.astype('datetime64[ns]')
-    expanded_dims['lead_time'] = lead_times.astype('timedelta64[ns]')
 
     # The use of expand_dims() here replicates
     # xarray_beam.replace_template_dims().
@@ -546,8 +648,10 @@ class InferenceRunner:
     # Unroll simulation forward in time.
 
     def get_dynamic_inputs_and_queries(output_step):
-      lead_start = output_step * self.output_freq
-      lead_stop = (output_step + self.steps_per_unroll) * self.output_freq
+      lead_start = output_step * self.finest_output_freq
+      lead_stop = (
+          output_step + self.steps_per_unroll
+      ) * self.finest_output_freq
       logging.info(f'getting dynamic inputs for {output_step=}')
       xarray_inputs = dynamic_inputs_forecast.get_data(lead_start, lead_stop)
       logging.info(f'xarray_inputs: {xarray_inputs}')
@@ -565,22 +669,25 @@ class InferenceRunner:
       query_fields = {}
       if dynamic_queries_stream is not None:
         queries_data = dynamic_queries_stream.get_data(
-            lead_start, lead_stop + self.output_freq
+            lead_start, lead_stop + self.finest_output_freq
         )
         queries_data = xarray_utils.ensure_timedelta_axis(queries_data)
         query_fields = xarray_utils.read_from_xarray(
             queries_data, self._dynamic_queries_read_spec, strict_matches=False  # pyrefly: ignore[bad-argument-type]
         )
       queries = data_specs.construct_query(query_fields, self.output_query)  # pyrefly: ignore[bad-argument-type]
-      return data, queries
+      split_queries = split_queries_by_frequency(
+          queries, self.output_freqs, self.unique_output_freqs
+      )
+      return data, split_queries
 
     @timing.Timed
-    def unroll(state, dynamic_inputs, query_slice):
+    def unroll(state, dynamic_inputs, split_queries):
       unroll_fn = functools.partial(
           api.unroll_from_advance,
-          timedelta=self.output_freq,
-          steps=self.steps_per_unroll,
-          queries=query_slice,
+          timedelta=self.unique_output_freqs,
+          steps=self.scan_steps_per_unroll,
+          queries=split_queries,
           dynamic_inputs=dynamic_inputs,
           prepend_init=True,
           trim_last=True,
@@ -609,12 +716,12 @@ class InferenceRunner:
       for step_start in range(
           steps_written, chunk_end_step, self.steps_per_unroll
       ):
-        dynamic_inputs, query_slice = dynamic_inputs_task.get()
+        dynamic_inputs, split_queries = dynamic_inputs_task.get()
         if step_start + self.steps_per_unroll < self.total_steps:
           dynamic_inputs_task.submit(step_start + self.steps_per_unroll)
 
         logging.info(f'{dynamic_inputs=}')
-        state, trajectory_slice = unroll(state, dynamic_inputs, query_slice)
+        state, trajectory_slice = unroll(state, dynamic_inputs, split_queries)
         output_buffer.append(device_put_to_cpu(trajectory_slice))
 
       commit_chunk_task.wait()
@@ -676,37 +783,53 @@ class InferenceRunner:
     tree = xarray.map_over_datasets(  # pyrefly: ignore[no-matching-overload]
         lambda *xs: xarray.concat(xs, dim='lead_time'), *trees
     )
-    tree = _coordinate_to_root(tree, 'lead_time')
     if self.ensemble_size is not None and self.ensemble_batch_size > 1:
       tree = _coordinate_to_root(tree, 'realization')
-    num_steps_in_chunk = tree.sizes['lead_time']
 
     init_time = self.init_times[init_time_index].astype('datetime64[ns]')
     tree = _datatree_expand_dims(tree, init_time=[init_time])
 
-    region = {'init_time': slice(init_time_index, init_time_index + 1)}
-    region['lead_time'] = slice(
-        steps_written, steps_written + num_steps_in_chunk
-    )
-    if realization_start is not None:
-      if self.ensemble_batch_size == 1:
-        tree = _datatree_expand_dims(tree, realization=[realization_start])
-      region['realization'] = slice(realization_start, realization_end)  # pyrefly: ignore[bad-assignment]
-    # Remove variables that don't have an init_time dimension. These shouldn't
-    # be written to disk again.
-    for node in tree.subtree:
-      for name, variable in node.variables.items():
-        if not any(dim in variable.dims for dim in region):
-          del node[name]  # pyrefly: ignore[unsupported-operation]
+    delayed_computations = []
+    for ds_key, child in tree.children.items():
+      # `steps_written` counts steps at the finest frequency, so it must be
+      # rescaled into the lead_time index of each group.
+      steps_per_output = self.output_freqs[ds_key] // self.finest_output_freq
+      group_steps_written = steps_written // steps_per_output
+      group_steps_in_chunk = child.sizes['lead_time']
 
-    logging.info('setting up zarr outputs')
-    delayed = tree.chunk().to_zarr(
-        self.output_path, mode='r+', region=region, compute=False,
-        consolidated=False,
-    )
+      group_region = {
+          'init_time': slice(init_time_index, init_time_index + 1),
+          'lead_time': slice(
+              group_steps_written,
+              group_steps_written + group_steps_in_chunk,
+          ),
+      }
+      if realization_start is not None:
+        if self.ensemble_batch_size == 1:
+          child = _datatree_expand_dims(child, realization=[realization_start])
+        group_region['realization'] = slice(realization_start, realization_end)  # pyrefly: ignore[bad-assignment]
 
-    logging.info(f'writing {tree.nbytes/1e6:.1f} MB to zarr')
-    delayed.compute(num_workers=128)
+      # Remove variables that don't have an init_time dimension.
+      for node in child.subtree:
+        for var_name, variable in node.variables.items():
+          if not any(dim in variable.dims for dim in group_region):
+            del node[var_name]  # pyrefly: ignore[unsupported-operation]
+
+      logging.info(f'setting up Zarr outputs for group {ds_key}')
+      ds_to_write = child.to_dataset()
+      delayed = ds_to_write.chunk().to_zarr(
+          self.output_path,
+          group=ds_key,
+          mode='r+',
+          region=group_region,
+          compute=False,
+      )
+      delayed_computations.append(delayed)
+
+    logging.info(f'writing {tree.nbytes/1e6:.1f} MB to Zarr groups')
+    for delayed in delayed_computations:
+      delayed.compute(num_workers=128)
+
     if self.bad_state_strategy != 'ignore':
       check_pytree_for_bad_state(
           output_buffer, f'unroll outputs at {steps_written=}'
