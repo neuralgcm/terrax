@@ -1030,9 +1030,9 @@ class RolloutTrainer:
         typing.DynamicInput: batch_axis,
     })
     b_model.update_dynamic_inputs(dynamic_data)
-    b_model.assimilate(init_slice)
     eb_model = b_model.to_vectorized({typing.SimulationVariable: ensemble_axis})
     eb_model.initialize_random_processes(rng)
+    eb_model.assimilate(init_slice)
     return eb_model
 
   def _get_step_observe_process_fns(self):
