@@ -2060,12 +2060,14 @@ class RolloutTrainer:
       experiment_state: ExperimentState,
   ) -> None:
     """Saves an experiment checkpoint using Orbax."""
+    if not self.checkpoint_manager.should_save(step):
+      return
     experiment_state = jax.block_until_ready(experiment_state)
     # Orbax requires saving from all Python processes, even with multiple hosts.
     args = self.get_checkpoint_state(
         step, experiment_state, auto_restart=auto_restart, save=True
     )
-    self.checkpoint_manager.save(step, args=args)
+    self.checkpoint_manager.save(step, args=args, force=True)
 
   def get_checkpoint_state(
       self,
