@@ -1951,7 +1951,7 @@ class RolloutTrainer:
         ]),
         save_decision_policy=ocp_managers.AnySavePolicy([
             ocp_managers.ContinuousCheckpointingPolicy(
-                minimum_interval_secs=60
+                minimum_interval_secs=1000
             ),
             ocp_managers.PreemptionCheckpointingPolicy(),
             *[
