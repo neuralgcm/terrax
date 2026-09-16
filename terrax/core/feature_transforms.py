@@ -29,6 +29,7 @@ import numpy as np
 from terrax.core import coordinates
 from terrax.core import diagnostics
 from terrax.core import dynamic_io
+from terrax.core import observation_operators
 from terrax.core import orographies
 from terrax.core import random_processes
 from terrax.core import transforms
@@ -92,6 +93,26 @@ class DiagnosticValueFeatures(transforms.TransformABC):
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     del inputs  # unused
     return self.diagnostic_module.diagnostic_values()
+
+
+@nnx.dataclass
+class ObservationValueFeatures(transforms.TransformABC):
+  """Returns values observed by `operator` for a fixed `query`.
+
+  Adapts an observation operator to the transform interface, which makes it
+  possible to use predictions of an existing operator (e.g. as a reference for
+  another operator) anywhere a transform is expected.
+
+  Attributes:
+    operator: Observation operator used to compute the returned values.
+    query: Query passed to ``operator.observe``.
+  """
+
+  operator: observation_operators.ObservationOperatorABC
+  query: dict[str, cx.Coordinate]
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    return self.operator.observe(inputs, self.query)  # pyrefly: ignore[bad-argument-type]
 
 
 @nnx.dataclass

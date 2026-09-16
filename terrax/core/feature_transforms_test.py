@@ -25,6 +25,7 @@ import numpy as np
 from terrax.core import coordinates
 from terrax.core import dynamic_io
 from terrax.core import feature_transforms
+from terrax.core import observation_operators
 from terrax.core import orographies
 from terrax.core import pytree_utils
 from terrax.core import random_processes
@@ -94,6 +95,24 @@ class FeatureTransformsTest(parameterized.TestCase):
         ),
     )
     self._test_feature_module(orography_features, None)
+
+  def test_observation_value_features(self):
+    grid = coordinates.LonLatGrid.T21()
+    levels = coordinates.PressureLevels([100, 500, 850])
+    coord = cx.coords.compose(levels, grid)
+    fields = {'temperature': cx.field(np.ones(coord.shape), coord)}
+    operator = observation_operators.DataObservationOperator(fields)
+    level_subset = coordinates.PressureLevels([500])
+    query = {'temperature': cx.coords.compose(level_subset, grid)}
+    observation_features = feature_transforms.ObservationValueFeatures(
+        operator=operator, query=query
+    )
+    features = observation_features({})
+    self.assertEqual(list(features.keys()), ['temperature'])
+    self.assertEqual(
+        features['temperature'].coordinate,
+        cx.coords.compose(level_subset, grid),
+    )
 
   def test_dynamic_input_features(self):
     grid = coordinates.LonLatGrid.T21()
