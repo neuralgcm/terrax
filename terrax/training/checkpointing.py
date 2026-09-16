@@ -76,7 +76,9 @@ def training_manager(
     metadata: dict[str, Any] | None = None,
 ) -> ocp.CheckpointManager:
   """Returns a CheckpointManager for training."""
-  model_config_dict = json.loads(model_config_str)
+  model_config_dict = model_checkpointing.without_paths(
+      json.loads(model_config_str)
+  )
   options = _checkpoint_manager_options_with_fixed_step_format(options)
   if metadata is None:
     metadata = {}

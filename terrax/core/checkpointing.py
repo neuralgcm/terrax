@@ -15,6 +15,7 @@
 
 import dataclasses
 import json
+from typing import Any
 
 from etils import epath
 import fiddle as fdl
@@ -42,6 +43,29 @@ def split_model_state_for_saving(model: nnx.Module) -> _SplitState:
       model, nnx.Param, (typing.SimulationVariable, typing.DynamicInput), ...
   )
   return _SplitState(params=params, non_params=non_params)
+
+
+def without_paths(json_data: Any) -> Any:
+  """Returns a copy of `json_data` with all `paths` entries removed.
+
+  Fiddle annotates each serialized object with every path that reaches it from
+  the root. Deserialization ignores these annotations, but for large configs
+  they can account for over 99% of the serialized bytes.
+
+  Args:
+    json_data: parsed JSON data of a serialized Fiddle config, e.g.
+      `json.loads(serialization.dump_json(config))`. Dicts and lists are
+      traversed recursively; all other values are returned unchanged.
+
+  Returns:
+    The same JSON data with every `paths` key dropped from nested dicts.
+  """
+  if isinstance(json_data, dict):
+    items = json_data.items()
+    return {k: without_paths(v) for k, v in items if k != 'paths'}
+  if isinstance(json_data, list):
+    return [without_paths(v) for v in json_data]
+  return json_data
 
 
 _STATE_KEY = 'state'
@@ -97,7 +121,8 @@ def save_checkpoint(
 
   state_tuple = split_model_state_for_saving(model)
   state = nnx.merge_state(state_tuple.params, state_tuple.non_params)
-  model_config_dict = json.loads(serialization.dump_json(fiddle_config))
+  serialized_config = serialization.dump_json(fiddle_config)
+  model_config_dict = without_paths(json.loads(serialized_config))
   args = ocp.args.Composite(**{
       _STATE_KEY: ocp.args.PyTreeSave(state),
       _CONFIG_KEY: ocp.args.JsonSave(model_config_dict),

@@ -82,6 +82,30 @@ class CheckpointingTest(parameterized.TestCase):
     chex.assert_trees_all_equal(restored_model_params, expected_model_params)
     self.assertEqual(model_cfg, restored_model.fiddle_config)
 
+  def test_without_paths(self):
+    serialized = {
+        'root': {'type': 'ref', 'key': 'model_1'},
+        'objects': {
+            'model_1': {
+                'type': {'type': 'pyref', 'module': 'm', 'name': 'Model'},
+                'items': [
+                    ['x', {'type': 'leaf', 'value': 1, 'paths': ['<root>.x']}]
+                ],
+                'paths': ['<root>'],
+            }
+        },
+    }
+    expected = {
+        'root': {'type': 'ref', 'key': 'model_1'},
+        'objects': {
+            'model_1': {
+                'type': {'type': 'pyref', 'module': 'm', 'name': 'Model'},
+                'items': [['x', {'type': 'leaf', 'value': 1}]],
+            }
+        },
+    }
+    self.assertEqual(checkpointing.without_paths(serialized), expected)
+
 
 if __name__ == '__main__':
   jax.config.parse_flags_with_absl()
