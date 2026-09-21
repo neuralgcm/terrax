@@ -146,12 +146,14 @@ class FeatureTransformsTest(parameterized.TestCase):
       )
 
     with self.subTest('with_time_offsets'):
-      offsets = {'0h': np.timedelta64(0, 'h'), '12h': np.timedelta64(12, 'h')}
+      offsets = [np.timedelta64(0, 'h'), np.timedelta64(12, 'h')]
+      window = cx.LabeledAxis('window', np.array([0, 12]))
       dynamic_input_features_with_offsets = (
           feature_transforms.DynamicInputFeatures(
               ('a', 'b'),
               dynamic_input,
               time_offsets=offsets,
+              window_axis=window,
           )
       )
       self._test_feature_module(
@@ -161,10 +163,31 @@ class FeatureTransformsTest(parameterized.TestCase):
       features = dynamic_input_features_with_offsets(
           {'time': cx.field(jdt.to_datetime('2000-01-01T00'))}
       )
-      self.assertIn('a_0h', features)
-      self.assertIn('b_0h', features)
-      self.assertIn('a_12h', features)
-      self.assertIn('b_12h', features)
+      self.assertSameElements(['a', 'b'], list(features.keys()))
+      init_time = cx.field(jdt.to_datetime('2000-01-01T00'))
+      for offset in offsets:
+        expected = dynamic_input(init_time + cx.field(jdt.to_timedelta(offset)))
+        hours = int(offset / np.timedelta64(1, 'h'))
+        for k in ('a', 'b'):
+          actual = features[k].sel({'window': hours})
+          cx.testing.assert_fields_allclose(
+              actual, expected[k], rtol=1e-6, atol=1e-6
+          )
+
+    with self.subTest('missing_window_axis_raises'):
+      with self.assertRaisesRegex(ValueError, '`window_axis` is required'):
+        feature_transforms.DynamicInputFeatures(
+            ('a',), dynamic_input, time_offsets=[np.timedelta64(0, 'h')]
+        )({'time': cx.field(jdt.to_datetime('2000-01-01T00'))})
+
+    with self.subTest('mismatched_window_axis_raises'):
+      with self.assertRaisesRegex(ValueError, 'must be one dimensional'):
+        feature_transforms.DynamicInputFeatures(
+            ('a',),
+            dynamic_input,
+            time_offsets=[np.timedelta64(0, 'h')],
+            window_axis=cx.SizedAxis('window', 2),
+        )({'time': cx.field(jdt.to_datetime('2000-01-01T00'))})
 
   def test_dynamic_input_features_inder_jit(self):
     grid = coordinates.LonLatGrid.T21()

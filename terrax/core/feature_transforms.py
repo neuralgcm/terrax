@@ -132,26 +132,53 @@ class RandomnessFeatures(transforms.TransformABC):
 
 @nnx.dataclass
 class DynamicInputFeatures(transforms.TransformABC):
-  """Returns subset of dynamic input values."""
+  """Returns subset of dynamic input values.
+
+  Attributes:
+    keys: Names of the dynamic input variables to return.
+    dynamic_input_module: Module that supplies time-indexed data.
+    time_offsets: Offset(s) relative to the input time at which values are
+      retrieved. A sequence of offsets retrieves values once per offset and
+      stacks them along `window_axis`, which can then be reduced or indexed into
+      with standard transforms.
+    window_axis: Axis along which values retrieved at multiple `time_offsets`
+      are stacked. Required if `time_offsets` is a sequence, in which case its
+      size must match the number of offsets.
+  """
 
   keys: Sequence[str]
   dynamic_input_module: dynamic_io.DynamicInputSlice
-  time_offsets: np.timedelta64 | dict[str, np.timedelta64] | None = None
+  time_offsets: np.timedelta64 | Sequence[np.timedelta64] | None = None
+  window_axis: cx.Coordinate | None = None
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    time_offsets = self.time_offsets or np.timedelta64(0, 's')
+    time_offsets = self.time_offsets if self.time_offsets is not None else (
+        np.timedelta64(0, 's')
+    )
     if isinstance(time_offsets, np.timedelta64):
-      time = cx.field(jdt.to_timedelta(time_offsets)) + inputs['time']  # pyrefly: ignore[bad-argument-type]
+      # pyrefly: ignore[bad-argument-type]
+      time = cx.field(jdt.to_timedelta(time_offsets)) + inputs['time']
       data_features = self.dynamic_input_module(time)
       return {k: data_features[k] for k in self.keys}
-    assert isinstance(time_offsets, dict)  # Make pytype happy.
-    features = {}
-    for suffix, offset in time_offsets.items():
-      offset_time = inputs['time'] + cx.field(jdt.to_timedelta(offset))  # pyrefly: ignore[bad-argument-type]
-      data_features = self.dynamic_input_module(offset_time)
-      for k in self.keys:
-        features[f'{k}_{suffix}'] = data_features[k]
-    return features
+    if self.window_axis is None:
+      raise ValueError(
+          f'`window_axis` is required to stack values at {time_offsets=}.'
+      )
+    if self.window_axis.shape != (len(time_offsets),):
+      raise ValueError(
+          f'{self.window_axis=} must be one dimensional with size'
+          f' {len(time_offsets)} to match {time_offsets=}.'
+      )
+    features_per_offset = []
+    for offset in time_offsets:
+      # pyrefly: ignore[bad-argument-type]
+      offset_time = inputs['time'] + cx.field(jdt.to_timedelta(offset))
+      features_per_offset.append(self.dynamic_input_module(offset_time))
+    stack = cx.cmap(jnp.stack)
+    return {
+        k: stack([f[k] for f in features_per_offset]).tag(self.window_axis)
+        for k in self.keys
+    }
 
 
 @nnx.dataclass

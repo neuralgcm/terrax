@@ -35,7 +35,10 @@ dependencies = [
     # "fiddle @ git+https://github.com/google/fiddle.git",
     "flax>=0.12.0",
     "grain",
-    "jax",
+    # jax 0.11.2 renamed `jax.experimental.hijax.HiPrimitive` to `HiPrim`, which
+    # breaks `flax.nnx` up to and including flax 0.12.9. The upper bound can be
+    # removed once a flax release containing the fix is available.
+    "jax<0.11.2",
     "jax-datetime>=0.1.2",
     "jax-solar",
     "jaxlib",
