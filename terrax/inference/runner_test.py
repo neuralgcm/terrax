@@ -93,13 +93,41 @@ class MockModel(api.Model):
 
   def observe(self, queries: typing.Queries) -> typing.Observation:
     prognostics = self.prognostics.get_value()
-    result = {}
-    if 'state' in queries:
-      result['state'] = {
-          k: v if cx.is_field(v) else prognostics[k]
-          for k, v in queries['state'].items()
-      }
-    return result
+    return {
+        ds_key: {
+            k: v if cx.is_field(v) else prognostics[k]
+            for k, v in sub_query.items()
+        }
+        for ds_key, sub_query in queries.items()
+    }
+
+
+@auto_config.auto_config
+def construct_model(
+    assimilation_noise: random_processes.RandomProcessModule | None = None,
+) -> MockModel:
+  """Constructs a MockModel advancing 'foo' and 'bar' by fixed increments."""
+  return MockModel(
+      input_specs={
+          'state': {
+              'foo': cx.Scalar(),
+              'bar': cx.LabeledAxis('x', np.array([0.1, 0.2, 0.3])),
+              'time': cx.Scalar(),
+          }
+      },
+      dynamic_input_specs={
+          'data': {
+              'foo': cx.Scalar(),
+              'bar': cx.Scalar(),
+              'time': cx.Scalar(),
+          }
+      },
+      dynamic_input_slice=dynamic_io.DynamicInputSlice(
+          keys_to_coords={'foo': cx.Scalar(), 'bar': cx.Scalar()},
+          observation_key='data',
+      ),
+      assimilation_noise=assimilation_noise,
+  )
 
 
 class RunnerTest(parameterized.TestCase):
@@ -150,33 +178,9 @@ class RunnerTest(parameterized.TestCase):
     else:
       assimilation_noise = None
 
-    @auto_config.auto_config
-    def construct_model() -> MockModel:
-      return MockModel(
-          input_specs={
-              'state': {
-                  'foo': cx.Scalar(),
-                  'bar': cx.LabeledAxis('x', np.array([0.1, 0.2, 0.3])),
-                  'time': cx.Scalar(),
-              }
-          },
-          dynamic_input_specs={
-              'data': {
-                  'foo': cx.Scalar(),
-                  'bar': cx.Scalar(),
-                  'time': cx.Scalar(),
-              }
-          },
-          dynamic_input_slice=dynamic_io.DynamicInputSlice(
-              keys_to_coords={'foo': cx.Scalar(), 'bar': cx.Scalar()},
-              observation_key='data',
-          ),
-          assimilation_noise=assimilation_noise,
-      )
-
-    module_model = construct_model()
+    module_model = construct_model(assimilation_noise)
     model = api.InferenceModel.from_model_api(
-        module_model, construct_model.as_buildable()
+        module_model, construct_model.as_buildable(assimilation_noise)
     )
     init_times = np.array(
         [np.datetime64('2025-01-01'), np.datetime64('2025-01-02')]
@@ -268,10 +272,9 @@ class RunnerTest(parameterized.TestCase):
 
     expected_lead_times = np.arange(0, out_duration_in_h, out_freq_in_h) * one_h
     nans = functools.partial(np.full, fill_value=np.nan)
-    coords = {
-        'init_time': init_times.astype('datetime64[ns]'),
-        'lead_time': expected_lead_times.astype('timedelta64[ns]'),
-    }
+    # `lead_time` lives on each output group, since groups may be written at
+    # different output frequencies.
+    coords = {'init_time': init_times.astype('datetime64[ns]')}
     dims = ('init_time', 'lead_time')
     shape = (len(init_times), len(expected_lead_times))
     if ensemble_size is not None:
@@ -279,7 +282,10 @@ class RunnerTest(parameterized.TestCase):
       dims = ('realization',) + dims
       shape = (ensemble_size,) + shape
 
-    child_coords = {'x': np.array([0.1, 0.2, 0.3])}
+    child_coords = {
+        'x': np.array([0.1, 0.2, 0.3]),
+        'lead_time': expected_lead_times.astype('timedelta64[ns]'),
+    }
     child_node_dict = {
         'foo': (dims, nans(shape)),
         'bar': (dims + ('x',), nans(shape + (3,))),
@@ -367,6 +373,197 @@ class RunnerTest(parameterized.TestCase):
           unroll_duration=np.timedelta64(12, 'h'),
           checkpoint_duration=np.timedelta64(24, 'h'),
       )
+
+  def test_inference_runner_with_output_freq_per_dataset_key(self):
+    module_model = construct_model()
+    model = api.InferenceModel.from_model_api(
+        module_model, construct_model.as_buildable()
+    )
+    init_times = np.array(
+        [np.datetime64('2025-01-01'), np.datetime64('2025-01-02')]
+    )
+    one_h = np.timedelta64(1, 'h')
+    out_duration_in_h = 48
+    inputs = {
+        'state': xarray.Dataset(
+            {
+                'foo': (('time',), np.array([0.0, 10.0])),
+                'bar': (('time', 'x'), np.array(2 * [[1.0, 2.0, 3.0]])),
+            },
+            coords={'time': init_times, 'x': np.array([0.1, 0.2, 0.3])},
+        )
+    }
+    delta = xarray.Dataset({'foo': 1.0, 'bar': 2.0})
+    dynamic_inputs = dynamic_inputs_lib.Persistence(
+        full_data={'data': delta.expand_dims(time=init_times)},
+        climatology=None,
+        update_freq=np.timedelta64(6, 'h'),
+    )
+    output_path = self.create_tempdir().full_path
+    runner = runnerlib.InferenceRunner(
+        model=model,
+        inputs=inputs,
+        dynamic_inputs=dynamic_inputs,
+        init_times=init_times,
+        ensemble_size=None,
+        output_path=output_path,
+        output_query={
+            'fast': {'foo': cx.Scalar()},
+            'slow': {'bar': cx.LabeledAxis('x', np.array([0.1, 0.2, 0.3]))},
+        },
+        output_freq={
+            'fast': np.timedelta64(6, 'h'),
+            'slow': np.timedelta64(12, 'h'),
+        },
+        output_duration=np.timedelta64(out_duration_in_h, 'h'),
+        zarr_chunks={'lead_time': 2, 'init_time': 1},
+        write_duration=np.timedelta64(24, 'h'),
+        unroll_duration=np.timedelta64(12, 'h'),
+        checkpoint_duration=np.timedelta64(24, 'h'),
+    )
+    runner.setup()
+    for task_id in range(runner.task_count):
+      runner.run(task_id)
+
+    actual = xarray.open_datatree(output_path, engine='zarr')
+    fast = actual['fast'].to_dataset()
+    slow = actual['slow'].to_dataset()
+
+    # Each group is written on its own lead_time axis.
+    fast_h = np.arange(0, out_duration_in_h, 6)
+    slow_h = np.arange(0, out_duration_in_h, 12)
+    np.testing.assert_array_equal(
+        fast['lead_time'].to_numpy(),
+        (fast_h * one_h).astype('timedelta64[ns]'),
+    )
+    np.testing.assert_array_equal(
+        slow['lead_time'].to_numpy(),
+        (slow_h * one_h).astype('timedelta64[ns]'),
+    )
+
+    # 'foo' grows by 1 per hour, starting from its value at each init_time.
+    expected_foo = np.stack([fast_h, 10 + fast_h]).astype(float)
+    np.testing.assert_allclose(fast['foo'].to_numpy(), expected_foo, rtol=1e-5)
+    # 'bar' grows by 2 per hour, starting from [1, 2, 3] at each init_time.
+    expected_bar = np.stack(
+        2 * [np.stack([2 * slow_h + 1, 2 * slow_h + 2, 2 * slow_h + 3], -1)]
+    ).astype(float)
+    np.testing.assert_allclose(slow['bar'].to_numpy(), expected_bar, rtol=1e-5)
+
+
+def make_runner(**kwargs) -> runnerlib.InferenceRunner:
+  """Builds a valid InferenceRunner, overriding defaults with `kwargs`."""
+  init_times = np.array([np.datetime64('2025-01-01')])
+  inputs = {
+      'state': xarray.Dataset(
+          {'foo': (('time',), np.array([0.0]))}, coords={'time': init_times}
+      )
+  }
+  dynamic_inputs = dynamic_inputs_lib.Persistence(
+      full_data={
+          'data': xarray.Dataset({'foo': 1.0}).expand_dims(time=init_times)
+      },
+      climatology=None,
+      update_freq=np.timedelta64(6, 'h'),
+  )
+  defaults = dict(
+      model=None,
+      inputs=inputs,
+      dynamic_inputs=dynamic_inputs,
+      init_times=init_times,
+      ensemble_size=None,
+      output_path='',
+      output_query={'a': {'foo': cx.Scalar()}, 'b': {'foo': cx.Scalar()}},
+      output_freq=np.timedelta64(6, 'h'),
+      output_duration=np.timedelta64(48, 'h'),
+      unroll_duration=np.timedelta64(12, 'h'),
+      write_duration=np.timedelta64(24, 'h'),
+      checkpoint_duration=np.timedelta64(24, 'h'),
+      zarr_chunks={'lead_time': 2, 'init_time': 1},
+  )
+  return runnerlib.InferenceRunner(**(defaults | kwargs))
+
+
+class OutputFreqTest(parameterized.TestCase):
+
+  def test_single_freq_applies_to_every_query_key(self):
+    six_h = np.timedelta64(6, 'h')
+    runner = make_runner(output_freq=six_h)
+    self.assertEqual(runner.output_freqs, {'a': six_h, 'b': six_h})
+    self.assertEqual(runner.unique_output_freqs, (six_h,))
+    self.assertEqual(runner.finest_output_freq, six_h)
+    self.assertEqual(runner.coarsest_output_freq, six_h)
+    # A single frequency means the runner's steps and the outermost scan's
+    # steps coincide.
+    self.assertEqual(runner.steps_per_unroll, 2)
+    self.assertEqual(runner.scan_steps_per_unroll, 2)
+
+  def test_freq_per_key_is_ordered_finest_to_coarsest(self):
+    six_h, twelve_h = np.timedelta64(6, 'h'), np.timedelta64(12, 'h')
+    runner = make_runner(output_freq={'a': twelve_h, 'b': six_h})
+    self.assertEqual(runner.output_freqs, {'a': twelve_h, 'b': six_h})
+    self.assertEqual(runner.unique_output_freqs, (six_h, twelve_h))
+    self.assertEqual(runner.finest_output_freq, six_h)
+    self.assertEqual(runner.coarsest_output_freq, twelve_h)
+    # Steps are counted at the finest frequency, while the outermost scan of
+    # `api.unroll_from_advance` counts steps at the coarsest one.
+    self.assertEqual(runner.steps_per_unroll, 2)
+    self.assertEqual(runner.scan_steps_per_unroll, 1)
+
+  def test_missing_query_key_raises(self):
+    with self.assertRaisesRegex(ValueError, 'exactly the dataset keys'):
+      make_runner(output_freq={'a': np.timedelta64(6, 'h')})
+
+  def test_unknown_freq_key_raises(self):
+    with self.assertRaisesRegex(ValueError, 'exactly the dataset keys'):
+      make_runner(
+          output_freq={
+              'a': np.timedelta64(6, 'h'),
+              'b': np.timedelta64(6, 'h'),
+              'c': np.timedelta64(6, 'h'),
+          }
+      )
+
+  def test_incongruent_freqs_raise(self):
+    with self.assertRaisesRegex(ValueError, 'must be congruent'):
+      make_runner(
+          output_freq={
+              'a': np.timedelta64(6, 'h'),
+              'b': np.timedelta64(8, 'h'),
+          }
+      )
+
+  def test_empty_output_query_raises(self):
+    with self.assertRaisesRegex(ValueError, 'output_query must not be empty'):
+      make_runner(output_query={})
+
+
+class SplitQueriesByFrequencyTest(absltest.TestCase):
+
+  def test_single_frequency_yields_one_group(self):
+    six_h = np.timedelta64(6, 'h')
+    queries = {'a': {'foo': cx.Scalar()}, 'b': {'bar': cx.Scalar()}}
+    actual = runnerlib.split_queries_by_frequency(
+        queries, {'a': six_h, 'b': six_h}, (six_h,)
+    )
+    self.assertEqual(actual, (queries,))
+
+  def test_queries_are_grouped_by_frequency(self):
+    six_h, twelve_h = np.timedelta64(6, 'h'), np.timedelta64(12, 'h')
+    queries = {
+        'a': {'foo': cx.Scalar()},
+        'b': {'bar': cx.Scalar()},
+        'c': {'baz': cx.Scalar()},
+    }
+    output_freqs = {'a': twelve_h, 'b': six_h, 'c': twelve_h}
+    actual = runnerlib.split_queries_by_frequency(
+        queries, output_freqs, (six_h, twelve_h)
+    )
+    expected = (
+        {'b': queries['b']},
+        {'a': queries['a'], 'c': queries['c']},
+    )
+    self.assertEqual(actual, expected)
 
 
 class AtomicWriteTest(absltest.TestCase):
