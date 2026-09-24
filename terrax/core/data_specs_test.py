@@ -244,6 +244,77 @@ class ValidateInputsTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'CoordSpec .* have different dims'):
       data_specs.validate_inputs(inputs, inputs_spec)
 
+  def test_validate_inputs_with_missing_all_optional_dataset(self):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    rng = np.random.RandomState(42)
+    inputs = {'data_key': {'u': cx.field(rng.randn(*x.shape), x)}}
+    inputs_spec = {
+        'data_key': {'u': x},
+        'other_key': {'v': data_specs.OptionalSpec(x)},
+    }
+    data_specs.validate_inputs(inputs, inputs_spec)
+
+    with self.subTest('missing_dataset_with_required_raises'):
+      inputs_spec['other_key']['w'] = x
+      with self.assertRaisesRegex(ValueError, 'Data key other_key is missing'):
+        data_specs.validate_inputs(inputs, inputs_spec)
+
+  def test_validate_inputs_with_optional_timedelta(self):
+    grid = coordinates.LonLatGrid.TL31()
+    def with_optional_timedelta(c):
+      return data_specs.CoordSpec.with_any_timedelta(c, optional_timedelta=True)
+    inputs_spec = {
+        'data_key': {
+            'u': with_optional_timedelta(grid),
+            'time': with_optional_timedelta(cx.Scalar()),
+        }
+    }
+    rng = np.random.RandomState(42)
+    t = coordinates.TimeDelta(np.arange(3) * np.timedelta64(1, 'h'))
+    tgrid = cx.coords.compose(t, grid)
+
+    with self.subTest('with_timedelta'):
+      inputs = {
+          'data_key': {
+              'u': cx.field(rng.randn(*tgrid.shape), tgrid),
+              'time': cx.field(np.zeros(t.shape), t),
+          }
+      }
+      data_specs.validate_inputs(inputs, inputs_spec)
+
+    with self.subTest('without_timedelta'):
+      inputs = {
+          'data_key': {
+              'u': cx.field(rng.randn(*grid.shape), grid),
+              'time': cx.field(0.0),
+          }
+      }
+      data_specs.validate_inputs(inputs, inputs_spec)
+
+    with self.subTest('present_timedelta_of_wrong_type_raises'):
+      t_wrong = cx.LabeledAxis('timedelta', np.arange(3))
+      coord_wrong = cx.coords.compose(t_wrong, grid)
+      u_wrong = cx.field(rng.randn(*coord_wrong.shape), coord_wrong)
+      inputs = {'data_key': {'u': u_wrong}}
+      with self.assertRaisesRegex(
+          ValueError, 'is not present or not of the expected type'
+      ):
+        data_specs.validate_inputs(inputs, inputs_spec)
+
+    with self.subTest('non_optional_dims_are_still_required'):
+      x = cx.LabeledAxis('x', np.arange(grid.shape[0]))
+      inputs = {'data_key': {'u': cx.field(rng.randn(*x.shape), x)}}
+      with self.assertRaisesRegex(ValueError, 'have different dims'):
+        data_specs.validate_inputs(inputs, inputs_spec)
+
+  def test_validate_inputs_with_required_timedelta_raises_if_missing(self):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    spec = data_specs.CoordSpec.with_any_timedelta(x)
+    inputs_spec = {'data_key': {'u': spec}}
+    inputs = {'data_key': {'u': cx.field(np.zeros(x.shape), x)}}
+    with self.assertRaisesRegex(ValueError, 'have different dims'):
+      data_specs.validate_inputs(inputs, inputs_spec)
+
 
 class ConstructQueryTest(parameterized.TestCase):
   """Tests that construct_query works as expected."""
@@ -299,9 +370,7 @@ class CoordSpecTest(parameterized.TestCase):
   def test_post_init_raises_if_extra_dims_in_rules(self):
     """Tests that error is raised if dim_match_rules has extra dims."""
     x = cx.LabeledAxis('x', np.arange(3))
-    with self.assertRaisesRegex(
-        ValueError, 'contains dimensions not present in'
-    ):
+    with self.assertRaisesRegex(ValueError, 'contains dims not present in'):
       data_specs.CoordSpec(
           x,
           dim_match_rules={
@@ -335,6 +404,64 @@ class CoordSpecTest(parameterized.TestCase):
     expected_td_coord = coordinates.TimeDelta(timedeltas)
     td_axis_in_spec = spec.coord.axes[0]
     self.assertEqual(td_axis_in_spec, expected_td_coord)
+
+  def test_post_init_raises_if_extra_optional_dims(self):
+    x = cx.LabeledAxis('x', np.arange(3))
+    with self.assertRaisesRegex(
+        ValueError, 'optional_dims=.* contains dims not present in'
+    ):
+      data_specs.CoordSpec(x, optional_dims=('y',))
+
+  def test_with_optional_timedelta_constructors(self):
+    x = cx.LabeledAxis('x', np.arange(3))
+    any_spec = data_specs.CoordSpec.with_any_timedelta(
+        x, optional_timedelta=True
+    )
+    given_spec = data_specs.CoordSpec.with_given_timedelta(
+        x, optional_timedelta=True
+    )
+    self.assertEqual(any_spec.optional_dims, ('timedelta',))
+    self.assertEqual(given_spec.optional_dims, ('timedelta',))
+    default_spec = data_specs.CoordSpec.with_any_timedelta(x)
+    self.assertEqual(default_spec.optional_dims, ())
+
+  def test_finalize_spec_drops_missing_optional_dims(self):
+    grid = coordinates.LonLatGrid.TL31()
+    levels = coordinates.PressureLevels([500, 850])
+    spec = data_specs.CoordSpec.with_any_timedelta(
+        cx.coords.compose(levels, grid), optional_timedelta=True
+    )
+    with self.subTest('absent'):
+      source = cx.coords.compose(levels, grid)
+      self.assertEqual(data_specs.finalize_spec(spec, source), source)
+
+    with self.subTest('present'):
+      t = coordinates.TimeDelta(np.arange(2) * np.timedelta64(1, 'h'))
+      source = cx.coords.compose(t, levels, grid)
+      self.assertEqual(data_specs.finalize_spec(spec, source), source)
+
+    with self.subTest('scalar'):
+      scalar_spec = data_specs.CoordSpec.with_any_timedelta(
+          cx.Scalar(), optional_timedelta=True
+      )
+      self.assertEqual(
+          data_specs.finalize_spec(scalar_spec, cx.Scalar()), cx.Scalar()
+      )
+
+  def test_drop_missing_optional_dims(self):
+    x = cx.LabeledAxis('x', np.arange(3))
+    spec = data_specs.CoordSpec.with_any_timedelta(
+        x,
+        {'x': data_specs.AxisMatchRules.SHAPE},
+        optional_timedelta=True,
+    )
+    reduced = spec.drop_missing_optional_dims(('x',))
+    self.assertEqual(reduced.coord, x)
+    self.assertEqual(
+        reduced.dim_match_rules, {'x': data_specs.AxisMatchRules.SHAPE}
+    )
+    self.assertEqual(reduced.optional_dims, ())
+    self.assertIs(spec.drop_missing_optional_dims(('timedelta', 'x')), spec)
 
 
 class FinalizeSpecTest(parameterized.TestCase):
