@@ -21,6 +21,9 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 from terrax.core import coordinates
+from terrax.core import diagnostics
+from terrax.core import observation_operators
+from terrax.core import transforms
 from terrax.toy_model_examples import data_model
 
 
@@ -91,6 +94,59 @@ class DataModelTest(parameterized.TestCase):
       cx.testing.assert_fields_equal(
           observed[observation_key]['x'], 2 * ones_like(self.k)
       )
+
+  def test_aggregate_diagnostic_uses_right_closed_window(self):
+    """Aggregates over `n` steps must cover times `t + dt, ..., t + n * dt`."""
+    observation_key = 'data'
+    window_steps = 3
+    total_steps = 6
+    timestep = np.timedelta64(1, 'h')
+    ones_k = cx.field(jnp.ones(self.k.shape), self.k)
+
+    identity_operator = observation_operators.TransformObservationOperator(
+        transforms.Identity()
+    )
+    diagnostic = diagnostics.IntervalDiagnostic(
+        extract=diagnostics.ExtractFixedQueryObservations(
+            observation_operator=identity_operator, query={'x': self.k}
+        ),
+        extract_coords={'x': self.k},
+        interval=window_steps * timestep,
+        resolution=window_steps * timestep,
+        default_timedelta=timestep,
+    )
+    model = data_model.DataModel(
+        keys_to_coords={'x': self.k},
+        observation_key=observation_key,
+        model_timestep=timestep,
+        aggregate_state_diagnostics={'x_sum': diagnostic},
+    )
+
+    # `x` at the i-th time slice is uniformly equal to `i`.
+    dt = coordinates.TimeDelta(np.arange(total_steps + 1) * timestep)
+    times = cx.field(self.t0[None] + dt.deltas, dt)
+    x_data = cx.field(np.arange(dt.shape[0]), dt) * ones_k
+    model.update_dynamic_inputs(
+        {observation_key: {'time': times, 'x': x_data}}
+    )
+    dt0 = dt.isel(timedelta=slice(0, 1))
+    model.assimilate({
+        observation_key: {
+            'time': cx.field(self.t0[None], dt0),
+            'x': cx.field(jnp.zeros(dt0.shape + self.k.shape), dt0, self.k),
+        }
+    })
+
+    for _ in range(total_steps):
+      model.advance()
+
+    # The last completed window covers steps 4, 5 and 6, i.e. the aggregate is
+    # right-closed: it excludes the state at the start of the window.
+    observed = model.observe({'diagnostics': {'x': self.k}})
+    expected = sum(range(total_steps - window_steps + 1, total_steps + 1))
+    cx.testing.assert_fields_allclose(
+        observed['diagnostics']['x'], expected * ones_k
+    )
 
 
 if __name__ == '__main__':

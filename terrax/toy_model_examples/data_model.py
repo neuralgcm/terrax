@@ -14,6 +14,8 @@
 
 """Implementation of data model that wires pre-loaded data to model API."""
 
+import itertools
+
 import coordax as cx
 from flax import nnx
 import jax.numpy as jnp
@@ -30,9 +32,27 @@ from terrax.core import typing
 from terrax.core import units
 
 
+def _advance_diagnostic_clock(
+    diagnostic: diagnostics.TemporalDiagnosticModule,
+    timestep: np.timedelta64,
+) -> None:
+  """Advances `diagnostic`'s internal clock by `timestep`."""
+  # Diagnostics reject receiving an explicit `timedelta` when they already
+  # define a `default_timedelta`, so only pass one when it is missing.
+  if getattr(diagnostic, 'default_timedelta', None) is None:
+    diagnostic.advance_clock({'timedelta': jdt.to_timedelta(timestep)})
+  else:
+    diagnostic.advance_clock({})
+
+
 @nnx.dataclass
 class DataModel(api.Model):
-  """A model that reads values from data via DynamicInputSlice."""
+  """A model that reads values from data via DynamicInputSlice.
+
+  Diagnostics registered in `state_diagnostics` see the state at the start of
+  each step, while those in `aggregate_state_diagnostics` see the state at the
+  end of it. Interval aggregates such as daily means belong in the latter.
+  """
 
   keys_to_coords: dict[str, cx.Coordinate] = nnx.static()
   observation_key: str = nnx.static()
@@ -44,6 +64,9 @@ class DataModel(api.Model):
   )
   state_diagnostics: dict[str, diagnostics.DiagnosticModule] = nnx.data(
       default_factory=dict, kw_only=True
+  )
+  aggregate_state_diagnostics: dict[str, diagnostics.DiagnosticModule] = (
+      nnx.data(default_factory=dict, kw_only=True)
   )
   tendency_dependent_diagnostics: dict[str, diagnostics.DiagnosticModule] = (
       nnx.data(default_factory=dict, kw_only=True)
@@ -112,18 +135,22 @@ class DataModel(api.Model):
         k: (new_prognostics[k] - current_prognostics[k]) / dt_nondim
         for k in self.keys_to_coords
     }
-    dt_timedelta = jdt.to_timedelta(self.timestep)
     for diagnostic in self.tendency_dependent_diagnostics.values():
       diagnostic(tendencies, prognostics=current_prognostics)
     for diagnostic in self.state_diagnostics.values():
       diagnostic({}, prognostics=current_prognostics)
+    # Aggregate diagnostics observe the end-of-step state, so that a window of
+    # `n` steps covers times `t + dt, ..., t + n * dt`.
+    for diagnostic in self.aggregate_state_diagnostics.values():
+      diagnostic({}, prognostics=new_prognostics)
 
-    for diagnostic in self.state_diagnostics.values():
+    for diagnostic in itertools.chain(
+        self.state_diagnostics.values(),
+        self.aggregate_state_diagnostics.values(),
+        self.tendency_dependent_diagnostics.values(),
+    ):
       if isinstance(diagnostic, diagnostics.TemporalDiagnosticModule):
-        diagnostic.advance_diagnostic_clock({'timedelta': dt_timedelta})  # pyrefly: ignore[missing-attribute]
-    for diagnostic in self.tendency_dependent_diagnostics.values():
-      if isinstance(diagnostic, diagnostics.TemporalDiagnosticModule):
-        diagnostic.advance_diagnostic_clock({'timedelta': dt_timedelta})  # pyrefly: ignore[missing-attribute]
+        _advance_diagnostic_clock(diagnostic, self.timestep)
 
     self._prognostic_vars.set_value(new_prognostics)
 
