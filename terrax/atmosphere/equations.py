@@ -444,7 +444,7 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
         physics_specs=self.sim_units,  # pyrefly: ignore[bad-argument-type]
         reference_temperature=np.asarray(self.t_ref_tuple),
         p0=self.p0,
-        sigma_b=self.sigma_b,
+        sigma_b=self.sigma_b,  # pyrefly: ignore[bad-argument-type]
         kf=self.kf,
         ka=self.ka,
         ks=self.ks,

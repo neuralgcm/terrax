@@ -231,9 +231,9 @@ def perturbed_jw(
       dinosaur_coords,
       sim_units,  # pyrefly: ignore[bad-argument-type]
       u_perturb=u_perturb,
-      lon_location=lon_location,
-      lat_location=lat_location,
-      perturbation_radius=perturbation_radius,
+      lon_location=lon_location,  # pyrefly: ignore[bad-argument-type]
+      lat_location=lat_location,  # pyrefly: ignore[bad-argument-type]
+      perturbation_radius=perturbation_radius,  # pyrefly: ignore[bad-argument-type]
       hpa_quantity=typing.units.hPa,
   )
   dino_full_state = jax.tree.map(

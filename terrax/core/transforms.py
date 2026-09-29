@@ -2643,7 +2643,7 @@ class NestedTransform(nnx.Module, pytree=False):
   def __init__(
       self,
       transform: (
-          typing.Transform | dict[str | type(...), TransformWithOptionalKey]
+          typing.Transform | dict[str | type(...), TransformWithOptionalKey]  # pyrefly: ignore[invalid-annotation]
       ),
       default_transform: typing.Transform | None = None,
   ):
