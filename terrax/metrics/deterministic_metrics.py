@@ -20,6 +20,7 @@ from typing import Sequence
 import coordax as cx
 import jax.numpy as jnp
 from terrax.metrics import base
+from terrax.metrics import weighting
 
 
 @dataclasses.dataclass
@@ -67,6 +68,7 @@ class Error(base.PerVariableStatistic):
 @dataclasses.dataclass
 class WindVectorSquaredError(base.Statistic):
   """Computes squared error between two wind components."""
+
   u_name: str = 'u_component_of_wind'
   v_name: str = 'v_component_of_wind'
   vector_name: str = 'wind_vector'
@@ -101,8 +103,63 @@ class RMSE(base.PerVariableMetric):
 
 
 @dataclasses.dataclass
+class RMSB(base.PerVariableMetric):
+  """Root mean squared bias metric.
+
+  Computes the (optionally weighted) root mean square over `rms_dims` of
+  the bias, i.e. the mean error at each location. Unlike `RMSE` and `Bias`,
+  this metric requires two stages of reduction: the error is first averaged
+  over sample dimensions (e.g. batch, ensemble, timedelta) by the aggregator,
+  then squared and averaged over `rms_dims` in this metric. Hence, it must
+  be used with an aggregator that does NOT reduce over `rms_dims`. An error
+  is raised if any of `rms_dims` is missing from the aggregated statistics,
+  since that indicates the bias was already averaged over it.
+
+  Attributes:
+    rms_dims: Dimensions over which the squared bias is averaged.
+    weight_by: Sequence of `weighting.Weighting` instances whose product is
+      used to weight the squared bias when averaging over `rms_dims`, e.g.
+      `(weighting.GridAreaWeighting(),)`.
+  """
+
+  rms_dims: tuple[str, ...] = ('longitude', 'latitude')
+  weight_by: Sequence[weighting.Weighting] = ()
+
+  def __post_init__(self):
+    self.weight_by = tuple(self.weight_by)
+
+  @property
+  def statistics(self) -> dict[str, base.Statistic]:
+    return {'Error': Error()}
+
+  def _values_from_mean_statistics_per_variable(
+      self,
+      statistic_values: dict[str, cx.Field],
+  ) -> cx.Field:
+    bias = statistic_values['Error']
+    missing_dims = [d for d in self.rms_dims if d not in bias.dims]
+    if missing_dims:
+      raise ValueError(
+          f'RMSB requires aggregated statistics with {self.rms_dims=}, but'
+          f' {missing_dims=} are not present on the bias with {bias.dims=}.'
+          ' Make sure the aggregator does not reduce over `rms_dims`.'
+      )
+    squared_bias = bias**2
+    weights = cx.field(1.0)
+    for weighting_instance in self.weight_by:
+      weights *= weighting_instance.weights(squared_bias)
+    weights = weights.broadcast_like(squared_bias)
+    sum_over_dims = cx.cmap(jnp.sum)
+    mean_squared_bias = sum_over_dims(
+        (squared_bias * weights).untag(*self.rms_dims)
+    ) / sum_over_dims(weights.untag(*self.rms_dims))
+    return cx.cmap(jnp.sqrt)(mean_squared_bias)
+
+
+@dataclasses.dataclass
 class ProductStatistic(base.PerVariableStatistic):
   """Computes product between combinations of predictions and targets."""
+
   x_is_prediction: bool = True
   y_is_target: bool = True
   product_dims: Sequence[str | cx.Coordinate] = tuple()
@@ -169,6 +226,7 @@ class CosineSimilarityMetric(base.Metric):
 @dataclasses.dataclass
 class WindVectorRMSE(base.Metric):
   """Computes vector RMSE between two wind components."""
+
   u_name: str = 'u_component_of_wind'
   v_name: str = 'v_component_of_wind'
   vector_name: str = 'wind_vector'
@@ -192,6 +250,7 @@ class WindVectorRMSE(base.Metric):
 @dataclasses.dataclass
 class PredictionPassthrough(base.PerVariableStatistic):
   """Returns predictions, potentially broadcasted to the shape of targets."""
+
   copy_nans_from_targets: bool = False
 
   @property
@@ -212,6 +271,7 @@ class PredictionPassthrough(base.PerVariableStatistic):
 @dataclasses.dataclass
 class TargetPassthrough(base.PerVariableStatistic):
   """Returns targets, potentially broadcasted to the shape of predictions."""
+
   copy_nans_from_predictions: bool = False
 
   @property

@@ -17,9 +17,11 @@ from absl.testing import parameterized
 import coordax as cx
 import jax
 import numpy as np
+from terrax.metrics import aggregation
 from terrax.metrics import base
 from terrax.metrics import deterministic_losses
 from terrax.metrics import deterministic_metrics
+from terrax.metrics import weighting
 
 
 class DeterministicMetricsTest(parameterized.TestCase):
@@ -79,6 +81,52 @@ class DeterministicMetricsTest(parameterized.TestCase):
       debug_terms = mae_loss.debug_terms(mae_statistics, mae_values)
       np.testing.assert_almost_equal(debug_terms['relative_x'].data, 0.4 / 2.6)
       np.testing.assert_almost_equal(debug_terms['relative_y'].data, 2.2 / 2.6)
+
+  @parameterized.named_parameters(
+      # bias = [2, 0]; sqrt(mean([4, 0])).
+      dict(testcase_name='unweighted', space_weights=None, expected=2**0.5),
+      # sqrt((3 * 4 + 1 * 0) / (3 + 1)).
+      dict(testcase_name='weighted', space_weights=[3.0, 1.0], expected=3**0.5),
+  )
+  def test_rmsb(self, space_weights, expected):
+    time = cx.SizedAxis('time', 2)
+    space = cx.SizedAxis('space', 2)
+    errors = np.array([[1.0, -2.0], [3.0, 2.0]])  # [time, space].
+    predictions = {'x': cx.field(errors, time, space)}
+    targets = {'x': cx.field(np.zeros_like(errors), time, space)}
+    if space_weights is None:
+      weight_by = ()
+    else:
+      weight_by = (
+          weighting.ConstantWeighting(
+              constant=cx.field(np.array(space_weights), space)
+          ),
+      )
+    rmsb = deterministic_metrics.RMSB(rms_dims=('space',), weight_by=weight_by)
+    # Bias is averaged over samples first, so aggregation keeps `space`.
+    aggregator = aggregation.Aggregator(dims_to_reduce=('time',))
+    statistics = base.compute_unique_statistics_for_all_metrics(
+        {'rmsb': rmsb}, predictions, targets
+    )
+    agg_state = aggregator.aggregate_statistics(statistics)
+    values = agg_state.metric_values(rmsb)
+    self.assertEqual(values['x'].dims, ())
+    np.testing.assert_allclose(values['x'].data, expected, rtol=1e-6)
+
+  def test_rmsb_raises_if_rms_dims_are_aggregated(self):
+    time = cx.SizedAxis('time', 2)
+    space = cx.SizedAxis('space', 2)
+    errors = np.array([[1.0, -2.0], [3.0, 2.0]])  # [time, space].
+    predictions = {'x': cx.field(errors, time, space)}
+    targets = {'x': cx.field(np.zeros_like(errors), time, space)}
+    rmsb = deterministic_metrics.RMSB(rms_dims=('space',))
+    aggregator = aggregation.Aggregator(dims_to_reduce=('time', 'space'))
+    statistics = base.compute_unique_statistics_for_all_metrics(
+        {'rmsb': rmsb}, predictions, targets
+    )
+    agg_state = aggregator.aggregate_statistics(statistics)
+    with self.assertRaisesRegex(ValueError, 'missing_dims'):
+      agg_state.metric_values(rmsb)
 
   def test_product_statistic(self):
     time = cx.SizedAxis('time', 3)
