@@ -443,6 +443,43 @@ class CoordinatesMethodsTest(parameterized.TestCase):
     ):
       ylm_grid.add_constant(x, c)
 
+  def test_sigma_levels_pressure_centers(self):
+    levels = coordinates.SigmaLevels.equidistant(4)
+    grid = coordinates.LonLatGrid.T21()
+    ps = np.random.RandomState(0).uniform(9e4, 1e5, size=grid.shape)
+    actual = levels.pressure_centers(cx.field(ps, grid))
+    expected = cx.field(
+        levels.centers[:, np.newaxis, np.newaxis] * ps, levels, grid
+    )
+    coordax_testing.assert_fields_allclose(actual, expected)
+
+  def test_pressure_levels_pressure_centers(self):
+    levels = coordinates.PressureLevels([10, 500, 1000])
+    with self.subTest('pascal'):
+      actual = levels.pressure_centers()
+      expected = cx.field(np.array([1e3, 5e4, 1e5]), levels)
+      coordax_testing.assert_fields_allclose(actual, expected)
+    with self.subTest('nondimensional'):
+      sim_units = units.SI_UNITS
+      actual = levels.pressure_centers(sim_units=sim_units)
+      expected = cx.field(
+          sim_units.nondimensionalize(
+              np.array([1e3, 5e4, 1e5]) * units.parse_units('Pa')
+          ),
+          levels,
+      )
+      coordax_testing.assert_fields_allclose(actual, expected)
+
+  def test_hybrid_levels_ecmwf137_interpolated_p_top(self):
+    p_top = 1.0  # hPa.
+    levels = coordinates.HybridLevels.ecmwf137_interpolated(32, p_top=p_top)
+    self.assertEqual(levels.shape, (32,))
+    # Top interface is the first ECMWF interface at or below `p_top`.
+    top_pressure = levels.a_boundaries[0] + levels.b_boundaries[0] * 1013.25
+    self.assertGreaterEqual(top_pressure, p_top)
+    full = coordinates.HybridLevels.ecmwf137_interpolated(32)
+    self.assertEqual(full.a_boundaries[0], 0.0)
+
 
 class CoordinatesSelectionTest(parameterized.TestCase):
   """Tests selection on coordinate objects."""

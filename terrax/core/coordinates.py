@@ -1198,6 +1198,23 @@ class SigmaLevels(cx.Coordinate):
   def centers(self):
     return self.sigma_levels.centers
 
+  def pressure_centers(
+      self,
+      surface_pressure: cx.Field,
+      sim_units: units.SimUnits | None = None,
+  ) -> cx.Field:
+    """Returns pressure at layer centers given `surface_pressure`.
+
+    Args:
+      surface_pressure: surface pressure, in the same units as the output.
+      sim_units: unused, accepted for API compatibility with other levels.
+
+    Returns:
+      Pressure at sigma level centers.
+    """
+    del sim_units  # unused, output has units of `surface_pressure`.
+    return self.fields['sigma'] * surface_pressure
+
   def asdict(self) -> dict[str, Any]:
     return {k: v.tolist() for k, v in dataclasses.asdict(self).items()}
 
@@ -1408,6 +1425,27 @@ class PressureLevels(cx.Coordinate):
 
   def __hash__(self) -> int:
     return hash(self._components())
+
+  def pressure_centers(
+      self,
+      surface_pressure: cx.Field | None = None,
+      sim_units: units.SimUnits | None = None,
+  ) -> cx.Field:
+    """Returns pressure at levels in Pa (nondimensionalized if `sim_units`).
+
+    Args:
+      surface_pressure: unused, accepted for API compatibility with other
+        levels.
+      sim_units: if provided, the output is nondimensionalized.
+
+    Returns:
+      Pressure at pressure levels.
+    """
+    del surface_pressure  # unused, pressure levels are fixed.
+    pressure = self.centers * 100  # In Pascal.
+    if sim_units is not None:
+      pressure = sim_units.nondimensionalize(pressure * typing.units.Pa)
+    return cx.field(pressure, self)
 
   @classmethod
   def from_dinosaur_pressure_levels(
@@ -1684,10 +1722,19 @@ class HybridLevels(cx.Coordinate):
   def ecmwf137_interpolated(
       cls,
       n_levels: int,
+      p_top: float | None = None,
   ) -> Self:
-    """Returns HybridLevels interpolated from ECMWF 137 levels."""
+    """Returns HybridLevels interpolated from ECMWF 137 levels.
+
+    Args:
+      n_levels: number of layers.
+      p_top: optional model top pressure in hPa. If given, ECMWF interfaces
+        above `p_top` are dropped before interpolating. See
+        `dinosaur.hybrid_coordinates.HybridCoordinates.ecmwf137_interpolated`.
+    """
     hybrid_levels = hybrid_coordinates.HybridCoordinates.ecmwf137_interpolated(
         n_levels=n_levels,
+        p_top=p_top,
     )
     return cls.from_dinosaur_hybrid_levels(hybrid_levels)
 
