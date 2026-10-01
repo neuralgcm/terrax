@@ -16,6 +16,7 @@
 
 import copy
 import dataclasses
+from typing import Literal
 
 import coordax as cx
 from terrax.atmosphere import state_conversion
@@ -53,6 +54,15 @@ class StandardVariablesObservationOperator(
   mesh: parallelism.Mesh = dataclasses.field(
       kw_only=True, default_factory=parallelism.default_mesh
   )
+  # How to extrapolate T and z below the lowest model level. See
+  # `state_conversion.primitive_equations_to_uvtz` for details.
+  below_ground_extrapolation: Literal['linear', 'lapse_rate'] = (
+      dataclasses.field(kw_only=True, default='linear')
+  )
+  # Whether to interpolate linearly in pressure (`direct`) or log-pressure.
+  pressure_interpolation_space: Literal['direct', 'log'] = dataclasses.field(
+      kw_only=True, default='direct'
+  )
 
   def observe(
       self,
@@ -76,6 +86,8 @@ class StandardVariablesObservationOperator(
         levels=self.levels,
         orography=self.orography,  # pyrefly: ignore[bad-argument-type]
         sim_units=self.sim_units,
+        below_ground_extrapolation=self.below_ground_extrapolation,
+        pressure_interpolation_space=self.pressure_interpolation_space,
     )
     interpolated = parallelism.with_physics_sharding(self.mesh, interpolated)
     if self.observation_correction is not None:

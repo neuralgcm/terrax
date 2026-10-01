@@ -20,6 +20,7 @@ import coordax as cx
 from coordax import testing as cx_testing
 from dinosaur import vertical_interpolation
 import jax
+import jax.numpy as jnp
 import numpy as np
 from terrax.atmosphere import interpolators
 from terrax.core import coordinates
@@ -58,6 +59,34 @@ class LinearOnPressureTest(parameterized.TestCase):
     cx_testing.assert_fields_allclose(
         actual['field'], expected_field, atol=1e-5
     )
+
+  def test_log_interpolation_is_exact_for_log_pressure_fields(self):
+    """Tests that log space interpolates fields linear in log(p) exactly."""
+    source_levels = coordinates.SigmaLevels.equidistant(8)
+    # Includes levels above the top and below the bottom source level.
+    target_levels = coordinates.PressureLevels([1, 10, 100, 500, 1000])
+    grid = coordinates.LonLatGrid.T21()
+    rng = np.random.RandomState(0)
+    surface_pressure = cx.field(95000 + 5000 * rng.rand(*grid.shape), grid)
+    sigma = source_levels.fields['sigma']
+    field = cx.cpmap(jnp.log)(sigma * surface_pressure)
+    inputs = {'field': field, 'surface_pressure': surface_pressure}
+    with self.subTest('log_space'):
+      regridder = interpolators.LinearOnPressure(
+          target_levels, 'linear', interpolation_space='log'
+      )
+      actual = regridder(inputs)['field']
+      expected = cx.cpmap(jnp.log)(
+          target_levels.pressure_centers()
+      ).broadcast_like(cx.coords.compose(target_levels, grid))
+      cx_testing.assert_fields_allclose(actual, expected, atol=1e-4)
+    with self.subTest('pressure_differs_above_top_level'):
+      regridder = interpolators.LinearOnPressure(target_levels, 'linear')
+      actual_top = regridder(inputs)['field'].isel({target_levels: 0})
+      expected_top = np.log(100.0)  # top target level is 1 hPa = 100 Pa.
+      self.assertGreater(
+          float(np.max(np.abs(actual_top.data - expected_top))), 0.1
+      )
 
   @parameterized.named_parameters(
       dict(

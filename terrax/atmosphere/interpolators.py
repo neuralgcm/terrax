@@ -121,6 +121,11 @@ class LinearOnPressure(nnx.Module):
       is provided in Pascals.
     allow_no_levels: If True, fields without vertical levels are passed through.
       If False, an error is raised.
+    interpolation_space: Space of pressure in which to interpolate (and
+      extrapolate) linearly. `direct` uses pressure, `log` uses the logarithm
+      of pressure. The latter is exact for geopotential in an isothermal layer
+      and avoids O(100 m) geopotential errors between widely spaced (in
+      log-pressure) upper levels.
     supported_level_types: A sequence of supported vertical coordinate types.
   """
 
@@ -134,6 +139,7 @@ class LinearOnPressure(nnx.Module):
   include_surface_pressure_in_output: bool = False
   sim_units: units.SimUnits | None = None
   allow_no_levels: bool = False
+  interpolation_space: Literal['direct', 'log'] = 'direct'
   supported_level_types: Sequence[cx.Coordinate] = nnx.static(
       default=(
           coordinates.PressureLevels,
@@ -227,6 +233,11 @@ class LinearOnPressure(nnx.Module):
         )
     else:
       raise ValueError(f'Unsupported {type(target_levels)=}.')
+    if self.interpolation_space == 'log':
+      desired = cx.cpmap(jnp.log)(desired)
+      pressure = cx.cpmap(jnp.log)(pressure)
+    elif self.interpolation_space != 'direct':
+      raise ValueError(f'Unknown {self.interpolation_space=}.')
     out_coord = cx.coords.replace_axes(f.coordinate, level, target_levels)
     # we specify out_axes to preserve the dimension order in the output.
     out_axes = {d: i for i, d in enumerate(out_coord.dims)}

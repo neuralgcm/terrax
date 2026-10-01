@@ -95,6 +95,61 @@ class ObservationOperatorsTest(parameterized.TestCase):
     for key in query:
       self.assertEqual(cx.get_coordinate(actual[key]), query[key])
 
+  def test_lapse_rate_below_ground_extrapolation_on_hybrid_levels(self):
+    hybrid_levels = coordinates.HybridLevels.ecmwf137_interpolated(32)
+    coords = cx.coords.compose(hybrid_levels, self.ylm_grid)
+    sim_units = units.SI_UNITS
+    t_ref, ps_ref = 250.0, 60000.0  # high terrain, surface at 600 hPa.
+    nodal_t = np.full(hybrid_levels.shape + self.grid.shape, t_ref)
+    nodal_t[-1] += 5.0  # strong gradient between the two lowest levels.
+    nodal_t = cx.field(nodal_t, hybrid_levels, self.grid)
+    nodal_lsp = cx.field(np.full(self.grid.shape, np.log(ps_ref)), self.grid)
+    zeros = cx.field(np.zeros(coords.shape), coords)
+    inputs = {
+        'divergence': zeros,
+        'vorticity': zeros,
+        'specific_humidity': zeros,
+        'temperature': self.ylm_map.to_modal(nodal_t),
+        'log_surface_pressure': self.ylm_map.to_modal(nodal_lsp),
+        'time': cx.field(jdt.to_datetime('2001-01-01')),
+    }
+    pressure_levels = coordinates.PressureLevels([300, 500, 850, 1000])
+    target_coords = cx.coords.compose(pressure_levels, self.grid)
+    query = {'temperature': target_coords, 'geopotential': target_coords}
+    outputs = {}
+    for mode in ['linear', 'lapse_rate']:
+      operator = observation_operators.StandardVariablesObservationOperator(
+          ylm_map=self.ylm_map,
+          orography=self.orography_module,
+          levels=pressure_levels,
+          sim_units=sim_units,
+          observation_correction=None,
+          below_ground_extrapolation=mode,
+      )
+      outputs[mode] = operator.observe(inputs=inputs, query=query)
+    for key in query:
+      self.assertEqual(
+          outputs['lapse_rate'][key].dims, outputs['linear'][key].dims
+      )
+    t_lin = outputs['linear']['temperature'].data
+    t_lapse = outputs['lapse_rate']['temperature'].data
+    # Above the lowest model level both methods agree.
+    np.testing.assert_allclose(t_lin[:2], t_lapse[:2], rtol=1e-5)
+    # Linear extrapolation is dominated by the lowest-levels gradient.
+    self.assertGreater(np.abs(t_lin[-1] - t_ref).max(), 100.0)
+    # Lapse-rate extrapolation follows the standard atmosphere profile.
+    p_low = hybrid_levels.a_boundaries[-2:].mean() * 100 + (
+        hybrid_levels.b_boundaries[-2:].mean() * ps_ref
+    )
+    exponent = 287.0 * 0.0065 / 9.80616
+    expected = (t_ref + 5.0) * (100000.0 / p_low) ** exponent
+    np.testing.assert_allclose(t_lapse[-1], expected, rtol=5e-3)
+    self.assertTrue(np.all(np.isfinite(
+        outputs['lapse_rate']['geopotential'].data)))
+    # Geopotential decreases below ground (higher pressure -> lower height).
+    z_lapse = outputs['lapse_rate']['geopotential'].data
+    self.assertTrue(np.all(z_lapse[-1] < z_lapse[-2]))
+
 
 if __name__ == '__main__':
   jax.config.parse_flags_with_absl()
