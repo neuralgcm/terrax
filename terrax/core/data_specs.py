@@ -87,18 +87,25 @@ class CoordSpec:
     coord: Coordinate that describes the supported data.
     dim_match_rules: Dictionary mapping dimension name to an axis matching rule.
       Dimensions without set values default to `AxisMatchRules.EXACT`.
+    optional_dims: Dimensions of `coord` that may be absent in candidate
+      coordinates. If present, they are validated using `dim_match_rules`.
   """
 
   coord: cx.Coordinate
   dim_match_rules: dict[str, AxisMatchRules] = dataclasses.field(
       default_factory=dict
   )
+  optional_dims: tuple[str, ...] = ()
 
   def __post_init__(self):
     if not set(self.dim_match_rules.keys()).issubset(set(self.coord.dims)):
       raise ValueError(
-          f'{self.dim_match_rules=} contains dimensions not present in'
-          f' {self.coord=}.'
+          f'{self.dim_match_rules=} contains dims not present in {self.coord=}.'
+      )
+    self.optional_dims = tuple(self.optional_dims)
+    if not set(self.optional_dims).issubset(set(self.coord.dims)):
+      raise ValueError(
+          f'{self.optional_dims=} contains dims not present in {self.coord=}.'
       )
     canonicalized = cx.coords.canonicalize(self.coord)
     selected_axes = [x for x in canonicalized if isinstance(x, cx.SelectedAxis)]
@@ -106,17 +113,34 @@ class CoordSpec:
       if ax.dims[0] not in self.dim_match_rules:
         self.dim_match_rules[ax.dims[0]] = AxisMatchRules.REPLACED
 
+  def drop_missing_optional_dims(
+      self, dims: tuple[str | None, ...]
+  ) -> 'CoordSpec':
+    """Returns CoordSpec without optional dimensions that are not in `dims`."""
+    to_drop = [d for d in self.optional_dims if d not in dims]
+    if not to_drop:
+      return self
+    axes = [ax for ax in self.coord.axes if ax.dims[0] not in to_drop]
+    return CoordSpec(
+        coord=cx.coords.compose(*axes),
+        dim_match_rules={
+            k: v for k, v in self.dim_match_rules.items() if k not in to_drop
+        },
+        optional_dims=tuple(d for d in self.optional_dims if d not in to_drop),
+    )
+
   def validate_compatible(self, coord: cx.Coordinate):
     """Raises an informative error if not compatible with inferred candidate."""
-    candidate = finalize_spec(self, coord)
-    if candidate.dims != self.coord.dims:
+    spec = self.drop_missing_optional_dims(coord.dims)
+    candidate = finalize_spec(spec, coord)
+    if candidate.dims != spec.coord.dims:
       raise ValueError(
-          f'Coordinate {self.coord} and {candidate=} have different dimensions'
+          f'Coordinate {spec.coord} and {candidate=} have different dimensions'
       )
 
-    for ax, expected_ax in zip(candidate.axes, self.coord.axes, strict=True):
+    for ax, expected_ax in zip(candidate.axes, spec.coord.axes, strict=True):
       [dim] = expected_ax.dims
-      match_schema = self.dim_match_rules.get(dim, AxisMatchRules.EXACT)  # pyrefly: ignore[no-matching-overload]
+      match_schema = spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)  # pyrefly: ignore[no-matching-overload]
       if (
           match_schema == AxisMatchRules.EXACT
           or match_schema == AxisMatchRules.REPLACED
@@ -174,8 +198,18 @@ class CoordSpec:
       cls,
       coord: cx.Coordinate,
       dim_match_rules: dict[str, AxisMatchRules] | None = None,
+      optional_timedelta: bool = False,
   ):
-    """Constructs CoordSpec with added timedelta and type match rule."""
+    """Constructs CoordSpec with added timedelta and type match rule.
+
+    Args:
+      coord: Coordinate to which the timedelta axis is prepended.
+      dim_match_rules: Optional additional dimension match rules.
+      optional_timedelta: Whether the timedelta axis may be absent.
+
+    Returns:
+      CoordSpec that accepts any TimeDelta axis.
+    """
     if dim_match_rules is None:
       dim_match_rules = {}
     dummy_timedelta = coordinates.TimeDelta(np.timedelta64(0, 's')[None])  # pyrefly: ignore[bad-index]
@@ -192,6 +226,7 @@ class CoordSpec:
     return cls(  # pytype: disable=wrong-arg-types
         coord=cx.coords.compose(dummy_timedelta, coord),
         dim_match_rules=dim_match_rules,
+        optional_dims=(delta_dim,) if optional_timedelta else (),
     )
 
   @classmethod
@@ -200,8 +235,19 @@ class CoordSpec:
       coord: cx.Coordinate,
       timedelta: np.ndarray = np.timedelta64(0, 's')[None],  # pyrefly: ignore[bad-index]
       dim_match_rules: dict[str, AxisMatchRules] | None = None,
+      optional_timedelta: bool = False,
   ):
-    """Constructs CoordSpec with added timedelta and superset match rule."""
+    """Constructs CoordSpec with added timedelta and superset match rule.
+
+    Args:
+      coord: Coordinate to which the timedelta axis is prepended.
+      timedelta: Timedelta values that must be present in candidates.
+      dim_match_rules: Optional additional dimension match rules.
+      optional_timedelta: Whether the timedelta axis may be absent.
+
+    Returns:
+      CoordSpec that accepts TimeDelta axes that include `timedelta` values.
+    """
     if dim_match_rules is None:
       dim_match_rules = {}
     dummy_timedelta = coordinates.TimeDelta(timedelta)
@@ -218,6 +264,7 @@ class CoordSpec:
     return cls(  # pytype: disable=wrong-arg-types
         coord=cx.coords.compose(dummy_timedelta, coord),
         dim_match_rules=dim_match_rules,
+        optional_dims=(delta_dim,) if optional_timedelta else (),
     )
 
 
@@ -259,6 +306,9 @@ def finalize_spec(
   If `coord_spec` is a `cx.Coordinate`, it is treated as `CoordSpec` with
   `AxisMatchRules.EXACT` for all dimensions.
 
+  Dimensions in `coord_spec.optional_dims` that are absent in `source_coord`
+  are dropped from the result.
+
   Args:
     coord_spec: A CoordSpec for which to construct a coordinate candidate.
     source_coord: A coordinate used to build a candidate coordinate from
@@ -278,6 +328,7 @@ def finalize_spec(
       raise ValueError('Cannot derive coordinate without reference coord')
     return coord_spec.coord
 
+  coord_spec = coord_spec.drop_missing_optional_dims(source_coord.dims)
   coord_in_spec = coord_spec.coord
   if coord_in_spec.dims != source_coord.dims:
     raise ValueError(
@@ -452,6 +503,8 @@ def validate_inputs(
   """Validates that `inputs` satisfy expectations of `in_spec`."""
   for dataset_key, dataset_spec in in_spec.items():
     if dataset_key not in inputs:
+      if all(unwrap_optional(v)[1] for v in dataset_spec.values()):
+        continue  # all variables are optional.
       raise ValueError(f'Data key {dataset_key} is missing in {inputs.keys()=}')
 
     in_data = inputs[dataset_key]

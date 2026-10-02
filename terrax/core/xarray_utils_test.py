@@ -155,6 +155,27 @@ class ReadFromXarrayTest(parameterized.TestCase):
     cx.testing.assert_fields_equal(read_data['data']['u'], fields['u'])
     self.assertNotIn('missing_data', read_data)
 
+  def test_read_from_xarray_with_optional_timedelta(self):
+    spec = data_specs.CoordSpec.with_any_timedelta(
+        cx.coords.compose(self.levels, self.grid), optional_timedelta=True
+    )
+    inputs_spec = {'era5': {'temperature': spec}}
+    with self.subTest('with_timedelta'):
+      read_data = xarray_utils.read_from_xarray(self.mock_data, inputs_spec)
+      self.assertEqual(
+          read_data['era5']['temperature'].coordinate,
+          cx.coords.compose(self.timedelta, self.levels, self.grid),
+      )
+
+    with self.subTest('without_timedelta'):
+      no_timedelta = {'era5': self.mock_data['era5'].isel(timedelta=0)}
+      no_timedelta['era5'] = no_timedelta['era5'].drop_vars('timedelta')
+      read_data = xarray_utils.read_from_xarray(no_timedelta, inputs_spec)
+      self.assertEqual(
+          read_data['era5']['temperature'].coordinate,
+          cx.coords.compose(self.levels, self.grid),
+      )
+
   def test_read_from_xarray_with_missing_non_optional_variable_raises(self):
     x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
     y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))

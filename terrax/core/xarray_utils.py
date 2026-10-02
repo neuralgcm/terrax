@@ -316,7 +316,11 @@ def read_sharded_from_xarray(
           dim: exact_to_replaced(coord_or_spec.dim_match_rules.get(dim, exact))  # pyrefly: ignore[no-matching-overload]
           for dim in coord_or_spec.coord.dims
       }
-      return data_specs.CoordSpec(coord, new_dim_match_rules)  # pyrefly: ignore[bad-argument-type]
+      return data_specs.CoordSpec(
+          coord,
+          new_dim_match_rules,  # pyrefly: ignore[bad-argument-type]
+          coord_or_spec.optional_dims,
+      )
     elif isinstance(coord_or_spec, cx.Coordinate):
       return wrap_coordinate_shard(data_specs.CoordSpec(coord_or_spec))
     else:
