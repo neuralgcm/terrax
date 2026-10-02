@@ -15,7 +15,7 @@
 """Modules parameterizing PDEs describing atmospheric processes."""
 
 import functools
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
 
 import coordax as cx
 from dinosaur import coordinate_systems
@@ -159,34 +159,10 @@ def get_temperature_delinearization_transform(
   ])
 
 
-class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
-  """Equation module for primitive equations.
+class _PrimitiveEquationsBase:
+  """Shared state conversion and implicit solve methods for primitive equations."""
 
-  This module wraps methods of an appropriate primitive equations class from
-  `dinosaur` and converts between dict[str, cx.Field] and dinosaur convention
-  representations. The type of primitive equation solver is selected by the
-  type of the vertical coordinate system. Supported vertical coordinates include
-  SigmaLevels and HybridLevels for which spectral solvers are available. Other
-  arguments control the additional features of the primitive equations solver,
-  such as vertical advection and account for moisture species.
-
-  Attributes:
-    ylm_map: Spherical harmonics mapping for the horizontal grid.
-    levels: Vertical levels coordinate.
-    sim_units: Physical constants and units for nondimensionalization.
-    reference_temperatures: Reference temperatures used for linearization.
-    tracer_names: A sequence of names of tracers to be evolved by dynamics.
-    orography_module: Orography module that provides modal orography data.
-    vertical_advection: A optional custom function that implements vertical
-      advection scheme. If None, a default centered difference scheme will be
-      used based on the type of `levels`.
-    include_vertical_advection: Whether to include vertical advection terms.
-    humidity_key: Key in tracers names that corresponds to specific humidity.
-      If the key is not present in `tracer_names`, uses dry primitive equations.
-    cloud_keys: Keys in tracers names that corresponds to cloud species. Uses
-      only keys that are present in `tracer_names`. If at least one of the cloud
-      species is present, humidity key must be present in `tracer_names`.
-  """
+  equation_cls: Callable[..., object]
 
   def __init__(
       self,
@@ -222,6 +198,7 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
     self.orography = orography_module
     self.t_ref_tuple = t_ref_tuple
     self.tracer_names = tracer_names
+    self.nodal_tracers: tuple[str, ...] = ()
     self.include_vertical_advection = include_vertical_advection
     self.linearize_transform = get_temperature_linearization_transform(
         ref_temperatures=reference_temperatures
@@ -233,7 +210,6 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
         rename_dict={'temperature_variation': 'temperature'}
     )
     if isinstance(levels, coordinates.SigmaLevels):
-      self.equation_cls = primitive_equations.PrimitiveEquationsSigma
       self.dinosaur_coords = coordinate_systems.CoordinateSystem(
           horizontal=self.ylm_map.dinosaur_grid,
           vertical=self.levels.sigma_levels,  # pyrefly: ignore[missing-attribute]
@@ -244,7 +220,6 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
       self.vertical_advection = vertical_advection
       self.unit_kwargs = {}
     elif isinstance(levels, coordinates.HybridLevels):
-      self.equation_cls = primitive_equations.PrimitiveEquationsHybrid
       self.dinosaur_coords = coordinate_systems.CoordinateSystem(
           horizontal=self.ylm_map.dinosaur_grid,
           vertical=self.levels.hybrid_levels,  # pyrefly: ignore[missing-attribute]
@@ -269,23 +244,26 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
     else:
       self.cloud_keys = None
 
-  @property
-  def primitive_equation(self):
-    return self.equation_cls(
-        coords=self.dinosaur_coords,
-        physics_specs=self.sim_units,  # pyrefly: ignore[bad-argument-type]
-        reference_temperature=np.asarray(self.t_ref_tuple),
-        orography=self.orography_module.modal_orography.data,  # pyrefly: ignore[bad-argument-type]
-        vertical_advection=self.vertical_advection,  # pyrefly: ignore[bad-argument-type]
-        include_vertical_advection=self.include_vertical_advection,
-        humidity_key=self.humidity_key,
-        cloud_keys=self.cloud_keys,
+  def _equation_kwargs(self) -> dict[str, object]:
+    return {
+        'coords': self.dinosaur_coords,
+        'physics_specs': self.sim_units,
+        'reference_temperature': np.asarray(self.t_ref_tuple),
+        'orography': self.orography_module.modal_orography.data,
+        'vertical_advection': self.vertical_advection,
+        'include_vertical_advection': self.include_vertical_advection,
+        'humidity_key': self.humidity_key,
+        'cloud_keys': self.cloud_keys,
         **self.unit_kwargs,
-    )
+    }
 
   @property
-  def T_ref(self) -> typing.Array:
-    return self.primitive_equation.T_ref
+  def primitive_equation(self):
+    return self.equation_cls(**self._equation_kwargs())
+
+  @property
+  def T_ref(self) -> typing.Array:  # pylint: disable=invalid-name
+    return self.primitive_equation.T_ref  # pyrefly: ignore[missing-attribute]
 
   def _to_primitive_equations_state(
       self, inputs: dict[str, cx.Field]
@@ -305,9 +283,15 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
   def _from_primitive_equations_state(
       self, state: primitive_equations.State, is_tendency: bool = True
   ) -> dict[str, cx.Field]:
+    """Converts a primitive equations state to a dict of fields."""
     sigma_levels, ylm_grid = self.levels, self.ylm_map.modal_grid
+    nodal_grid = self.ylm_map.nodal_grid
     tracers = {
-        k: cx.field(state.tracers[k], sigma_levels, ylm_grid)  # pyrefly: ignore[bad-argument-type]
+        k: cx.field(
+            state.tracers[k],  # pyrefly: ignore[bad-argument-type]
+            sigma_levels,
+            nodal_grid if k in self.nodal_tracers else ylm_grid,
+        )
         for k in self.tracer_names
     }
     volume_field_names = ['divergence', 'vorticity', 'temperature_variation']
@@ -322,16 +306,9 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
     lsp = cx.field(jnp.squeeze(state.log_surface_pressure, axis=0), ylm_grid)  # pyrefly: ignore[bad-argument-type]
     return volume_fields | tracers | {'log_surface_pressure': lsp}
 
-  def explicit_terms(self, state: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    return self._from_primitive_equations_state(
-        self.primitive_equation.explicit_terms(
-            self._to_primitive_equations_state(state)
-        )
-    )
-
   def implicit_terms(self, state: dict[str, cx.Field]) -> dict[str, cx.Field]:
     return self._from_primitive_equations_state(
-        self.primitive_equation.implicit_terms(
+        self.primitive_equation.implicit_terms(  # pyrefly: ignore[missing-attribute]
             self._to_primitive_equations_state(state)
         )
     )
@@ -340,8 +317,242 @@ class PrimitiveEquations(time_integrators.ImplicitExplicitODE):
       self, state: dict[str, cx.Field], step_size: float
   ) -> dict[str, cx.Field]:
     return self._from_primitive_equations_state(
-        self.primitive_equation.implicit_inverse(
+        self.primitive_equation.implicit_inverse(  # pyrefly: ignore[missing-attribute]
             self._to_primitive_equations_state(state), step_size
+        ),
+        is_tendency=False,
+    )
+
+
+class PrimitiveEquations(
+    _PrimitiveEquationsBase, time_integrators.ImplicitExplicitODE
+):
+  """Equation module for Eulerian primitive equations.
+
+  This module wraps methods of an appropriate primitive equations class from
+  `dinosaur` and converts between dict[str, cx.Field] and dinosaur convention
+  representations. The type of primitive equation solver is selected by the
+  type of the vertical coordinate system. Supported vertical coordinates include
+  SigmaLevels and HybridLevels for which spectral solvers are available. Other
+  arguments control the additional features of the primitive equations solver,
+  such as vertical advection and account for moisture species.
+
+  Attributes:
+    ylm_map: Spherical harmonics mapping for the horizontal grid.
+    levels: Vertical levels coordinate.
+    sim_units: Physical constants and units for nondimensionalization.
+    reference_temperatures: Reference temperatures used for linearization.
+    tracer_names: A sequence of names of tracers to be evolved by dynamics.
+    orography_module: Orography module that provides modal orography data.
+    vertical_advection: A optional custom function that implements vertical
+      advection scheme. If None, a default centered difference scheme will be
+      used based on the type of `levels`.
+    include_vertical_advection: Whether to include vertical advection terms.
+    humidity_key: Key in tracers names that corresponds to specific humidity. If
+      the key is not present in `tracer_names`, uses dry primitive equations.
+    cloud_keys: Keys in tracers names that corresponds to cloud species. Uses
+      only keys that are present in `tracer_names`. If at least one of the cloud
+      species is present, humidity key must be present in `tracer_names`.
+  """
+
+  def __init__(
+      self,
+      ylm_map: spherical_harmonics.FixedYlmMapping,
+      levels: coordinates.SigmaLevels | coordinates.HybridLevels,
+      sim_units: units.SimUnits,
+      reference_temperatures: Sequence[float] | cx.Field,
+      tracer_names: Sequence[str],
+      orography_module: orographies.ModalOrography,
+      vertical_advection: Callable[..., typing.Array] | None = None,
+      include_vertical_advection: bool = True,
+      humidity_key: str = 'specific_humidity',
+      cloud_keys: tuple[str, ...] = (
+          'specific_cloud_ice_water_content',
+          'specific_cloud_liquid_water_content',
+      ),
+  ):
+    super().__init__(
+        ylm_map=ylm_map,
+        levels=levels,
+        sim_units=sim_units,
+        reference_temperatures=reference_temperatures,
+        tracer_names=tracer_names,
+        orography_module=orography_module,
+        vertical_advection=vertical_advection,
+        include_vertical_advection=include_vertical_advection,
+        humidity_key=humidity_key,
+        cloud_keys=cloud_keys,
+    )
+    if isinstance(levels, coordinates.SigmaLevels):
+      self.equation_cls = primitive_equations.PrimitiveEquationsSigma
+    elif isinstance(levels, coordinates.HybridLevels):
+      self.equation_cls = primitive_equations.PrimitiveEquationsHybrid
+
+  def explicit_terms(self, state: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    return self._from_primitive_equations_state(
+        self.primitive_equation.explicit_terms(
+            self._to_primitive_equations_state(state)
+        )
+    )
+
+
+class SemiLagrangianPrimitiveEquations(
+    _PrimitiveEquationsBase, time_integrators.SemiLagrangianImplicitExplicitODE
+):
+  """Equation module for semi-Lagrangian primitive equations.
+
+  Wraps `dinosaur.primitive_equations.SemiLagrangianPrimitiveEquations` (for
+  `SigmaLevels`) or `SemiLagrangianPrimitiveEquationsHybrid` (for
+  `HybridLevels`), converting between `dict[str, cx.Field]` and `dinosaur`
+  state representations. Must be integrated with a semi-Lagrangian time
+  integrator such as `time_integrators.SemiLagrangianCrankNicolsonRK2` (possibly
+  composed with explicit forcing via `equations.ComposedSemiLagrangianODE`).
+
+  Attributes:
+    ylm_map: Spherical harmonics mapping for the horizontal grid.
+    levels: Vertical levels coordinate (`SigmaLevels` or `HybridLevels`).
+    sim_units: Physical constants and units for nondimensionalization.
+    reference_temperatures: Reference temperatures used for linearization.
+    tracer_names: A sequence of names of tracers to be evolved by dynamics.
+    orography_module: Orography module that provides modal orography data.
+    vertical_advection: Retained for call-compatibility with
+      `PrimitiveEquations`; vertical advection in the semi-Lagrangian solver is
+      handled by transport along 3-D trajectories.
+    include_vertical_advection: Retained for call-compatibility with
+      `PrimitiveEquations`.
+    humidity_key: Key in `tracer_names` corresponding to specific humidity. If
+      not present in `tracer_names`, uses dry primitive equations.
+    cloud_keys: Keys in `tracer_names` corresponding to cloud species.
+    coriolis_mode: `'planetary_momentum'` transports planetary momentum
+      (suitable for long time steps); `'explicit'` keeps the Coriolis force as
+      an explicit tendency.
+    interpolation_order: Horizontal interpolation order for transported fields,
+      `'cubic'` or `'linear'`.
+    vertical_interpolation_order: Vertical interpolation order for transported
+      fields, `'linear'` or `'cubic'`.
+    monotone_tracers: Whether to transport tracers with quasi-monotone limiter.
+    monotone_dynamics: Whether to transport dynamical fields with quasi-monotone
+      limiter.
+    nodal_tracers: Names of tracers that are carried in nodal representation
+      instead of modal. Such tracers are expected on the nodal grid of `ylm_map`
+      and are returned on that grid (and must be excluded from modal filters).
+    departure_iterations: Number of fixed-point iterations in departure-point
+      solves.
+    terrain_smoothed_log_sp: Whether to transport terrain-smoothed log surface
+      pressure following Ritchie & Tanguay (1996).
+  """
+
+  def __init__(
+      self,
+      ylm_map: spherical_harmonics.FixedYlmMapping,
+      levels: coordinates.SigmaLevels | coordinates.HybridLevels,
+      sim_units: units.SimUnits,
+      reference_temperatures: Sequence[float] | cx.Field,
+      tracer_names: Sequence[str],
+      orography_module: orographies.ModalOrography,
+      vertical_advection: Callable[..., typing.Array] | None = None,
+      include_vertical_advection: bool = True,
+      humidity_key: str = 'specific_humidity',
+      cloud_keys: tuple[str, ...] = (
+          'specific_cloud_ice_water_content',
+          'specific_cloud_liquid_water_content',
+      ),
+      *,
+      coriolis_mode: Literal[
+          'planetary_momentum', 'explicit'
+      ] = 'planetary_momentum',
+      interpolation_order: Literal['cubic', 'linear'] = 'cubic',
+      vertical_interpolation_order: Literal['linear', 'cubic'] = 'linear',
+      monotone_tracers: bool = False,
+      monotone_dynamics: bool = False,
+      nodal_tracers: Sequence[str] = (),
+      departure_iterations: int = 1,
+      terrain_smoothed_log_sp: bool = True,
+  ):
+    super().__init__(
+        ylm_map=ylm_map,
+        levels=levels,
+        sim_units=sim_units,
+        reference_temperatures=reference_temperatures,
+        tracer_names=tracer_names,
+        orography_module=orography_module,
+        vertical_advection=vertical_advection,
+        include_vertical_advection=include_vertical_advection,
+        humidity_key=humidity_key,
+        cloud_keys=cloud_keys,
+    )
+    if isinstance(levels, coordinates.SigmaLevels):
+      self.equation_cls = primitive_equations.SemiLagrangianPrimitiveEquations
+    elif isinstance(levels, coordinates.HybridLevels):
+      self.equation_cls = (
+          primitive_equations.SemiLagrangianPrimitiveEquationsHybrid
+      )
+    nodal_tracers_tuple = tuple(nodal_tracers)
+    unknown_nodal_tracers = set(nodal_tracers_tuple) - set(tracer_names)
+    if unknown_nodal_tracers:
+      raise ValueError(
+          f'nodal_tracers {sorted(unknown_nodal_tracers)} are not present in'
+          f' {tracer_names=}'
+      )
+    self.coriolis_mode = coriolis_mode
+    self.interpolation_order = interpolation_order
+    self.vertical_interpolation_order = vertical_interpolation_order
+    self.monotone_tracers = monotone_tracers
+    self.monotone_dynamics = monotone_dynamics
+    self.nodal_tracers = nodal_tracers_tuple
+    self.departure_iterations = departure_iterations
+    self.terrain_smoothed_log_sp = terrain_smoothed_log_sp
+
+  def _equation_kwargs(self) -> dict[str, object]:
+    return super()._equation_kwargs() | {
+        'coriolis_mode': self.coriolis_mode,
+        'interpolation_order': self.interpolation_order,
+        'vertical_interpolation_order': self.vertical_interpolation_order,
+        'monotone_tracers': self.monotone_tracers,
+        'monotone_dynamics': self.monotone_dynamics,
+        'nodal_tracers': self.nodal_tracers,
+        'departure_iterations': self.departure_iterations,
+        'terrain_smoothed_log_sp': self.terrain_smoothed_log_sp,
+    }
+
+  def nonadvective_terms(
+      self, state: dict[str, cx.Field]
+  ) -> dict[str, cx.Field]:
+    """Returns non-advective explicit tendencies."""
+    return self._from_primitive_equations_state(
+        self.primitive_equation.nonadvective_terms(
+            self._to_primitive_equations_state(state)
+        )
+    )
+
+  def nodal_velocities(
+      self, state: dict[str, cx.Field]
+  ) -> primitive_equations.NodalVelocities:
+    """Returns nodal velocities that define semi-Lagrangian trajectories."""
+    return self.primitive_equation.nodal_velocities(
+        self._to_primitive_equations_state(state)
+    )
+
+  def departure_points(
+      self,
+      velocities: primitive_equations.NodalVelocities,
+      dt: float,
+      initial_guess: primitive_equations.PrimitiveDeparturePoints | None = None,
+  ) -> primitive_equations.PrimitiveDeparturePoints:
+    """Returns departure points of trajectories arriving at grid points."""
+    return self.primitive_equation.departure_points(
+        velocities, dt, initial_guess=initial_guess
+    )
+
+  def semi_lagrangian_transport(
+      self,
+      state: dict[str, cx.Field],
+      departure: primitive_equations.PrimitiveDeparturePoints,
+  ) -> dict[str, cx.Field]:
+    """Remaps state-like `state` from `departure` to arrival points."""
+    return self._from_primitive_equations_state(
+        self.primitive_equation.semi_lagrangian_transport(
+            self._to_primitive_equations_state(state), departure
         ),
         is_tendency=False,
     )

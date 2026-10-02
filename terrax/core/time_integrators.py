@@ -46,6 +46,19 @@ class ImplicitExplicitODE(time_integration.ImplicitExplicitODE, nnx.Module):
     super().__init_subclass__(pytree=False, **kwargs)
 
 
+class SemiLagrangianImplicitExplicitODE(
+    time_integration.SemiLagrangianImplicitExplicitODE, nnx.Module
+):
+  """Module wrapper for SemiLagrangianImplicitExplicitODE.
+
+  This module is wrapped as nnx.Module to ensure that any submodule that is
+  a part of the equation class is included in the model's parameter tree.
+  """
+
+  def __init_subclass__(cls, **kwargs):
+    super().__init_subclass__(pytree=False, **kwargs)
+
+
 def forward_euler(equation: ExplicitODE, time_step: float) -> typing.StepFn:
   """Time stepping for an explicit ODE via forward Euler method.
 
@@ -90,11 +103,11 @@ def rk4(equation: ExplicitODE, time_step: float) -> typing.StepFn:
 class DinosaurIntegrator(nnx.Module):
   """Module that wraps time integrators from dinosaur package."""
 
-  equation: ExplicitODE | ImplicitExplicitODE = nnx.data()
+  equation: (
+      ExplicitODE | ImplicitExplicitODE | SemiLagrangianImplicitExplicitODE
+  ) = nnx.data()
   time_step: float
-  integrator: Callable[
-      [ExplicitODE | ImplicitExplicitODE, float], typing.StepFn
-  ]
+  integrator: Callable[..., typing.StepFn]
 
   def __call__(self, inputs: typing.Pytree) -> typing.Pytree:
     return self.integrator(self.equation, self.time_step)(inputs)
@@ -117,6 +130,46 @@ class ImexRk3Sil(DinosaurIntegrator):
         time_step=time_step,
         integrator=time_integration.imex_rk_sil3,  # pyrefly: ignore[bad-argument-type]
     )
+
+
+class SemiLagrangianCrankNicolsonRK2(DinosaurIntegrator):
+  """Semi-Lagrangian Crank-Nicolson RK2 time integrator.
+
+  Wraps `time_integration.semi_lagrangian_crank_nicolson_rk2`. Requires an
+  equation implementing `SemiLagrangianImplicitExplicitODE` (e.g.
+  `atmosphere.equations.SemiLagrangianPrimitiveEquations`, possibly composed
+  with explicit equations via `equations.ComposedSemiLagrangianODE`).
+
+  Attributes:
+    off_centering: off-centering parameter ε ≥ 0 shifting weight from the
+      departure to the arrival side of the trapezoidal rule.
+    warm_start_corrector: whether to warm-start the corrector stage departure
+      points from the predictor stage.
+  """
+
+  def __init__(
+      self,
+      equation: SemiLagrangianImplicitExplicitODE,
+      time_step: float,
+      off_centering: float = 0.0,
+      warm_start_corrector: bool = True,
+  ):
+    super().__init__(
+        equation=equation,
+        time_step=time_step,
+        integrator=time_integration.semi_lagrangian_crank_nicolson_rk2,  # pyrefly: ignore[bad-argument-type]
+    )
+    self.off_centering = off_centering
+    self.warm_start_corrector = warm_start_corrector
+
+  def __call__(self, inputs: typing.Pytree) -> typing.Pytree:
+    step_fn = self.integrator(
+        self.equation,
+        self.time_step,
+        off_centering=self.off_centering,
+        warm_start_corrector=self.warm_start_corrector,
+    )
+    return step_fn(inputs)
 
 
 class ExplicitEuler(DinosaurIntegrator):
