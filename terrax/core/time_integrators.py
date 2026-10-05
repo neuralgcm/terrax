@@ -128,7 +128,7 @@ class ImexRk3Sil(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=time_integration.imex_rk_sil3,  # pyrefly: ignore[bad-argument-type]
+        integrator=time_integration.imex_rk_sil3,
     )
 
 
@@ -157,7 +157,7 @@ class SemiLagrangianCrankNicolsonRK2(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=time_integration.semi_lagrangian_crank_nicolson_rk2,  # pyrefly: ignore[bad-argument-type]
+        integrator=time_integration.semi_lagrangian_crank_nicolson_rk2,
     )
     self.off_centering = off_centering
     self.warm_start_corrector = warm_start_corrector
@@ -182,7 +182,7 @@ class ExplicitEuler(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=forward_euler,  # pyrefly: ignore[bad-argument-type]
+        integrator=forward_euler,
     )
 
 
@@ -196,5 +196,5 @@ class RungeKutta4(DinosaurIntegrator):
     super().__init__(
         equation=equation,
         time_step=time_step,
-        integrator=rk4,  # pyrefly: ignore[bad-argument-type]
+        integrator=rk4,
     )

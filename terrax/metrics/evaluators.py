@@ -378,7 +378,7 @@ class NestedEvaluators:
     metrics_results = {}
     for key, states in sorted(agg_states.items()):
       evaluator = self.evaluators.get(key, self.default_evaluator)
-      metrics_results[key] = evaluator.evaluate_metrics(  # pytype: disable=attribute-error
+      metrics_results[key] = evaluator.evaluate_metrics(  # pyrefly: ignore[missing-attribute]
           predictions.get(key, {}), targets.get(key, {}), states
       )
     return metrics_results
@@ -400,7 +400,7 @@ class NestedEvaluators:
     weights = self.evaluator_weights or {}
     for key, states in sorted(agg_states.items()):
       evaluator = self.evaluators.get(key, self.default_evaluator)
-      term_total = evaluator.evaluate_total(  # pytype: disable=attribute-error
+      term_total = evaluator.evaluate_total(  # pyrefly: ignore[missing-attribute]
           predictions.get(key, {}), targets.get(key, {}), states
       )
       total_loss += weights.get(key, 1.0) * term_total

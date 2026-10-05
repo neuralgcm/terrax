@@ -124,7 +124,7 @@ class PerVariableScaler(ScaleFactor):
   ) -> PerVariableScaler:
     """Returns a PerVariableScaler with ConstantScalers."""
     scalers = {
-        name: ConstantScaler(constant=w if cx.is_field(w) else cx.field(w))  # pyrefly: ignore[bad-argument-type]
+        name: ConstantScaler(constant=w if cx.is_field(w) else cx.field(w))
         for name, w in variable_weights.items()
     }
     return cls(scalers_by_name=scalers, default_scaler=default_scaler)  # pyrefly: ignore[bad-argument-type]

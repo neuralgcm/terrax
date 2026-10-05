@@ -115,7 +115,7 @@ def get_temperature_linearization_transform(
       ylm_grid = cx.coords.extract(
           abs_temp.coordinate, coordinates.SphericalHarmonicGrid
       )
-      del_temp = ylm_grid.add_constant(abs_temp, -ref_temperatures)  # pyrefly: ignore[missing-attribute]
+      del_temp = ylm_grid.add_constant(abs_temp, -ref_temperatures)
     else:
       del_temp = abs_temp - ref_temperatures
     return del_temp
@@ -144,7 +144,7 @@ def get_temperature_delinearization_transform(
       ylm_grid = cx.coords.extract(
           del_temp.coordinate, coordinates.SphericalHarmonicGrid
       )
-      abs_temp = ylm_grid.add_constant(del_temp, ref_temperatures)  # pyrefly: ignore[missing-attribute]
+      abs_temp = ylm_grid.add_constant(del_temp, ref_temperatures)
     else:
       abs_temp = del_temp + ref_temperatures
     return abs_temp
@@ -188,7 +188,7 @@ class _PrimitiveEquationsBase:
       assert isinstance(reference_temperatures, cx.Field)  # make pytype happy.
       t_ref_tuple = tuple(float(t) for t in reference_temperatures.data)  # pyrefly: ignore[bad-argument-type]
     else:
-      t_ref_tuple = tuple(reference_temperatures)  # pyrefly: ignore[bad-argument-type]
+      t_ref_tuple = tuple(reference_temperatures)
       reference_temperatures = cx.field(np.array(t_ref_tuple), levels)
 
     self.ylm_map = ylm_map
@@ -263,7 +263,7 @@ class _PrimitiveEquationsBase:
 
   @property
   def T_ref(self) -> typing.Array:  # pylint: disable=invalid-name
-    return self.primitive_equation.T_ref  # pyrefly: ignore[missing-attribute]
+    return self.primitive_equation.T_ref
 
   def _to_primitive_equations_state(
       self, inputs: dict[str, cx.Field]
@@ -273,11 +273,11 @@ class _PrimitiveEquationsBase:
     tracers_dict = {k: inputs[k].data for k in self.tracer_names}
     log_surface_pressure = inputs['log_surface_pressure'].data[np.newaxis]
     return primitive_equations.State(
-        divergence=inputs['divergence'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        tracers=tracers_dict,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        divergence=inputs['divergence'].data,  # pyrefly: ignore[bad-argument-type]
+        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[bad-argument-type]
+        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[bad-argument-type]
+        tracers=tracers_dict,  # pyrefly: ignore[bad-argument-type]
+        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[bad-argument-type]
     )
 
   def _from_primitive_equations_state(
@@ -308,7 +308,7 @@ class _PrimitiveEquationsBase:
 
   def implicit_terms(self, state: dict[str, cx.Field]) -> dict[str, cx.Field]:
     return self._from_primitive_equations_state(
-        self.primitive_equation.implicit_terms(  # pyrefly: ignore[missing-attribute]
+        self.primitive_equation.implicit_terms(
             self._to_primitive_equations_state(state)
         )
     )
@@ -317,7 +317,7 @@ class _PrimitiveEquationsBase:
       self, state: dict[str, cx.Field], step_size: float
   ) -> dict[str, cx.Field]:
     return self._from_primitive_equations_state(
-        self.primitive_equation.implicit_inverse(  # pyrefly: ignore[missing-attribute]
+        self.primitive_equation.implicit_inverse(
             self._to_primitive_equations_state(state), step_size
         ),
         is_tendency=False,
@@ -608,7 +608,7 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
       assert isinstance(reference_temperatures, cx.Field)  # make pytype happy.
       t_ref_tuple = tuple(float(t) for t in reference_temperatures.data)  # pyrefly: ignore[bad-argument-type]
     else:
-      t_ref_tuple = tuple(reference_temperatures)  # pyrefly: ignore[bad-argument-type]
+      t_ref_tuple = tuple(reference_temperatures)
       reference_temperatures = cx.field(np.array(t_ref_tuple), levels)
 
     self.ylm_map = ylm_map
@@ -673,10 +673,10 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
     inputs = self.linearize_transform(inputs)  # temperature -> variation.
     log_surface_pressure = inputs['log_surface_pressure'].data[np.newaxis]
     return primitive_equations.State(
-        divergence=inputs['divergence'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
-        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[bad-argument-type, unexpected-keyword]
+        divergence=inputs['divergence'].data,  # pyrefly: ignore[bad-argument-type]
+        vorticity=inputs['vorticity'].data,  # pyrefly: ignore[bad-argument-type]
+        temperature_variation=inputs['temperature_variation'].data,  # pyrefly: ignore[bad-argument-type]
+        log_surface_pressure=log_surface_pressure,  # pyrefly: ignore[bad-argument-type]
     )
 
   def _from_primitive_equations_state(

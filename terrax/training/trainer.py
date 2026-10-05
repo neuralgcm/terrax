@@ -821,7 +821,7 @@ class RolloutTrainer:
       self, flat_spec: DataSpec
   ) -> tuple[tuple[int, ...], tuple[DataSpec, ...]]:
     """Returns nested steps and specs from `flat_spec` with timedelta coords."""
-    dt = self.model.timestep  # pytype: disable=attribute-error
+    dt = self.model.timestep
     t0 = np.timedelta64(0, 's')
     nested_specs = scan_utils.nested_scan_specs(flat_spec, dt=dt, ref_t0=t0)  # pyrefly: ignore[bad-argument-type]
     steps = scan_utils.nested_scan_steps(flat_spec, dt=dt, ref_t0=t0)  # pyrefly: ignore[bad-argument-type]
@@ -1412,7 +1412,7 @@ class RolloutTrainer:
       """Computes evaluation metrics for a batch of targets."""
       init_slice, loaded_targets = _prepare_inputs_and_targets(
           inputs,
-          self.model.timestep,  # pytype: disable=attribute-error
+          self.model.timestep,
           retrieve_fns,
           train_stage.queries_spec,
           batch_axis,  # pyrefly: ignore[bad-argument-type]
@@ -1444,7 +1444,7 @@ class RolloutTrainer:
       nested_evaluators = create_nested_evaluators(
           loss_evaluator,
           nested_targets_spec,
-          self.model.timestep,  # pytype: disable=attribute-error
+          self.model.timestep,
       )
       init_agg_states = self._create_initial_nested_agg_states(
           loss_evaluator,
@@ -1598,7 +1598,7 @@ class RolloutTrainer:
       """Computes evaluation statistics for a batch of targets."""
       init_slice, loaded_targets = _prepare_inputs_and_targets(
           inputs,
-          self.model.timestep,  # pytype: disable=attribute-error
+          self.model.timestep,
           retrieve_fns,
           eval_schema.queries_spec,
           batch_axis,  # pyrefly: ignore[bad-argument-type]
@@ -1637,7 +1637,7 @@ class RolloutTrainer:
         nested_metrics = create_nested_evaluators(
             eval_schema.metrics_evaluator,
             nested_targets_spec,
-            self.model.timestep,  # pytype: disable=attribute-error
+            self.model.timestep,
         )
         init_metrics_agg_states = self._create_initial_nested_agg_states(
             eval_schema.metrics_evaluator,
@@ -1653,7 +1653,7 @@ class RolloutTrainer:
         nested_losses = create_nested_evaluators(
             eval_schema.loss_evaluator,
             nested_targets_spec,
-            self.model.timestep,  # pytype: disable=attribute-error
+            self.model.timestep,
         )
         init_loss_agg_states = self._create_initial_nested_agg_states(
             eval_schema.loss_evaluator,
@@ -2104,7 +2104,7 @@ class RolloutTrainer:
       )
 
     opt_state, params, ema_state, non_params = experiment_state
-    ema_params, _ = self._ema_update(params, ema_state)  # pytype: disable=attribute-error  # jax-api-types
+    ema_params, _ = self._ema_update(params, ema_state)
 
     composite_args = {
         'params': wrap_pytree(params),
@@ -2251,7 +2251,7 @@ class RolloutTrainer:
     """
     with timing.Timer() as eval_timer:
       _, params, ema_state, non_params = experiment_state
-      ema_params, _ = self._ema_update(params, ema_state)  # pytype: disable=attribute-error  # jax-api-types
+      ema_params, _ = self._ema_update(params, ema_state)
 
       results = {}
 

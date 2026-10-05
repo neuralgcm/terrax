@@ -85,18 +85,16 @@ def _align_datasets(
     a: XarrayData, b: XarrayData
 ) -> tuple[XarrayData, XarrayData]:
   """Align two XarrayData objects using xarray.align with join='override'."""
-  # pytype: disable=bad-return-type
   if isinstance(a, xarray.Dataset):
-    return xarray.align(a, b, join='override')
+    return xarray.align(a, b, join='override')  # pyrefly: ignore[no-matching-overload]
   elif isinstance(a, xarray.DataTree):
-    return xarray.align(a, b, join='override')
-  # pytype: enable=bad-return-type
+    return xarray.align(a, b, join='override')  # pyrefly: ignore[no-matching-overload]
   else:
     aligned_a = {}
     aligned_b = {}
     for key in a:
       aligned_a[key], aligned_b[key] = xarray.align(  # pyrefly: ignore[no-matching-overload]
-          a[key], b[key], join='override'  # pyrefly: ignore[unsupported-operation]
+          a[key], b[key], join='override'
       )
     return aligned_a, aligned_b  # pyrefly: ignore[bad-return]
 

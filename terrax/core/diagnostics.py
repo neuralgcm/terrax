@@ -114,7 +114,7 @@ def _update_clock(
     dt: jdt.Timedelta, resolution: np.timedelta64
 ) -> tuple[jdt.Timedelta, jax.Array]:
   """Returns updated clock and a boolean indicating if resolution was reached."""
-  is_update_step = (dt >= resolution).data  # pytype: disable=attribute-error
+  is_update_step = (dt >= resolution).data
   recenter_timedelta = lambda t: t - resolution
   keep_timedelta = lambda t: t
   new_dt = jax.lax.cond(is_update_step, recenter_timedelta, keep_timedelta, dt)

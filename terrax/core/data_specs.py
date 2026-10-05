@@ -212,7 +212,7 @@ class CoordSpec:
     """
     if dim_match_rules is None:
       dim_match_rules = {}
-    dummy_timedelta = coordinates.TimeDelta(np.timedelta64(0, 's')[None])  # pyrefly: ignore[bad-index]
+    dummy_timedelta = coordinates.TimeDelta(np.timedelta64(0, 's')[None])
     delta_dim = dummy_timedelta.dims[0]
     if (
         delta_dim in dim_match_rules
@@ -223,7 +223,7 @@ class CoordSpec:
           f'"{AxisMatchRules.TYPE}" for "{delta_dim}" dimension.'
       )
     dim_match_rules |= {delta_dim: AxisMatchRules.TYPE}
-    return cls(  # pytype: disable=wrong-arg-types
+    return cls(
         coord=cx.coords.compose(dummy_timedelta, coord),
         dim_match_rules=dim_match_rules,
         optional_dims=(delta_dim,) if optional_timedelta else (),
@@ -233,7 +233,7 @@ class CoordSpec:
   def with_given_timedelta(
       cls,
       coord: cx.Coordinate,
-      timedelta: np.ndarray = np.timedelta64(0, 's')[None],  # pyrefly: ignore[bad-index]
+      timedelta: np.ndarray = np.timedelta64(0, 's')[None],
       dim_match_rules: dict[str, AxisMatchRules] | None = None,
       optional_timedelta: bool = False,
   ):
@@ -261,7 +261,7 @@ class CoordSpec:
           f' rule "{AxisMatchRules.SUPERSET}" for "{delta_dim}" dimension.'
       )
     dim_match_rules |= {delta_dim: AxisMatchRules.SUPERSET}
-    return cls(  # pytype: disable=wrong-arg-types
+    return cls(
         coord=cx.coords.compose(dummy_timedelta, coord),
         dim_match_rules=dim_match_rules,
         optional_dims=(delta_dim,) if optional_timedelta else (),
@@ -485,14 +485,14 @@ def get_nested_coord_types(
 def unwrap_optional(spec: T | OptionalSpec[T]) -> tuple[T, bool]:
   """Returns underlying spec and a bool indicating if spec is Optional."""
   is_optional = isinstance(spec, OptionalSpec)
-  inner_spec = spec.spec if is_optional else spec  # pytype: disable=attribute-error
+  inner_spec = spec.spec if is_optional else spec
   return inner_spec, is_optional
 
 
 def _maybe_unwrap_field_spec(spec: T | FieldInQuerySpec[T]) -> tuple[T, bool]:
   """Returns underlying spec and a bool indicating field in query request."""
   is_field_spec = isinstance(spec, FieldInQuerySpec)
-  inner_spec = spec.spec if is_field_spec else spec  # pytype: disable=attribute-error
+  inner_spec = spec.spec if is_field_spec else spec
   return inner_spec, is_field_spec
 
 
@@ -523,7 +523,7 @@ def validate_inputs(
       if isinstance(inner_spec, cx.Coordinate):
         inner_spec = CoordSpec(inner_spec)
       if isinstance(inner_spec, CoordSpec):
-        inner_spec.validate_compatible(data_coord)  # pyrefly: ignore[bad-argument-type]
+        inner_spec.validate_compatible(data_coord)
       else:
         raise ValueError(
             f'Got in_spec entry {var_spec} of unsupported type'

@@ -103,7 +103,7 @@ class FieldTransformABC(TransformABC):
   ) -> dict[str, cx.Field] | cx.Field:
     if cx.is_field(inputs):
       return self._transform_field(inputs)
-    return {k: self._transform_field(v) for k, v in inputs.items()}  # pyrefly: ignore[missing-attribute]
+    return {k: self._transform_field(v) for k, v in inputs.items()}
 
   @abc.abstractmethod
   def _transform_field(self, field: cx.Field) -> cx.Field:
@@ -481,7 +481,7 @@ class FilterByCoord(PytreeTransformABC):
       raise ValueError('At least one of `coords` or `types` must be provided.')
     # Standardize `coords` and `types` representation.
     coords = () if self.coords is None else self.coords
-    self.coords = (coords,) if cx.is_coord(coords) else tuple(coords)  # pyrefly: ignore[bad-argument-type]
+    self.coords = (coords,) if cx.is_coord(coords) else tuple(coords)
     types = () if self.types is None else self.types
     self.types = (types,) if isinstance(types, type) else tuple(types)
 
@@ -707,7 +707,7 @@ class ReduceMean(PytreeFieldTransformABC):
     if grid is not None:
       spatial_dims = dim_names & {'latitude', 'longitude'}
       if spatial_dims:
-        field = grid.mean(field, dims=tuple(spatial_dims))  # pyrefly: ignore[missing-attribute]
+        field = grid.mean(field, dims=tuple(spatial_dims))
         dim_names -= spatial_dims
 
     if dim_names:
@@ -1481,7 +1481,7 @@ class ComputeMasks(PytreeTransformABC):
         raise ValueError('No masks computed to combine.')
       combine = jnp.logical_and if combine_method == 'all' else jnp.logical_or
       combined = functools.reduce(cx.cmap(combine), outputs.values())
-      return {self.output_key: combined}  # pyrefly: ignore[bad-assignment, bad-return]
+      return {self.output_key: combined}  # pyrefly: ignore[bad-assignment]
     return outputs
 
 
@@ -2026,14 +2026,12 @@ class ToModalWithDerivatives(nnx.Pytree):
         del2_key = typing.KeyWithCosLatFactor(
             name + f'_del2_{att}', cos_lat_order
         )
-        # pytype: disable=wrong-arg-types
         grads = {
             dlon_key: r * d_x_dlon,
             dlat_key: r * d_x_dlat,
             del2_key: r * r * laplacian,
         }
         features |= filter_module.filter_modal(grads)
-        # pytype: enable=wrong-arg-types
     return features
 
   def output_shapes(
@@ -2666,7 +2664,7 @@ class NestedTransform(nnx.Module, pytree=False):
         if isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], str):
           self.transforms[k] = v
         else:
-          self.transforms[k] = (k, v)  # pyrefly: ignore[unsupported-operation]
+          self.transforms[k] = (k, v)
     else:
       if default_transform is not None:
         raise ValueError(

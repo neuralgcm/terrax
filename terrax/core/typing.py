@@ -74,7 +74,7 @@ class Auxiliary(Generic[T]):
 def unwrap_auxiliary(spec: T | Auxiliary[T]) -> tuple[T, bool]:
   """Returns underlying spec and a bool indicating if spec is Auxiliary."""
   is_auxiliary = isinstance(spec, Auxiliary)
-  inner = spec.spec if is_auxiliary else spec  # pytype: disable=attribute-error
+  inner = spec.spec if is_auxiliary else spec
   return inner, is_auxiliary
 
 

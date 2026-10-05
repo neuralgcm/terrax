@@ -144,7 +144,7 @@ def _get_shared_time_axis(
     all_data: dict[str, xarray.Dataset],
 ) -> pd.DatetimeIndex:
   """Returns the shared time axis across all datasets."""
-  time_axes = [data.indexes['time'] for data in all_data.values()]  # pytype: disable=attribute-error  # jax-api-types
+  time_axes = [data.indexes['time'] for data in all_data.values()]
   time_axes = cast(list[pd.DatetimeIndex], time_axes)
   time = time_axes[0]
   for time_axis in time_axes[1:]:
@@ -1220,7 +1220,7 @@ class DataLoader:
     data = self._read_model_parallel_dataset(
         all_data,
         read_shard,
-        batch_size_per_device,  # pytype: disable=attribute-error  # jax-api-types
+        batch_size_per_device,
         from_xarray_fn=from_xr,
     )
     if data_buffer is not None:

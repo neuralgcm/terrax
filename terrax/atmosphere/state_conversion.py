@@ -183,7 +183,7 @@ def _lapse_rate_below_lowest_level(
       (coordinates.SigmaLevels, coordinates.HybridLevels),
   )
   lowest = lambda f: f.isel({source_levels: -1})
-  p_source = source_levels.pressure_centers(surface_pressure, sim_units)  # pyrefly: ignore[missing-attribute]
+  p_source = source_levels.pressure_centers(surface_pressure, sim_units)
   p_low = lowest(p_source)
   t_low = lowest(temperature)
   z_low = lowest(geopotential)

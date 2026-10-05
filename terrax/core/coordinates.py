@@ -110,7 +110,7 @@ class TimeDelta(cx.Coordinate):
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
   ) -> tuple[dict[str, Any], set[str]]:
-    return coordax.experimental.map_indexers_using_ticks(  # pyrefly: ignore[bad-return]
+    return coordax.experimental.map_indexers_using_ticks(
         self, indexers, ticks_are_sorted=True, method=method
     )
 
@@ -781,7 +781,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
   ) -> cx.Field:
     """Adds the constant `c` to the field `x` in the spectral basis."""
     if not cx.is_field(c):
-      c = cx.field(jnp.squeeze(c))  # pyrefly: ignore[bad-argument-type]
+      c = cx.field(jnp.squeeze(c))
     assert isinstance(c, cx.Field)  # make pytype happy.
     if c.positional_shape:
       raise ValueError(
@@ -1396,7 +1396,7 @@ class PressureLevels(cx.Coordinate):
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
   ) -> tuple[dict[str, Any], set[str]]:
-    return coordax.experimental.map_indexers_using_ticks(  # pyrefly: ignore[bad-return]
+    return coordax.experimental.map_indexers_using_ticks(
         self,
         indexers,
         ticks_are_sorted=True,
@@ -1906,7 +1906,7 @@ class SoilLevels(cx.Coordinate):
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
   ) -> tuple[dict[str, Any], set[str]]:
-    return coordax.experimental.map_indexers_using_ticks(  # pyrefly: ignore[bad-return]
+    return coordax.experimental.map_indexers_using_ticks(
         self,
         indexers,
         ticks_are_sorted=True,

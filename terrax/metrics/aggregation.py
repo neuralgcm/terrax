@@ -31,7 +31,6 @@ from terrax.metrics import binning
 from terrax.metrics import scaling
 from terrax.metrics import weighting
 
-# pytype: disable=invalid-annotation
 
 
 @functools.partial(
@@ -98,7 +97,7 @@ class AggregationState:
       cls, aggregation_states: Sequence[AggregationState]
   ) -> AggregationState:
     """Sums sequence of aggregation states."""
-    return sum(aggregation_states, start=cls.empty())
+    return sum(aggregation_states, start=cls.empty())  # pyrefly: ignore[no-matching-overload]
 
   def mean_statistics(self) -> dict[str, dict[str, cx.Field]]:
     """Returns the statistics normalized by their corresponding weights."""
@@ -141,7 +140,7 @@ class AggregationState:
 def _is_present(dim: cx.Coordinate | str, field: cx.Field) -> bool:
   """Returns True if dim is present in field's dims/axes, False otherwise."""
   if isinstance(dim, cx.Coordinate):
-    return all(ax == field.axes[ax.dims[0]] for ax in dim.axes)
+    return all(ax == field.axes[ax.dims[0]] for ax in dim.axes)  # pyrefly: ignore[bad-index]
   else:
     return dim in field.dims
 

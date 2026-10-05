@@ -202,7 +202,7 @@ class Scale(abc.Mapping):
     """
     scaling_factor = self._scaling_factor(unit.dimensionality)
     dimensionalized = value * scaling_factor
-    return dimensionalized.to(unit)  # pytype: disable=attribute-error  # jax-ndarray
+    return dimensionalized.to(unit)
 
 
 DEFAULT_SCALE = Scale(
