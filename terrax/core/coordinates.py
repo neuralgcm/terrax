@@ -603,6 +603,66 @@ class LonLatGrid(cx.Coordinate):
     """Equiangular linear grid resolving up to wavenumber 120."""
     return cls.construct_equiangular_linear(max_wavenumber=120, **kwargs)
 
+  # F* grids are regular Gaussian grids named by the number of latitude nodes
+  # between a pole and the equator, i.e. F<N> has shape (4N, 2N). This follows
+  # ECMWF's "F<N>" naming for full (regular) Gaussian grids. They are named by
+  # nodal resolution rather than by spectral truncation.
+  #
+  # Correspondence with spectral names: F16 == T21 == TL31, F24 == T31 == TL47,
+  # F32 == T42 == TL63, F48 == TL95, F64 == T85 == TL127.
+  #
+  # TODO(dkochkov): Consider upstreaming coarse grids to dinosaur.
+
+  @classmethod
+  def F2(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 8 x 4 nodes (~45 deg)."""
+    return cls.construct(gaussian_nodes=2, **kwargs)
+
+  @classmethod
+  def F4(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 16 x 8 nodes (~22.5 deg)."""
+    return cls.construct(gaussian_nodes=4, **kwargs)
+
+  @classmethod
+  def F6(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 24 x 12 nodes (~15 deg)."""
+    return cls.construct(gaussian_nodes=6, **kwargs)
+
+  @classmethod
+  def F8(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 32 x 16 nodes (~11.25 deg)."""
+    return cls.construct(gaussian_nodes=8, **kwargs)
+
+  @classmethod
+  def F12(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 48 x 24 nodes (~7.5 deg)."""
+    return cls.construct(gaussian_nodes=12, **kwargs)
+
+  @classmethod
+  def F16(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 64 x 32 nodes (~5.6 deg), same as T21."""
+    return cls.construct(gaussian_nodes=16, **kwargs)
+
+  @classmethod
+  def F24(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 96 x 48 nodes (~3.75 deg), same as T31."""
+    return cls.construct(gaussian_nodes=24, **kwargs)
+
+  @classmethod
+  def F32(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 128 x 64 nodes (~2.8 deg), same as TL63."""
+    return cls.construct(gaussian_nodes=32, **kwargs)
+
+  @classmethod
+  def F48(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 192 x 96 nodes (~1.9 deg), same as TL95."""
+    return cls.construct(gaussian_nodes=48, **kwargs)
+
+  @classmethod
+  def F64(cls, **kwargs) -> LonLatGrid:
+    """Gaussian grid with 256 x 128 nodes (~1.4 deg), same as TL127."""
+    return cls.construct(gaussian_nodes=64, **kwargs)
+
   def to_xarray(self) -> dict[str, xarray.Variable]:
     variables = super().to_xarray()
     metadata = dict(

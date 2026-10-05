@@ -322,6 +322,22 @@ class CoordinatesMethodsTest(parameterized.TestCase):
     integral = grid.integrate(field, radius=radius)
     np.testing.assert_allclose(integral.data, 4 * np.pi * radius**2, rtol=1e-5)
 
+  @parameterized.parameters(2, 4, 6, 8, 12, 16, 24, 32, 48, 64)
+  def test_lon_lat_grid_gaussian_grids(self, n):
+    grid = getattr(coordinates.LonLatGrid, f'F{n}')()
+    self.assertEqual(grid.shape, (4 * n, 2 * n))
+    self.assertEqual(grid.latitude_spacing, 'gauss')
+    field = cx.field(np.ones(grid.shape), grid)
+    np.testing.assert_allclose(grid.mean(field).data, 1.0, rtol=1e-5)
+
+  def test_lon_lat_grid_gaussian_grid_aliases(self):
+    grid_cls = coordinates.LonLatGrid
+    self.assertEqual(grid_cls.F16(), grid_cls.T21())
+    self.assertEqual(grid_cls.F24(), grid_cls.T31())
+    self.assertEqual(grid_cls.F32(), grid_cls.TL63())
+    self.assertEqual(grid_cls.F48(), grid_cls.TL95())
+    self.assertEqual(grid_cls.F64(), grid_cls.TL127())
+
   def test_lon_lat_grid_partial_integrate(self):
     n_lon, n_lat = 64, 32
     grid = coordinates.LonLatGrid(
