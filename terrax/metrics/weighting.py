@@ -79,6 +79,13 @@ class GridAreaWeighting(WeightingFromScaler, scaling.GridAreaScaler):
 
 
 @dataclasses.dataclass
+class SigmoidWavenumberWeighting(
+    WeightingFromScaler, scaling.SigmoidWavenumberScaler
+):
+  """Weighting that returns wavenumber weights following a sigmoid profile."""
+
+
+@dataclasses.dataclass
 class ConstantWeighting(WeightingFromScaler, scaling.ConstantScaler):
   """Weighting that returns user-provided constant weights.
 

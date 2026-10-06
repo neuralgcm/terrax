@@ -189,5 +189,116 @@ class GeneralizedLeadTimeScalerTest(parameterized.TestCase):
       ).scales(f)
 
 
+class SigmoidWavenumberScalerTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='number',
+          ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
+          cutoff_wavenumber=18,
+          cutoff_fraction=None,
+          expected_cutoff=18,
+      ),
+      dict(
+          testcase_name='dict',
+          ylm_grid=coordinates.SphericalHarmonicGrid.TL63(),
+          cutoff_wavenumber={coordinates.SphericalHarmonicGrid.TL63(): 50},
+          cutoff_fraction=None,
+          expected_cutoff=50,
+      ),
+      dict(
+          testcase_name='dict_matches_padded_grid',
+          ylm_grid=coordinates.SphericalHarmonicGrid(
+              longitude_wavenumbers=22,
+              total_wavenumbers=23,
+              wavenumber_padding=(2, 1),
+          ),
+          cutoff_wavenumber={coordinates.SphericalHarmonicGrid.T21(): 18},
+          cutoff_fraction=None,
+          expected_cutoff=18,
+      ),
+      dict(
+          testcase_name='fraction',
+          ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
+          cutoff_wavenumber=None,
+          cutoff_fraction=0.75,
+          expected_cutoff=0.75 * 21,
+      ),
+      dict(
+          testcase_name='dict_fallback_to_fraction',
+          ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
+          cutoff_wavenumber={coordinates.SphericalHarmonicGrid.TL63(): 50},
+          cutoff_fraction=0.75,
+          expected_cutoff=0.75 * 21,
+      ),
+  )
+  def test_sigmoid_profile(
+      self, ylm_grid, cutoff_wavenumber, cutoff_fraction, expected_cutoff
+  ):
+    field = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    scaler = scaling.SigmoidWavenumberScaler(
+        cutoff_wavenumber=cutoff_wavenumber, cutoff_fraction=cutoff_fraction
+    )
+    scales = scaler.scales(field)
+    ls = ylm_grid.fields['total_wavenumber']
+    mask = ylm_grid.fields['mask']
+    zeros = cx.field(np.zeros(ylm_grid.shape), ylm_grid)
+    # Coordinates match `ylm_grid` and scales vanish for l >= l_cutoff.
+    cx.testing.assert_fields_allclose(scales * (ls >= expected_cutoff), zeros)
+    # Scales vanish on padded modes.
+    cx.testing.assert_fields_allclose(scales * ~mask, zeros)
+    # Scale at l = 0 is 1.0 and decreases monotonically with l.
+    m0_scales = scales.isel(longitude_wavenumber=0)
+    cx.testing.assert_fields_allclose(
+        m0_scales.isel(total_wavenumber=0), cx.field(1.0)
+    )
+    self.assertTrue(np.all(np.diff(m0_scales.data) <= 1e-6))
+
+  def test_missing_from_dict_without_fraction_raises(self):
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    field = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    scaler = scaling.SigmoidWavenumberScaler(
+        cutoff_wavenumber={coordinates.SphericalHarmonicGrid.TL63(): 50}
+    )
+    with self.assertRaisesRegex(ValueError, 'not found in'):
+      scaler.scales(field)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='nothing_set',
+          cutoff_wavenumber=None,
+          cutoff_fraction=None,
+          regex='At least one of',
+      ),
+      dict(
+          testcase_name='number_and_fraction',
+          cutoff_wavenumber=18,
+          cutoff_fraction=0.75,
+          regex='only used as a fallback',
+      ),
+  )
+  def test_invalid_cutoff_raises(
+      self, cutoff_wavenumber, cutoff_fraction, regex
+  ):
+    with self.assertRaisesRegex(ValueError, regex):
+      scaling.SigmoidWavenumberScaler(
+          cutoff_wavenumber=cutoff_wavenumber, cutoff_fraction=cutoff_fraction
+      )
+
+  def test_skip_missing_and_error(self):
+    grid = coordinates.LonLatGrid.T21()
+    field = cx.field(np.ones(grid.shape), grid)
+    scaler_skip = scaling.SigmoidWavenumberScaler(
+        cutoff_wavenumber=18, skip_missing=True
+    )
+    cx.testing.assert_fields_allclose(scaler_skip.scales(field), cx.field(1.0))
+
+    scaler_no_skip = scaling.SigmoidWavenumberScaler(
+        cutoff_wavenumber=18, skip_missing=False
+    )
+    with self.assertRaisesRegex(ValueError, 'No SphericalHarmonicGrid'):
+      scaler_no_skip.scales(field)
+
+
 if __name__ == '__main__':
   absltest.main()

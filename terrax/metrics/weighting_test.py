@@ -122,6 +122,33 @@ class WeightingTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(weights_no_match.data, 1.0)
 
+  def test_sigmoid_wavenumber_weighting(self):
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    field = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    weight_by = weighting.SigmoidWavenumberWeighting(cutoff_wavenumber=18)
+    weights = weight_by.weights(field)
+    ls = ylm_grid.fields['total_wavenumber']
+    mask = ylm_grid.fields['mask']
+    zeros = cx.field(np.zeros(ylm_grid.shape), ylm_grid)
+    cx.testing.assert_fields_allclose(weights * (ls >= 18), zeros)
+    cx.testing.assert_fields_allclose(weights * ~mask, zeros)
+    cx.testing.assert_fields_allclose(
+        weights.isel(longitude_wavenumber=0, total_wavenumber=0),
+        cx.field(1.0),
+    )
+
+    lon_lat_grid = coordinates.LonLatGrid.T21()
+    ll_field = cx.field(np.ones(lon_lat_grid.shape), lon_lat_grid)
+    cx.testing.assert_fields_allclose(
+        weight_by.weights(ll_field), cx.field(1.0)
+    )
+
+    no_skip_weighting = weighting.SigmoidWavenumberWeighting(
+        cutoff_wavenumber=18, skip_missing=False
+    )
+    with self.assertRaisesRegex(ValueError, 'No SphericalHarmonicGrid'):
+      no_skip_weighting.weights(ll_field)
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')

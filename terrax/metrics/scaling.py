@@ -158,14 +158,8 @@ class GridAreaScaler(ScaleFactor):
     del context  # unused.
     lon_lat_dims = ('longitude', 'latitude')
     ylm_dims = ('longitude_wavenumber', 'total_wavenumber')
-    if all(d in field.axes for d in lon_lat_dims):
-      grid = cx.coords.compose(*[field.axes.get(d) for d in lon_lat_dims])  # pyrefly: ignore[bad-argument-type]
-    elif all(d in field.axes for d in ylm_dims):
-      grid = cx.coords.compose(*[field.axes.get(d) for d in ylm_dims])  # pyrefly: ignore[bad-argument-type]
-    else:
-      grid = None
-
-    if isinstance(grid, coordinates.LonLatGrid):
+    if cx.contains_dims(field, *lon_lat_dims):
+      grid = cx.coords.extract(field.coordinate, coordinates.LonLatGrid)
 
       def get_weight(x):
         # Latitudes are in degrees, convert to radians for cosine.
@@ -183,9 +177,12 @@ class GridAreaScaler(ScaleFactor):
       lat_ax = lats.coordinate
       weights = get_weight(grid.fields['latitude'].untag(lat_ax)).tag(lat_ax)
       weights = weights.broadcast_like(grid)
-    elif isinstance(grid, coordinates.SphericalHarmonicGrid):
+    elif cx.contains_dims(field, *ylm_dims):
+      ylm_grid = cx.coords.extract(
+          field.coordinate, coordinates.SphericalHarmonicGrid
+      )
       # avoid counting padding towards overall weight by using mask.
-      weights = grid.fields['mask'].astype(jnp.float32)
+      weights = ylm_grid.fields['mask'].astype(jnp.float32)
     else:
       if self.skip_missing:
         weights = cx.field(1.0)
@@ -250,17 +247,115 @@ class WavenumberScaler(ScaleFactor):
   ) -> cx.Field:
     del field_name, context  # unused.
     ylm_dims = ('longitude_wavenumber', 'total_wavenumber')
-    if all(d in field.axes for d in ylm_dims):
-      grid = cx.coords.compose(*[field.axes.get(d) for d in ylm_dims])  # pyrefly: ignore[bad-argument-type]
-    else:
-      grid = None
-
-    if isinstance(grid, coordinates.SphericalHarmonicGrid):
-      return cx.field(grid.fields['mask'].data.sum() / (4 * np.pi))
-    elif self.skip_missing:
-      return cx.field(1.0)
-    else:
+    if not cx.contains_dims(field, *ylm_dims):
+      if self.skip_missing:
+        return cx.field(1.0)
       raise ValueError(f'No SphericalHarmonicGrid on {field=}')
+
+    ylm_grid = cx.coords.extract(
+        field.coordinate, coordinates.SphericalHarmonicGrid
+    )
+    return cx.field(ylm_grid.fields['mask'].data.sum() / (4 * np.pi))
+
+
+@dataclasses.dataclass
+class SigmoidWavenumberScaler(ScaleFactor):
+  """ScaleFactor that returns wavenumber weights following a sigmoid profile.
+
+  For fields with a `SphericalHarmonicGrid` coordinate, this scaler returns
+  total-wavenumber-dependent weights following a smooth low-pass sigmoid profile
+  that starts at 1.0 at l = 0, transitions around inflection_factor * l_cutoff
+  with width width_factor * l_cutoff, and strictly terminates (0.0) for
+  l >= l_cutoff, while masking out padded modes via `ylm_grid.fields['mask']`.
+
+  The cutoff wavenumber l_cutoff is determined by `cutoff_wavenumber` and
+  `cutoff_fraction`, at least one of which must be set:
+    * `cutoff_wavenumber` as a number sets l_cutoff directly.
+    * `cutoff_wavenumber` as a dict maps `SphericalHarmonicGrid`s to l_cutoff.
+      Grids are matched by resolution, ignoring padding and the spherical
+      harmonics method. If the grid is not in the dict, l_cutoff falls back to
+      `cutoff_fraction` if set, otherwise an error is raised.
+    * `cutoff_fraction` alone sets l_cutoff as a fraction of the grid's maximum
+      wavenumber.
+
+  Attributes:
+    cutoff_wavenumber: Total wavenumber at and above which weights are zero, or
+      a mapping from `SphericalHarmonicGrid` to such cutoff.
+    cutoff_fraction: Cutoff as a fraction of the grid's maximum wavenumber. Used
+      when `cutoff_wavenumber` is None or does not contain the grid.
+    inflection_factor: Inflection point l_0 as a fraction of l_cutoff.
+    width_factor: Transition width w as a fraction of l_cutoff.
+    skip_missing: If True, fields without a SphericalHarmonicGrid get scale 1.0.
+  """
+
+  cutoff_wavenumber: (
+      float | dict[coordinates.SphericalHarmonicGrid, float] | None
+  ) = None
+  cutoff_fraction: float | None = None
+  inflection_factor: float = 0.7
+  width_factor: float = 0.1
+  skip_missing: bool = True
+
+  def __post_init__(self):
+    if self.cutoff_wavenumber is None and self.cutoff_fraction is None:
+      raise ValueError(
+          'At least one of `cutoff_wavenumber` or `cutoff_fraction` must be'
+          ' set.'
+      )
+    if self.cutoff_fraction is not None and not isinstance(
+        self.cutoff_wavenumber, (dict, type(None))
+    ):
+      raise ValueError(
+          '`cutoff_fraction` is only used as a fallback for a dict'
+          f' `cutoff_wavenumber`, got {self.cutoff_wavenumber=} and'
+          f' {self.cutoff_fraction=}.'
+      )
+
+  def _get_cutoff(self, ylm_grid: coordinates.SphericalHarmonicGrid) -> float:
+    """Returns the cutoff wavenumber for `ylm_grid`."""
+    resolution = lambda g: (g.longitude_wavenumbers, g.total_wavenumbers)
+    if isinstance(self.cutoff_wavenumber, dict):
+      for key_grid, cutoff in self.cutoff_wavenumber.items():
+        if resolution(key_grid) == resolution(ylm_grid):
+          return float(cutoff)
+      if self.cutoff_fraction is None:
+        raise ValueError(
+            f'{ylm_grid=} not found in {self.cutoff_wavenumber=} and'
+            ' `cutoff_fraction` is not set.'
+        )
+    elif self.cutoff_wavenumber is not None:
+      return float(self.cutoff_wavenumber)
+    grid_max_wavenumber = ylm_grid.total_wavenumbers - 2
+    return float(self.cutoff_fraction * grid_max_wavenumber)  # pyrefly: ignore[unsupported-operation]
+
+  def scales(
+      self,
+      field: cx.Field,
+      field_name: str | None = None,
+      context: dict[str, cx.Field] | None = None,
+  ) -> cx.Field:
+    del field_name, context  # unused.
+    ylm_dims = ('longitude_wavenumber', 'total_wavenumber')
+    if not cx.contains_dims(field, *ylm_dims):
+      if self.skip_missing:
+        return cx.field(1.0)
+      raise ValueError(f'No SphericalHarmonicGrid on {field=}')
+
+    ylm_grid = cx.coords.extract(
+        field.coordinate, coordinates.SphericalHarmonicGrid
+    )
+    l_cutoff = self._get_cutoff(ylm_grid)
+    l_0 = self.inflection_factor * l_cutoff
+    width = self.width_factor * l_cutoff
+    sigmoid = lambda l: 1.0 / (1.0 + jnp.exp((l - l_0) / width))
+    s_0, s_cutoff = sigmoid(0.0), sigmoid(l_cutoff)
+
+    def _profile(l):
+      profile = jnp.maximum(0.0, sigmoid(l) - s_cutoff) / (s_0 - s_cutoff)
+      return jnp.where(l < l_cutoff, profile, 0.0)
+
+    ls = ylm_grid.fields['total_wavenumber'].astype(jnp.float32)
+    return ylm_grid.fields['mask'].astype(jnp.float32) * cx.cmap(_profile)(ls)
 
 
 @dataclasses.dataclass
