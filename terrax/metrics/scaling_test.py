@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for scaling."""
+"""Tests for statistic rescaling schemes in terrax.metrics.scaling."""
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import coordax as cx
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
@@ -298,6 +299,168 @@ class SigmoidWavenumberScalerTest(parameterized.TestCase):
     )
     with self.assertRaisesRegex(ValueError, 'No SphericalHarmonicGrid'):
       scaler_no_skip.scales(field)
+
+
+class LeadTimeScalerTest(parameterized.TestCase):
+
+  def test_lead_time_scaler(self):
+    time_coord = coordinates.TimeDelta(
+        np.array([0, 6, 12, 18]) * np.timedelta64(1, 'h')
+    )
+    field = cx.field(np.ones(time_coord.shape), time_coord)
+    scaler = scaling.LeadTimeScaler(
+        base_squared_error_in_hours=6.0, normalize_weights=False
+    )
+    scales = scaler.scales(field)
+    expected = cx.field(
+        1.0 / np.sqrt(np.array([1.0, 2.0, 3.0, 4.0])), time_coord
+    )
+    cx.testing.assert_fields_allclose(scales, expected, atol=1e-6)
+
+  def test_lead_time_scaler_with_context(self):
+    x = cx.SizedAxis('x', 1)
+    field = cx.field(np.ones(x.shape), x)
+    scaler = scaling.LeadTimeScaler(
+        base_squared_error_in_hours=6.0, normalize_weights=True
+    )
+    step_delta = jdt.Timedelta.from_timedelta64(np.timedelta64(6, 'h'))
+    n_steps = 4
+    times = cx.field(step_delta * jnp.arange(n_steps))
+    scaled_weights = []
+    for i in range(n_steps):
+      ctx = {
+          'timedelta': cx.field(step_delta * i),
+          'times': times,
+      }
+      scaled_weights.append(scaler.scales(field, context=ctx).data)
+    scaled_weights = np.array(scaled_weights)
+    np.testing.assert_allclose(np.sum(scaled_weights**2), 1.0, atol=1e-6)
+
+
+class CompileTimeEvalTest(parameterized.TestCase):
+
+  def test_grid_area_scaler_lowering_has_no_trig_ops(self):
+    grid = coordinates.LonLatGrid.T21()
+    field = cx.field(np.ones(grid.shape), grid)
+    scaler = scaling.GridAreaScaler()
+
+    def fn(f):
+      return scaler.scales(f).data
+
+    lowered_text = jax.jit(fn).lower(field).as_text()
+    self.assertNotIn('sine', lowered_text.lower())
+    self.assertNotIn('cosine', lowered_text.lower())
+
+  def test_sigmoid_wavenumber_scaler_lowering_has_no_exp_ops(self):
+    grid = coordinates.SphericalHarmonicGrid.T21()
+    field = cx.field(np.ones(grid.shape), grid)
+    scaler = scaling.SigmoidWavenumberScaler(cutoff_wavenumber=18)
+
+    def fn(f):
+      return scaler.scales(f).data
+
+    lowered_text = jax.jit(fn).lower(field).as_text()
+    self.assertNotIn('exponential', lowered_text.lower())
+
+  def test_lead_time_scalers_static_coord_lowering_has_no_sqrt_ops(self):
+    time_coord = coordinates.TimeDelta(
+        np.array([0, 6, 12, 18]) * np.timedelta64(1, 'h')
+    )
+    field = cx.field(np.ones(time_coord.shape), time_coord)
+    lt_scaler = scaling.LeadTimeScaler(base_squared_error_in_hours=6.0)
+    glt_scaler = scaling.GeneralizedLeadTimeScaler(
+        base_squared_error_in_hours=6.0,
+        asymptotic_norm=0.5,
+        norm_transition_timescale_in_hours=12.0,
+    )
+
+    for scaler in (lt_scaler, glt_scaler):
+      with self.subTest(scaler=type(scaler).__name__):
+        lowered_text = (
+            jax.jit(lambda f, s=scaler: s.scales(f).data)
+            .lower(field)
+            .as_text()
+        )
+        self.assertNotIn('sqrt', lowered_text.lower())
+
+  def test_coordinate_mask_scaler_jit_with_dynamic_context(self):
+    x = cx.SizedAxis('x', 4)
+    field = cx.field(np.ones(x.shape), x)
+    mask_deltas = np.array([6, 18]) * np.timedelta64(1, 'h')
+    mask_coord = coordinates.TimeDelta(mask_deltas)
+    mask_scaler = scaling.CoordinateMaskScaler(mask_coord=mask_coord)
+
+    step_delta = jdt.Timedelta.from_timedelta64(np.timedelta64(6, 'h'))
+
+    @jax.jit
+    def jitted_fn(f, step):
+      ctx = {'timedelta': cx.field(step_delta * step)}
+      return mask_scaler.scales(f, context=ctx)
+
+    for step_val in [1, 2]:
+      with self.subTest(step=step_val):
+        eager_ctx = {'timedelta': cx.field(step_delta * step_val)}
+        eager_res = mask_scaler.scales(field, context=eager_ctx)
+        jitted_res = jitted_fn(field, jnp.int32(step_val))
+        cx.testing.assert_fields_allclose(jitted_res, eager_res)
+
+  def test_lead_time_scaler_jit_with_dynamic_context(self):
+    x = cx.SizedAxis('x', 1)
+    field = cx.field(np.ones(x.shape), x)
+    scaler = scaling.LeadTimeScaler(
+        base_squared_error_in_hours=7.0, normalize_weights=True
+    )
+    step_delta = jdt.Timedelta.from_timedelta64(np.timedelta64(6, 'h'))
+    n_steps = 4
+    times = cx.field(step_delta * jnp.arange(n_steps))
+
+    @jax.jit
+    def jitted_fn(f, step):
+      ctx = {
+          'timedelta': cx.field(step_delta * step),
+          'times': times,
+      }
+      return scaler.scales(f, context=ctx)
+
+    for step_val in range(n_steps):
+      with self.subTest(step=step_val):
+        eager_ctx = {
+            'timedelta': cx.field(step_delta * step_val),
+            'times': times,
+        }
+        eager_res = scaler.scales(field, context=eager_ctx)
+        jitted_res = jitted_fn(field, jnp.int32(step_val))
+        cx.testing.assert_fields_allclose(jitted_res, eager_res, atol=1e-6)
+
+  def test_generalized_lead_time_scaler_jit_with_dynamic_context(self):
+    x = cx.SizedAxis('x', 1)
+    field = cx.field(np.ones(x.shape), x)
+    scaler = scaling.GeneralizedLeadTimeScaler(
+        base_squared_error_in_hours=7.0,
+        asymptotic_norm=0.5,
+        norm_transition_timescale_in_hours=18.0,
+    )
+    step_delta = jdt.Timedelta.from_timedelta64(np.timedelta64(6, 'h'))
+    n_steps = 4
+    times = cx.field(step_delta * jnp.arange(n_steps))
+
+    @jax.jit
+    def jitted_fn(f, step):
+      ctx = {
+          'timedelta': cx.field(step_delta * step),
+          'times': times,
+      }
+      return scaler.scales(f, context=ctx)
+
+    for step_val in range(n_steps):
+      with self.subTest(step=step_val):
+        eager_ctx = {
+            'timedelta': cx.field(step_delta * step_val),
+            'times': times,
+        }
+        eager_res = scaler.scales(field, context=eager_ctx)
+        jitted_res = jitted_fn(field, jnp.int32(step_val))
+        cx.testing.assert_fields_allclose(jitted_res, eager_res, atol=1e-6)
 
 
 if __name__ == '__main__':

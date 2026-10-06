@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import abc
+import contextlib
 import dataclasses
 import functools
 
@@ -25,6 +26,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from terrax.core import coordinates
+
+
+def _maybe_compile_time_eval(*values):
+  """Returns ensure_compile_time_eval context if no values are JAX tracers."""
+  if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(values)):
+    return contextlib.nullcontext()
+  return jax.ensure_compile_time_eval()
 
 
 @dataclasses.dataclass
@@ -175,8 +183,9 @@ class GridAreaScaler(ScaleFactor):
       get_weight = cx.cmap(get_weight)
       lats = grid.fields['latitude']
       lat_ax = lats.coordinate
-      weights = get_weight(grid.fields['latitude'].untag(lat_ax)).tag(lat_ax)
-      weights = weights.broadcast_like(grid)
+      with jax.ensure_compile_time_eval():
+        weights = get_weight(grid.fields['latitude'].untag(lat_ax)).tag(lat_ax)
+        weights = weights.broadcast_like(grid)
     elif cx.contains_dims(field, *ylm_dims):
       ylm_grid = cx.coords.extract(
           field.coordinate, coordinates.SphericalHarmonicGrid
@@ -210,18 +219,19 @@ class PressureLevelAtmosphericMassScaler(ScaleFactor):
   ) -> cx.Field:
     """Return weights extracted from the pressure level coordinate."""
     del field_name, context  # unused.
-    if 'pressure' not in field.dims:
-      return cx.field(1.0)
+    with jax.ensure_compile_time_eval():
+      if 'pressure' not in field.dims:
+        return cx.field(1.0)
 
-    pressure = field.axes['pressure']
-    padded = np.concatenate([
-        np.asarray([0.0]),
-        pressure.centers,  # pyrefly: ignore[missing-attribute]
-        np.asarray([self.standard_pressure]),
-    ])
-    # thickness is estimated as 0.5 * |p_{k+1} - p_{k-1}|.
-    thickness = (np.roll(padded, -1) - np.roll(padded, 1))[1:-1] / 2
-    return cx.field(thickness, pressure)
+      pressure = field.axes['pressure']
+      padded = np.concatenate([
+          np.asarray([0.0]),
+          pressure.centers,  # pyrefly: ignore[missing-attribute]
+          np.asarray([self.standard_pressure]),
+      ])
+      # thickness is estimated as 0.5 * |p_{k+1} - p_{k-1}|.
+      thickness = (np.roll(padded, -1) - np.roll(padded, 1))[1:-1] / 2
+      return cx.field(thickness, pressure)
 
 
 @dataclasses.dataclass
@@ -255,7 +265,8 @@ class WavenumberScaler(ScaleFactor):
     ylm_grid = cx.coords.extract(
         field.coordinate, coordinates.SphericalHarmonicGrid
     )
-    return cx.field(ylm_grid.fields['mask'].data.sum() / (4 * np.pi))
+    with jax.ensure_compile_time_eval():
+      return cx.field(ylm_grid.fields['mask'].data.sum() / (4 * np.pi))
 
 
 @dataclasses.dataclass
@@ -345,17 +356,18 @@ class SigmoidWavenumberScaler(ScaleFactor):
         field.coordinate, coordinates.SphericalHarmonicGrid
     )
     l_cutoff = self._get_cutoff(ylm_grid)
-    l_0 = self.inflection_factor * l_cutoff
-    width = self.width_factor * l_cutoff
-    sigmoid = lambda l: 1.0 / (1.0 + jnp.exp((l - l_0) / width))
-    s_0, s_cutoff = sigmoid(0.0), sigmoid(l_cutoff)
+    with jax.ensure_compile_time_eval():
+      l_0 = self.inflection_factor * l_cutoff
+      width = self.width_factor * l_cutoff
+      sigmoid = lambda l: 1.0 / (1.0 + jnp.exp((l - l_0) / width))
+      s_0, s_cutoff = sigmoid(0.0), sigmoid(l_cutoff)
 
-    def _profile(l):
-      profile = jnp.maximum(0.0, sigmoid(l) - s_cutoff) / (s_0 - s_cutoff)
-      return jnp.where(l < l_cutoff, profile, 0.0)
+      def _profile(l):
+        profile = jnp.maximum(0.0, sigmoid(l) - s_cutoff) / (s_0 - s_cutoff)
+        return jnp.where(l < l_cutoff, profile, 0.0)
 
-    ls = ylm_grid.fields['total_wavenumber'].astype(jnp.float32)
-    return ylm_grid.fields['mask'].astype(jnp.float32) * cx.cmap(_profile)(ls)
+      ls = ylm_grid.fields['total_wavenumber'].astype(jnp.float32)
+      return ylm_grid.fields['mask'].astype(jnp.float32) * cx.cmap(_profile)(ls)
 
 
 @dataclasses.dataclass
@@ -423,24 +435,29 @@ class CoordinateMaskScaler(ScaleFactor):
               f'{current_value.shape=}'
           )
         mask_values = mask_values_field.untag(dim_name)  # pyrefly: ignore[bad-argument-type]
-        is_present = (current_value == mask_values).data.any()
-        mask = cx.field(is_present)
+        with _maybe_compile_time_eval(current_value, mask_values):
+          is_present = (current_value == mask_values).data.any()
+          mask = cx.field(is_present)
         all_masks.append(mask)
       elif in_field:
         coord_from_field = field.axes[dim_name]  # pyrefly: ignore[bad-index]
         field_values = coord_from_field.fields[dim_name]  # pyrefly: ignore[bad-index]
         mask_values_data = mask_values_field.untag(dim_name)  # pyrefly: ignore[bad-argument-type]
-        is_present_broadcasted = field_values == mask_values_data
-        mask_for_dim = cx.cmap(lambda x: x.any())(is_present_broadcasted)
+        with jax.ensure_compile_time_eval():
+          is_present_broadcasted = field_values == mask_values_data
+          mask_for_dim = cx.cmap(lambda x: x.any())(is_present_broadcasted)
         all_masks.append(mask_for_dim)
 
     if not all_masks:
       return cx.field(self.unmasked_value)
 
-    final_mask = functools.reduce(lambda x, y: x & y, all_masks)
-    masked_v, unmasked_v = self.masked_value, self.unmasked_value
-    where_fn = lambda x: jnp.where(x, masked_v, unmasked_v).astype(jnp.float32)
-    return cx.cmap(where_fn)(final_mask)
+    with _maybe_compile_time_eval(*all_masks):
+      final_mask = functools.reduce(lambda x, y: x & y, all_masks)
+      masked_v, unmasked_v = self.masked_value, self.unmasked_value
+      where_fn = lambda x: (
+          jnp.where(x, masked_v, unmasked_v).astype(jnp.float32)
+      )
+      return cx.cmap(where_fn)(final_mask)
 
 
 @dataclasses.dataclass
@@ -519,20 +536,20 @@ class LeadTimeScaler(ScaleFactor):
       t = time_coord.deltas / one_hr_delta  # pyrefly: ignore[missing-attribute]
       all_timedeltas = t
 
-    inv_variance = self._compute_inv_variance(t)
     if self.normalize_weights:
-      if from_context:
+      with _maybe_compile_time_eval(all_timedeltas):
         norm_const = self._compute_inv_variance(all_timedeltas).sum()
-      else:
-        norm_const = inv_variance.sum()
-      inv_variance = inv_variance / norm_const
+    else:
+      norm_const = 1.0
 
-    inv_variance_sqrt = jnp.sqrt(inv_variance)
-    if self.weights_power is not None:
-      inv_variance_sqrt = inv_variance_sqrt**self.weights_power
-    if from_context:
-      return cx.field(inv_variance_sqrt)
-    return cx.field(inv_variance_sqrt, time_coord)
+    with _maybe_compile_time_eval(t, norm_const):
+      inv_variance = self._compute_inv_variance(t) / norm_const
+      inv_variance_sqrt = jnp.sqrt(inv_variance)
+      if self.weights_power is not None:
+        inv_variance_sqrt = inv_variance_sqrt**self.weights_power
+      if from_context:
+        return cx.field(inv_variance_sqrt)
+      return cx.field(inv_variance_sqrt, time_coord)
 
 
 @dataclasses.dataclass
@@ -636,14 +653,13 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
       t = time_coord.deltas / one_hr_delta  # pyrefly: ignore[missing-attribute]
       all_timedeltas = t
 
-    weights = self._compute_raw_weights(t)
-    max_t = jnp.max(all_timedeltas)
-    if from_context:
+    with _maybe_compile_time_eval(all_timedeltas):
+      max_t = jnp.max(all_timedeltas)
+      norm_scale = self._compute_normalization_scale(max_t)
       norm_const = jnp.mean(self._compute_raw_weights(all_timedeltas))
-    else:
-      norm_const = jnp.mean(weights)
-    weights = weights * self._compute_normalization_scale(max_t) / norm_const
 
-    if from_context:
-      return cx.field(weights)
-    return cx.field(weights, time_coord)
+    with _maybe_compile_time_eval(t, norm_scale, norm_const):
+      weights = self._compute_raw_weights(t) * norm_scale / norm_const
+      if from_context:
+        return cx.field(weights)
+      return cx.field(weights, time_coord)
