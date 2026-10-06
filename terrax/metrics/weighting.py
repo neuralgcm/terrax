@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 import dataclasses
 import functools
 
 import coordax as cx
 import jax.numpy as jnp
+from terrax.core import coordinates
 from terrax.metrics import scaling
 
 
@@ -83,6 +85,17 @@ class SigmoidWavenumberWeighting(
     WeightingFromScaler, scaling.SigmoidWavenumberScaler
 ):
   """Weighting that returns wavenumber weights following a sigmoid profile."""
+
+  @classmethod
+  def for_grids(
+      cls,
+      grids: Sequence[coordinates.SphericalHarmonicGrid],
+      cutoff_wavenumbers: Sequence[float],
+      **kwargs,
+  ) -> SigmoidWavenumberWeighting:
+    """See `scaling.SigmoidWavenumberScaler.for_grids`."""
+    # Defined here so that Fiddle serializes a reference to this module.
+    return super().for_grids(grids, cutoff_wavenumbers, **kwargs)
 
 
 @dataclasses.dataclass

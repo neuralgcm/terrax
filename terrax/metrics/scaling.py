@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 import contextlib
 import dataclasses
 import functools
@@ -321,6 +322,29 @@ class SigmoidWavenumberScaler(ScaleFactor):
           f' `cutoff_wavenumber`, got {self.cutoff_wavenumber=} and'
           f' {self.cutoff_fraction=}.'
       )
+
+  @classmethod
+  def for_grids(
+      cls,
+      grids: Sequence[coordinates.SphericalHarmonicGrid],
+      cutoff_wavenumbers: Sequence[float],
+      **kwargs,
+  ):
+    """Constructs scaler with per-grid cutoffs from parallel sequences.
+
+    This is useful in Fiddle configs, where grids are represented by unhashable
+    `fdl.Config` objects during tracing and hence cannot be used as dict keys.
+
+    Args:
+      grids: Spherical harmonic grids to set cutoffs for.
+      cutoff_wavenumbers: Cutoff wavenumbers corresponding to `grids`.
+      **kwargs: Other arguments passed to the constructor.
+
+    Returns:
+      Scaler with `cutoff_wavenumber` set to a mapping from grids to cutoffs.
+    """
+    cutoff_wavenumber = dict(zip(grids, cutoff_wavenumbers, strict=True))
+    return cls(cutoff_wavenumber=cutoff_wavenumber, **kwargs)
 
   def _get_cutoff(self, ylm_grid: coordinates.SphericalHarmonicGrid) -> float:
     """Returns the cutoff wavenumber for `ylm_grid`."""

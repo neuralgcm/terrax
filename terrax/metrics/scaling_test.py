@@ -321,6 +321,17 @@ class SigmoidWavenumberScalerTest(parameterized.TestCase):
     )
     self.assertTrue(np.all(np.diff(m0_scales.data) <= 1e-6))
 
+  def test_for_grids(self):
+    t21 = coordinates.SphericalHarmonicGrid.T21()
+    tl63 = coordinates.SphericalHarmonicGrid.TL63()
+    scaler = scaling.SigmoidWavenumberScaler.for_grids(
+        grids=(t21, tl63), cutoff_wavenumbers=(18, 50), width_factor=0.2
+    )
+    expected = scaling.SigmoidWavenumberScaler(
+        cutoff_wavenumber={t21: 18, tl63: 50}, width_factor=0.2
+    )
+    self.assertEqual(scaler, expected)
+
   def test_missing_from_dict_without_fraction_raises(self):
     ylm_grid = coordinates.SphericalHarmonicGrid.T21()
     field = cx.field(np.ones(ylm_grid.shape), ylm_grid)
