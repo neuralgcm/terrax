@@ -567,10 +567,14 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
 
   Attributes:
     base_squared_error_in_hours: Hours before ~linear variance growth starts.
+      Can be a scalar float or a `cx.Field` aligned with non-temporal dimensions
+      of the input field (e.g. `pressure` or `total_wavenumber`).
     asymptotic_squared_error_in_hours: Hours before variance starts to plateau.
+      Can be a scalar float, a `cx.Field`, or None.
     skip_missing: If True, fields without a timedelta coordinate get scale 1.0.
-    weights_power: Optional power to raise the weights. Can be used to scale
-      statistics that grow at a different rate.
+    weights_power: Optional power to raise the weights. Can be a scalar float or
+      a `cx.Field` to scale statistics that grow at different rates across
+      coordinates.
     asymptotic_norm: If set, the normalization of the mean scale is set to (1 +
       asymptotic_norm * ratio) / (1 + ratio), where ratio is the ratio of the
       total lead-time to the `norm_transition_timescale_in_hours`.
@@ -579,15 +583,15 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
       `(1 + asymptotic_norm) / 2` value.
   """
 
-  base_squared_error_in_hours: float
-  asymptotic_squared_error_in_hours: float | None = None
+  base_squared_error_in_hours: float | cx.Field
+  asymptotic_squared_error_in_hours: float | cx.Field | None = None
   skip_missing: bool = True
-  weights_power: float | None = None
+  weights_power: float | cx.Field | None = None
   asymptotic_norm: float | None = None
   norm_transition_power: float = 1.0
   norm_transition_timescale_in_hours: float | None = None
 
-  def _compute_raw_weights(self, t: np.ndarray | jax.Array) -> jax.Array:
+  def _compute_raw_weights(self, t: cx.Field) -> cx.Field:
     """Computes the unnormalized 1/std_dev weights."""
     if self.asymptotic_squared_error_in_hours is not None:
       t = t / (1 + t / self.asymptotic_squared_error_in_hours)
@@ -595,15 +599,15 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
     # Variance is assumed to grow linearly with our transformed time `t`.
     # weight ~ 1 / std_dev ~ 1 / sqrt(variance)
     inv_variance = 1 / (1 + t / self.base_squared_error_in_hours)
-    weights = jnp.sqrt(inv_variance)
+    weights = cx.cmap(jnp.sqrt)(inv_variance)
 
     if self.weights_power is not None:
       weights = weights**self.weights_power
     return weights
 
   def _compute_normalization_scale(
-      self, max_t: float | jax.Array
-  ) -> float | jax.Array:
+      self, max_t: cx.Field
+  ) -> float | cx.Field:
     """Computes the target normalization scale."""
     if self.asymptotic_norm is None:
       return 1.0
@@ -634,6 +638,17 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
         return cx.field(1.0)
       raise ValueError(f'TimeDelta coord not found on {field=} or in context')
 
+    params = (
+        self.base_squared_error_in_hours,
+        self.asymptotic_squared_error_in_hours,
+        self.weights_power,
+    )
+    for param in params:
+      if cx.is_field(param) and not set(param.dims).issubset(field.dims):
+        raise ValueError(
+            f'Parameter {param=} has dimensions not present in {field=}.'
+        )
+
     one_hr_delta = np.timedelta64(1, 'h')
     if from_context:
       assert isinstance(context, dict)  # make pytype happy.
@@ -642,24 +657,39 @@ class GeneralizedLeadTimeScaler(ScaleFactor):
             'Both "timedelta" and "times" must be present in the context, but'
             f' got: {context.keys()=}'
         )
-      timedelta_now = context['timedelta'].data
-      all_timedeltas = context['times'].data / one_hr_delta  # pyrefly: ignore[unsupported-operation]
+      timedelta_now = context['timedelta']
+      all_timedeltas = context['times']
       if timedelta_now.ndim != 0:
         raise ValueError(
             f'Expected scalar timedelta in context, got {timedelta_now.shape=}'
         )
-      t = timedelta_now / one_hr_delta  # pyrefly: ignore[unsupported-operation]
+      if all_timedeltas.ndim != 1:
+        raise ValueError(
+            f'Expected 1D times in context, got {all_timedeltas.shape=}'
+        )
+      with _maybe_compile_time_eval(timedelta_now):
+        t = timedelta_now / one_hr_delta  # pyrefly: ignore[unsupported-operation]
+      with _maybe_compile_time_eval(all_timedeltas):
+        all_times = all_timedeltas / one_hr_delta  # pyrefly: ignore[unsupported-operation]
     else:
-      t = time_coord.deltas / one_hr_delta  # pyrefly: ignore[missing-attribute]
-      all_timedeltas = t
+      all_timedeltas = time_coord.fields['timedelta']  # pyrefly: ignore[missing-attribute]
+      if all_timedeltas.ndim != 1:
+        raise ValueError(
+            f'Expected 1D timedelta coordinate, got {all_timedeltas.shape=}'
+        )
+      with jax.ensure_compile_time_eval():
+        all_times = all_timedeltas / one_hr_delta  # pyrefly: ignore[unsupported-operation]
+      t = all_times
 
-    with _maybe_compile_time_eval(all_timedeltas):
-      max_t = jnp.max(all_timedeltas)
+    with _maybe_compile_time_eval(all_times, *params):
+      t_coord = all_times.coordinate
+      max_t = cx.cmap(jnp.max)(all_times.untag(t_coord))
       norm_scale = self._compute_normalization_scale(max_t)
-      norm_const = jnp.mean(self._compute_raw_weights(all_timedeltas))
+      raw_weights = self._compute_raw_weights(all_times)
+      norm_const = cx.cmap(jnp.mean)(raw_weights.untag(t_coord))
 
-    with _maybe_compile_time_eval(t, norm_scale, norm_const):
-      weights = self._compute_raw_weights(t) * norm_scale / norm_const
-      if from_context:
-        return cx.field(weights)
-      return cx.field(weights, time_coord)
+    with _maybe_compile_time_eval(t, norm_scale, norm_const, *params):
+      raw_weight = (
+          self._compute_raw_weights(t) if from_context else raw_weights
+      )
+      return raw_weight * norm_scale / norm_const

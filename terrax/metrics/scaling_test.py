@@ -104,7 +104,7 @@ class GeneralizedLeadTimeScalerTest(parameterized.TestCase):
     for i in range(n_steps):
       ctx = {
           'timedelta': cx.field(step_delta * i),
-          'times': cx.field(step_delta * jnp.arange(n_steps)),
+          'times': cx.field(step_delta * jnp.arange(n_steps), 'timedelta'),
       }
       scaled_weights.append(scaler.scales(field, context=ctx).data)
     scaled_weights = np.array(scaled_weights)
@@ -188,6 +188,72 @@ class GeneralizedLeadTimeScalerTest(parameterized.TestCase):
       scaling.GeneralizedLeadTimeScaler(
           base_squared_error_in_hours=1.0, asymptotic_norm=0.5
       ).scales(f)
+
+  def test_field_parameters(self):
+    time_coord = coordinates.TimeDelta(
+        np.array([6, 12, 24, 48]) * np.timedelta64(1, 'h')
+    )
+    pressure = coordinates.PressureLevels([100, 500, 1000])
+    coord = cx.coords.compose(time_coord, pressure)
+    field = cx.field(np.ones(coord.shape), coord)
+    base_hours = cx.field(np.array([36.0, 8.0, 16.0]), pressure)
+    asymp_hours = cx.field(np.array([480.0, 200.0, 300.0]), pressure)
+    power = cx.field(np.array([1.0, 1.5, 1.2]), pressure)
+    scaler = scaling.GeneralizedLeadTimeScaler(
+        base_squared_error_in_hours=base_hours,
+        asymptotic_squared_error_in_hours=asymp_hours,
+        weights_power=power,
+    )
+    scales = scaler.scales(field)
+    self.assertEqual(scales.coordinate, coord)
+    # Each pressure level should independently normalize to mean 1.0 over time.
+    time_mean = cx.cmap(jnp.mean)(scales.untag(time_coord))
+    cx.testing.assert_fields_allclose(
+        time_mean, cx.field(np.ones(pressure.shape), pressure), atol=1e-6
+    )
+    # 500 hPa (fast decay) should have higher weight at 6h and lower at 48h than
+    # 100 hPa (slow decay).
+    fast_minus_slow = scales.sel(pressure=500) - scales.sel(pressure=100)
+    self.assertGreater(fast_minus_slow.isel(timedelta=0).data, 0)
+    self.assertLess(fast_minus_slow.isel(timedelta=-1).data, 0)
+
+  def test_field_parameters_in_context(self):
+    pressure = coordinates.PressureLevels([100, 500, 1000])
+    field = cx.field(np.ones(pressure.shape), pressure)
+    base_hours = cx.field(np.array([36.0, 8.0, 16.0]), pressure)
+    scaler = scaling.GeneralizedLeadTimeScaler(
+        base_squared_error_in_hours=base_hours,
+        weights_power=1.5,
+    )
+    step_delta = jdt.Timedelta.from_timedelta64(np.timedelta64(6, 'h'))
+    n_steps = 4
+    times = cx.field(step_delta * jnp.arange(1, n_steps + 1), 'timedelta')
+    scaled_weights = []
+    for i in range(1, n_steps + 1):
+      ctx = {
+          'timedelta': cx.field(step_delta * i),
+          'times': times,
+      }
+      step_scale = scaler.scales(field, context=ctx)
+      self.assertEqual(step_scale.dims, ('pressure',))
+      scaled_weights.append(step_scale.data)
+    scaled_weights = np.stack(scaled_weights, axis=0)
+    np.testing.assert_allclose(
+        scaled_weights.mean(axis=0), [1.0, 1.0, 1.0], atol=1e-6
+    )
+
+  def test_field_parameters_missing_dim_raises(self):
+    time_coord = coordinates.TimeDelta(
+        np.array([6, 12]) * np.timedelta64(1, 'h')
+    )
+    pressure = coordinates.PressureLevels([500, 1000])
+    field = cx.field(np.ones(time_coord.shape), time_coord)
+    base_hours = cx.field(np.array([8.0, 16.0]), pressure)
+    scaler = scaling.GeneralizedLeadTimeScaler(
+        base_squared_error_in_hours=base_hours
+    )
+    with self.assertRaisesRegex(ValueError, 'dimensions not present'):
+      scaler.scales(field)
 
 
 class SigmoidWavenumberScalerTest(parameterized.TestCase):
@@ -377,9 +443,7 @@ class CompileTimeEvalTest(parameterized.TestCase):
     for scaler in (lt_scaler, glt_scaler):
       with self.subTest(scaler=type(scaler).__name__):
         lowered_text = (
-            jax.jit(lambda f, s=scaler: s.scales(f).data)
-            .lower(field)
-            .as_text()
+            jax.jit(lambda f, s=scaler: s.scales(f).data).lower(field).as_text()
         )
         self.assertNotIn('sqrt', lowered_text.lower())
 
@@ -442,7 +506,7 @@ class CompileTimeEvalTest(parameterized.TestCase):
     )
     step_delta = jdt.Timedelta.from_timedelta64(np.timedelta64(6, 'h'))
     n_steps = 4
-    times = cx.field(step_delta * jnp.arange(n_steps))
+    times = cx.field(step_delta * jnp.arange(n_steps), 'timedelta')
 
     @jax.jit
     def jitted_fn(f, step):
