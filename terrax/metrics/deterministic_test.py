@@ -128,6 +128,29 @@ class DeterministicMetricsTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'missing_dims'):
       agg_state.metric_values(rmsb)
 
+  def test_rmsb_skipna(self):
+    time = cx.SizedAxis('time', 2)
+    space = cx.SizedAxis('space', 3)
+    # Third spatial point is NaN (e.g. masked ocean point in a land model).
+    errors_x = np.array([[1.0, -2.0, np.nan], [3.0, 2.0, np.nan]])
+    predictions = {'x': cx.field(errors_x, time, space)}
+    targets = {'x': cx.field(np.zeros_like(errors_x), time, space)}
+    mask_weights = weighting.ConstantWeighting(
+        constant=cx.field(np.array([3.0, 1.0, 0.0]), space)
+    )
+    rmsb = deterministic_metrics.RMSB(
+        rms_dims=('space',),
+        weight_by=(mask_weights,),
+        skipna=True,
+    )
+    aggregator = aggregation.Aggregator(dims_to_reduce=('time',), skipna=True)
+    statistics = base.compute_unique_statistics_for_all_metrics(
+        {'rmsb': rmsb}, predictions, targets
+    )
+    agg_state = aggregator.aggregate_statistics(statistics)
+    values = agg_state.metric_values(rmsb)
+    np.testing.assert_allclose(values['x'].data, 3.0**0.5, rtol=1e-6)
+
   def test_product_statistic(self):
     time = cx.SizedAxis('time', 3)
     x1_p = cx.field(np.array([1.0, -1.0, 0.5]), time)

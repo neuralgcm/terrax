@@ -117,13 +117,16 @@ class RMSB(base.PerVariableMetric):
 
   Attributes:
     rms_dims: Dimensions over which the squared bias is averaged.
-    weight_by: Sequence of `weighting.Weighting` instances whose product is
-      used to weight the squared bias when averaging over `rms_dims`, e.g.
+    weight_by: Sequence of `weighting.Weighting` instances whose product is used
+      to weight the squared bias when averaging over `rms_dims`, e.g.
       `(weighting.GridAreaWeighting(),)`.
+    skipna: If True, NaNs in the bias and weights are replaced with 0.0 before
+      averaging over `rms_dims` (useful when non-domain points contain NaNs).
   """
 
   rms_dims: tuple[str, ...] = ('longitude', 'latitude')
   weight_by: Sequence[weighting.Weighting] = ()
+  skipna: bool = False
 
   def __post_init__(self):
     self.weight_by = tuple(self.weight_by)
@@ -149,6 +152,11 @@ class RMSB(base.PerVariableMetric):
     for weighting_instance in self.weight_by:
       weights *= weighting_instance.weights(squared_bias)
     weights = weights.broadcast_like(squared_bias)
+    if self.skipna:
+      nan_mask = cx.cmap(jnp.isnan)(squared_bias) | cx.cmap(jnp.isnan)(weights)
+      where = cx.cmap(jnp.where)
+      squared_bias = where(nan_mask, 0.0, squared_bias)
+      weights = where(nan_mask, 0.0, weights)
     sum_over_dims = cx.cmap(jnp.sum)
     mean_squared_bias = sum_over_dims(
         (squared_bias * weights).untag(*self.rms_dims)

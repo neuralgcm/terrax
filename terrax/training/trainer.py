@@ -632,6 +632,7 @@ class EvalSchema:
   train_time_slice: tuple[str, str] | list[tuple[str, str]] | None
   eval_time_slice: tuple[str, str] | list[tuple[str, str]] | None
   loss_evaluator: EvaluatorLike | None = None
+  ensemble_axis: cx.SizedAxis | None = None
   name: str = dataclasses.field(kw_only=True)
 
 
@@ -1555,7 +1556,7 @@ class RolloutTrainer:
     batch_axis = self.data_loader.make_batch_axis(
         eval_schema.batch_size_per_device
     )
-    ensemble_axis = self.ensemble_axis
+    ensemble_axis = eval_schema.ensemble_axis or self.ensemble_axis
     model_state_scan_axes = nnx.StateAxes(
         {typing.SimulationVariable: nnx.Carry, ...: None}
     )
@@ -1607,7 +1608,7 @@ class RolloutTrainer:
       # Initializing the model state.
       [batch_size], [ensemble_size] = (
           batch_axis.shape,  # pyrefly: ignore[missing-attribute]
-          self.ensemble_axis.shape,
+          ensemble_axis.shape,
       )
       rng = train_utils.batch_and_ensemble_parallel_rng_key(
           batch_size=batch_size,
@@ -1615,7 +1616,7 @@ class RolloutTrainer:
           seeds=(seed, eval_step),
           mesh=self.spmd_mesh,
       )
-      rng = cx.field(rng, batch_axis, self.ensemble_axis)
+      rng = cx.field(rng, batch_axis, ensemble_axis)
       process_obs, model = self._merge_model_and_process_obs(
           process_def,
           process_params,
