@@ -27,6 +27,7 @@ from terrax.core import diagnostics
 from terrax.core import dynamic_io
 from terrax.core import module_utils
 from terrax.core import observation_operators
+from terrax.core import random_processes
 from terrax.core import transforms
 from terrax.core import typing
 from terrax.core import units
@@ -153,6 +154,13 @@ class DataModel(api.Model):
         _advance_diagnostic_clock(diagnostic, self.timestep)
 
     self._prognostic_vars.set_value(new_prognostics)
+
+    # Advance all random processes in the model at the end of the step.
+    rand_processes = module_utils.retrieve_subclass_modules(
+        self, random_processes.RandomProcessModule
+    )
+    for random_process in rand_processes:
+      random_process.advance()
 
   @module_utils.ensure_unchanged_state_structure
   def observe(self, queries: typing.Queries) -> typing.Observation:
