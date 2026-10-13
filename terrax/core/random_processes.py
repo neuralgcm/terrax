@@ -215,10 +215,7 @@ class RecordingSampler(Sampler):
     tape_axis = cx.get_coordinate_part(tape, self.tape_axis)
     tape_length = tape_axis.shape[0]
     idx = self.tape_position.get_value()
-    update_fn = lambda t, d, i: jnp.where(i < tape_length, t.at[i].set(d), t)
-    tape = tape.untag(tape_axis)
-    update_fn = cx.cmap(update_fn, out_axes=tape.dims)
-    updated_tape = update_fn(tape, draw, idx).tag(tape_axis)
+    updated_tape = cx.put(tape, tape_axis, idx, draw, mode='drop')
     self.tape.set_value(updated_tape)
     # Update tape position.
     clip_fn = cx.cmap(functools.partial(jnp.clip, max=tape_length))
@@ -295,7 +292,7 @@ class TapeSampler(Sampler):
     idx = self.tape_position.get_value()
     tape = self.tape.get_value()
     tape_axis = cx.get_coordinate_part(tape, self.tape_axis)
-    tape_draw = cx.cmap(lambda x, i: x[i])(tape.untag(tape_axis), idx)
+    tape_draw = cx.take(tape, tape_axis, idx, mode='clip')
     sampler_draw = self.sampler.draw(seed, self._sample_coord)
 
     if sampler_draw.coordinate != tape_draw.coordinate:
@@ -335,7 +332,7 @@ class TapeSampler(Sampler):
     mask = cx.field(jnp.arange(tape_length), tape_axis) < idx
     log_prob_fn = cx.cmap(self.sampler.distribution.log_prob)
     masked_log_prob = log_prob_fn(tape) * mask
-    return cx.cmap(jnp.sum)(masked_log_prob.untag(tape_axis, self.sample_coord))
+    return cx.reduce(jnp.sum, masked_log_prob, tape_axis, self._sample_coord)
 
 
 @dataclasses.dataclass

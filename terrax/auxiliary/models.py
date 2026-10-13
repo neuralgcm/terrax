@@ -138,7 +138,6 @@ class LabeledStateModel(StateModelABC):
     current_state = self.prognostics.get_value()
     data_vars = inputs.get(self.data_key, {})
     td_dim = 'timedelta'
-    slice_last_time = lambda f: cx.cmap(lambda a: a[-1])(f.untag(td_dim))
     new_state = {}
     for k in current_state:
       if k not in data_vars:
@@ -148,7 +147,7 @@ class LabeledStateModel(StateModelABC):
             f' {list(data_vars.keys())}'
         )
       field = data_vars[k]
-      new_state[k] = slice_last_time(field) if td_dim in field.dims else field
+      new_state[k] = field.isel({td_dim: -1}) if td_dim in field.dims else field
     self.prognostics.set_value(new_state)
     self._steps_done.set_value(cx.field(jnp.zeros((), dtype=jnp.int32)))
     self._staged_updates.set_value(self._make_zero_updates())

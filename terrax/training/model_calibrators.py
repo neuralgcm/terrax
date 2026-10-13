@@ -145,7 +145,7 @@ class CollectNormalizationStats(ModelCalibrator):
     )
 
     # Helper to select a single last time slice in trajectory.
-    sel_td_in_f = lambda f: cx.cmap(lambda x: x[-1])(f.untag('timedelta'))
+    sel_td_in_f = lambda f: f.isel(timedelta=-1)
     sel_timedelta = lambda t: jax.tree.map(sel_td_in_f, t, is_leaf=cx.is_field)
 
     for i, (inputs, dynamic_data) in enumerate(data_iter):

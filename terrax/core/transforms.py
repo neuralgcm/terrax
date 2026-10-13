@@ -139,32 +139,6 @@ def _masked_to_mean(x: cx.Field, mask: cx.Field) -> cx.Field:
   return result.tag(mask_coord)
 
 
-# TODO(dkochkov): Consider moving this to coordax.
-def _align_axes_order(
-    *axis_order: str | cx.Coordinate,
-    reference: cx.Coordinate | cx.Field,
-    allow_missing: bool = False,
-) -> tuple[str | cx.Coordinate, ...]:
-  """Aligns the sequence of axes/coordinates to match their order in reference."""
-  ref_dims = reference.dims
-  ref_dim_indices = {d: i for i, d in enumerate(ref_dims)}
-
-  valid_axes = []
-  valid_indices = []
-  for ax in axis_order:
-    ax_dims = (ax,) if isinstance(ax, str) else ax.dims
-    indices = [ref_dim_indices[d] for d in ax_dims if d in ref_dim_indices]
-    if not indices:
-      if not allow_missing:
-        raise ValueError(f'Axis {ax} not found in reference dims {ref_dims}')
-    else:
-      valid_axes.append(ax)
-      valid_indices.append(min(indices))
-
-  combined = sorted(zip(valid_indices, valid_axes), key=lambda x: x[0])
-  return tuple(ax for _, ax in combined)
-
-
 ApplyMaskMethods = (
     Literal['zero_multiply', 'nan_to_0', 'nan_to_mean', 'set_nan']
     | Callable[[cx.Field, cx.Field], cx.Field]
@@ -711,9 +685,7 @@ class ReduceMean(PytreeFieldTransformABC):
         dim_names -= spatial_dims
 
     if dim_names:
-      # Sort dimensions to untag based on their order in the field.
-      ordered_dims = [d for d in field.dims if d in dim_names]
-      return cx.cmap(jnp.mean)(field.untag(*ordered_dims))  # pyrefly: ignore[bad-argument-type]
+      return cx.reduce(jnp.mean, field, *dim_names)
     else:
       return field
 
@@ -1469,11 +1441,7 @@ class ComputeMasks(PytreeTransformABC):
     for k in mask_keys:
       m = compute_mask_fn(inputs[k], self.threshold_value)  # pyrefly: ignore[bad-index]
       if self.reduce_dims is not None:
-        axes = _align_axes_order(
-            *self.reduce_dims, reference=m, allow_missing=True
-        )
-        if axes:
-          m = cx.cmap(reduce_op)(m.untag(*axes))
+        m = cx.reduce(reduce_op, m, *self.reduce_dims, allow_missing=True)
       outputs[k] = m
 
     if combine_method is not None:

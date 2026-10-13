@@ -1178,7 +1178,7 @@ class RolloutTrainer:
     # a single timedelta=0 entry, which we squeeze out.
     def _squeeze_timedelta(field: cx.Field) -> cx.Field:
       if 'timedelta' in field.axes:
-        return cx.cmap(lambda x: x[0])(field.untag('timedelta'))
+        return field.isel(timedelta=0)
       return field
 
     # Compute t=0 predictions and evaluator updates per nesting level.

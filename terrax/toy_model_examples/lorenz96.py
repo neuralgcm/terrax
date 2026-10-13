@@ -146,7 +146,7 @@ class Lorenz96WithTwoScales(Lorenz96Base):
 
   @module_utils.ensure_unchanged_state_structure
   def assimilate(self, inputs: dict[str, dict[str, cx.Field]]) -> None:
-    slice_last_time = lambda f: cx.cmap(lambda a: a[-1])(f.untag('timedelta'))
+    slice_last_time = lambda f: f.isel(timedelta=-1)
     self.x.set_value(slice_last_time(inputs['slow']['x']))
     self.y.set_value(slice_last_time(inputs['fast']['y']))
     self.time.set_value(slice_last_time(inputs['slow']['time']))
@@ -236,7 +236,7 @@ class Lorenz96(Lorenz96Base):
 
   @module_utils.ensure_unchanged_state_structure
   def assimilate(self, inputs: dict[str, dict[str, cx.Field]]) -> None:
-    slice_last_time = lambda f: cx.cmap(lambda a: a[-1])(f.untag('timedelta'))
+    slice_last_time = lambda f: f.isel(timedelta=-1)
     self.x.set_value(slice_last_time(inputs['slow']['x']))
     self.time.set_value(slice_last_time(inputs['slow']['time']))
 
@@ -276,7 +276,7 @@ class Lorenz96FastMode(Lorenz96Base):
 
   @module_utils.ensure_unchanged_state_structure
   def assimilate(self, inputs: dict[str, dict[str, cx.Field]]) -> None:
-    slice_last_time = lambda f: cx.cmap(lambda a: a[-1])(f.untag('timedelta'))
+    slice_last_time = lambda f: f.isel(timedelta=-1)
     self.y.set_value(slice_last_time(inputs['fast']['y']))
     self.time.set_value(slice_last_time(inputs['fast']['time']))
 
