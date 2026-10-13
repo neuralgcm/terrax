@@ -107,6 +107,18 @@ class ModuleUtilsTest(parameterized.TestCase):
     else:
       module.allowed_to_change_only_along_time(u_input)
 
+  def test_unlabeled_state_raises_error(self):
+    module = MockModule()
+    unlabeled = cx.field(jnp.ones((2, 5)), None, cx.SizedAxis('x', 5))
+    with self.assertRaisesRegex(ValueError, 'must be fully labeled'):
+      module.allowed_to_change_only_along_time(unlabeled)
+
+    module.u.set_value(unlabeled)
+    with self.assertRaisesRegex(ValueError, 'requires fully labeled Field'):
+      module_utils.vectorize_module(
+          module, {typing.Prognostic: cx.SizedAxis('batch', 3)}
+      )
+
   def test_vectorize_module_subset_of_variables(self):
     module = MockModule()
     u_traj_coords = module.u_trajectory.coordinate

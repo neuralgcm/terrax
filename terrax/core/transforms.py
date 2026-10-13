@@ -121,10 +121,8 @@ def _masked_nan_to_num(
     x: cx.Field, mask: cx.Field, num: float = 0.0
 ) -> cx.Field:
   """Replaces NaN entries over `True` mask with `num`."""
-  mask_coord = cx.get_coordinate(mask)
   masked_nan_to_num = lambda x, m: jnp.where(m, jnp.nan_to_num(x, nan=num), x)
-  result = cx.cpmap(masked_nan_to_num)(*cx.untag([x, mask], mask_coord))
-  return result.tag(mask_coord)
+  return cx.cmap(masked_nan_to_num, out_axes=x.dims)(x, mask)
 
 
 def _masked_to_mean(x: cx.Field, mask: cx.Field) -> cx.Field:
@@ -133,10 +131,7 @@ def _masked_to_mean(x: cx.Field, mask: cx.Field) -> cx.Field:
   mean_over_complement = lambda x, m: jnp.mean(x, where=~m.astype(jnp.bool))
   mean_values = cx.cmap(mean_over_complement)(*cx.untag([x, mask], mask_coord))
   replace_over_mask = lambda x, means, mask: jnp.where(mask, means, x)
-  result = cx.cpmap(replace_over_mask)(
-      x.untag(mask_coord), mean_values, mask.untag(mask_coord)
-  )
-  return result.tag(mask_coord)
+  return cx.cmap(replace_over_mask, out_axes=x.dims)(x, mean_values, mask)
 
 
 ApplyMaskMethods = (
@@ -156,7 +151,9 @@ APPLY_MASK_FNS = {
     'zero_multiply': lambda x, mask: x * (~mask).astype(jnp.float32),
     'nan_to_0': _masked_nan_to_num,
     'nan_to_mean': _masked_to_mean,
-    'set_nan': cx.cmap(lambda x, mask: jnp.where(mask, jnp.nan, x)),
+    'set_nan': lambda x, mask: cx.cmap(
+        lambda a, m: jnp.where(m, jnp.nan, a), out_axes=x.dims
+    )(x, mask),
 }
 COMPUTE_MASK_FNS = {
     'isnan': lambda x, t: cx.cmap(jnp.isnan)(x),
@@ -1090,11 +1087,11 @@ class ScanOverAxis(TransformABC):
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     ax = _get_shared_axis(inputs, self.axis)  # raises if ax is not 1d.
+    ax_name = ax.dims[0] if isinstance(ax, cx.Coordinate) else ax
+    assert isinstance(ax_name, str)
     original_order = {k: v.dims for k, v in inputs.items()}
-    inputs = {k: v.order_as(self.axis, ...) for k, v in inputs.items()}
-    inputs = cx.untag(
-        inputs, ax.dims[0] if isinstance(ax, cx.Coordinate) else ax  # pyrefly: ignore[bad-argument-type]
-    )  # already checked ax.ndim == 1.
+    inputs = {k: v.order_as(ax_name, ...) for k, v in inputs.items()}
+    inputs = cx.untag(inputs, ax_name)
 
     def _process(transform, x):
       if self.apply_remat:
@@ -1111,7 +1108,9 @@ class ScanOverAxis(TransformABC):
     self.transform, scanned = scan_over_axis(self.transform, inputs)
     scanned = cx.tag(scanned, ax)
     scanned = {
-        k: v.order_as(*self._out_dims_order(original_order[k], v.dims))  # pyrefly: ignore[bad-argument-type]
+        k: v.order_as(
+            *self._out_dims_order(original_order.get(k, v.dims), v.dims)  # pyrefly: ignore[bad-argument-type]
+        )
         for k, v in scanned.items()
     }
     return scanned
@@ -2483,10 +2482,11 @@ class Where(TransformABC):
     if set(true_outputs.keys()) != set(false_outputs.keys()):
       raise ValueError('True and false transforms must have the same keys.')
 
-    where_fn = cx.cmap(jnp.where)
     results = {}
-    for k in set(true_outputs.keys()) - {self.mask_key}:
-      results[k] = where_fn(mask, true_outputs[k], false_outputs[k])
+    for k, true_val in true_outputs.items():
+      if k != self.mask_key:
+        where_fn = cx.cmap(jnp.where, out_axes=true_val.dims)
+        results[k] = where_fn(mask, true_val, false_outputs[k])
     if self.include_remaining:
       results.update({k: v for k, v in inputs.items() if k not in results})
     return results

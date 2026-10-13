@@ -1675,8 +1675,9 @@ class HybridLevels(cx.Coordinate):
 
     # TODO(dkochkov): Consider adding HybridLevelsBoundaries coordinate and
     # tagging this output with it.
-    out_axes = {k: v + 1 for k, v in surface_pressure.named_axes}  # pyrefly: ignore[unsupported-operation]
-    return cx.cmap(_boundaries(surface_pressure), out_axes)  # pyrefly: ignore[bad-argument-type, bad-return]
+    return cx.cmap(_boundaries, out_axes=(..., *surface_pressure.dims))(
+        surface_pressure
+    )
 
   def pressure_centers(
       self,

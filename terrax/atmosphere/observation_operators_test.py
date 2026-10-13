@@ -22,6 +22,7 @@ import jax
 import jax_datetime as jdt
 import numpy as np
 from terrax.atmosphere import observation_operators
+from terrax.atmosphere import state_conversion
 from terrax.core import coordinates
 from terrax.core import orographies
 from terrax.core import spherical_harmonics
@@ -149,6 +150,46 @@ class ObservationOperatorsTest(parameterized.TestCase):
     # Geopotential decreases below ground (higher pressure -> lower height).
     z_lapse = outputs['lapse_rate']['geopotential'].data
     self.assertTrue(np.all(z_lapse[-1] < z_lapse[-2]))
+
+  def test_uvtz_to_primitive_equations_sigma_without_geopotential(self):
+    sigma_coords = cx.coords.compose(self.in_sigma, self.grid)
+    zeros_3d = cx.field(np.zeros(sigma_coords.shape), sigma_coords)
+    inputs = {
+        'u_component_of_wind': zeros_3d,
+        'v_component_of_wind': zeros_3d,
+        'temperature': cx.field(
+            np.full(sigma_coords.shape, 250.0), sigma_coords
+        ),
+        'surface_pressure': cx.field(np.ones(self.grid.shape), self.grid),
+    }
+    actual = state_conversion.uvtz_to_primitive_equations(
+        inputs,
+        levels=self.in_sigma,
+        orography=self.orography_module,
+        sim_units=self.sim_units,
+    )
+    self.assertIn('log_surface_pressure', actual)
+    self.assertNotIn('geopotential', actual)
+    self.assertEqual(actual['temperature'].coordinate, sigma_coords)
+
+    with self.assertRaisesRegex(ValueError, 'Missing `surface_pressure`'):
+      state_conversion.uvtz_to_primitive_equations(
+          {'temperature': inputs['temperature']},
+          levels=self.in_sigma,
+          orography=self.orography_module,
+          sim_units=self.sim_units,
+      )
+
+  def test_uvtz_to_primitive_equations_pressure_requires_geopotential(self):
+    pressure_levels = coordinates.PressureLevels.with_13_era5_levels()
+    p_coords = cx.coords.compose(pressure_levels, self.grid)
+    with self.assertRaisesRegex(ValueError, 'Missing `geopotential`'):
+      state_conversion.uvtz_to_primitive_equations(
+          {'temperature': cx.field(np.full(p_coords.shape, 250.0), p_coords)},
+          levels=self.in_sigma,
+          orography=self.orography_module,
+          sim_units=self.sim_units,
+      )
 
 
 if __name__ == '__main__':

@@ -112,26 +112,32 @@ def uvtz_to_primitive_equations(
     sim_units: units.SimUnits,
 ) -> dict[str, cx.Field]:
   """Converts velocity/temperature/geopotential to primitive equations state."""
-  if 'geopotential' not in inputs and 'surface_pressure' not in inputs:
-    raise ValueError(
-        'Missing `geopotential` and `surface_pressure` in source data keys'
-        f' {inputs.keys()}, at least one is needed to obtain surface pressure.'
-    )
-
   inputs = inputs.copy()  # avoid mutating inputs.
-  geopotential = inputs.pop('geopotential')
-  input_levels = {
-      geopotential.axes.get(k) for k in ['sigma', 'hybrid', 'pressure']
-  }
-  input_levels.discard(None)
+  input_levels = set()
+  for f in inputs.values():
+    for k in ('sigma', 'hybrid', 'pressure'):
+      if k in f.axes:
+        input_levels.add(f.axes[k])
   if len(input_levels) != 1:
-    raise ValueError('expected only one type of level type, got {levels}.')
-  [input_levels] = input_levels
+    raise ValueError(
+        f'Expected only one type of level coordinate, got {input_levels}.'
+    )
+  input_levels = input_levels.pop()
   if isinstance(
       input_levels, (coordinates.SigmaLevels, coordinates.HybridLevels)
   ):
+    if 'surface_pressure' not in inputs:
+      raise ValueError(
+          f'Missing `surface_pressure` in source data keys {inputs.keys()}.'
+      )
     surface_pressure = inputs.pop('surface_pressure')
+    inputs.pop('geopotential', None)
   else:
+    if 'geopotential' not in inputs:
+      raise ValueError(
+          f'Missing `geopotential` in source data keys {inputs.keys()}.'
+      )
+    geopotential = inputs.pop('geopotential')
     geopotential_at_surface = orography.nodal_orography * sim_units.g
     surface_pressure = interpolators.get_surface_pressure(
         geopotential, geopotential_at_surface, sim_units

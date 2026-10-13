@@ -331,7 +331,9 @@ class TapeSampler(Sampler):
     tape_length = tape_axis.shape[0]
     mask = cx.field(jnp.arange(tape_length), tape_axis) < idx
     log_prob_fn = cx.cmap(self.sampler.distribution.log_prob)
-    masked_log_prob = log_prob_fn(tape) * mask
+    masked_log_prob = cx.cmap(lambda lp, m: jnp.where(m, lp, 0.0))(
+        log_prob_fn(tape), mask
+    )
     return cx.reduce(jnp.sum, masked_log_prob, tape_axis, self._sample_coord)
 
 
@@ -458,7 +460,7 @@ class UniformUncorrelated(RandomProcessModule):
     super().__init__(samplers={'uniform': sampler})
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k, 2)))(rngs.params())
     self.state_rng = Randomness(rng)
-    self.rng_step = Randomness(cx.field(0))
+    self.rng_step = Randomness(cx.field(jnp.uint32(0)))
     self.core = Randomness(k)
 
   @classmethod
@@ -511,7 +513,7 @@ class NormalUncorrelated(RandomProcessModule):
     super().__init__(samplers={'normal': sampler})
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k, 2)))(rngs.params())
     self.state_rng = Randomness(rng)
-    self.rng_step = Randomness(cx.field(0))
+    self.rng_step = Randomness(cx.field(jnp.uint32(0)))
     self.core = Randomness(k)
 
   @classmethod
@@ -808,7 +810,7 @@ class GaussianRandomField(RandomProcessModule):
     self.ylm_map = ylm_map
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k, 2)))(rngs.params())
     self.state_rng = Randomness(rng)
-    self.rng_step = Randomness(cx.field(0))
+    self.rng_step = Randomness(cx.field(jnp.uint32(0)))
     sample_fn = lambda k: self.grf.sample_core(k, self.sampler)
     self.core = Randomness(cx.cmap(sample_fn)(k).tag(self.grf.core_grid))
 
@@ -957,7 +959,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
     # Initializing the state of the process.
     k, rng = cx.cmap(lambda k: tuple(jax.random.split(k, 2)))(rngs.params())
     self.state_rng = Randomness(rng)
-    self.rng_step = Randomness(cx.field(0))
+    self.rng_step = Randomness(cx.field(jnp.uint32(0)))
     self.core = Randomness(self._sample_core(k))
 
   @classmethod
