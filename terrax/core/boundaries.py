@@ -127,7 +127,7 @@ class LonLatBoundary(BoundaryCondition):
     )
     padded_grid = coordinates.CoordinateWithPadding(grid, pad_sizes)
     x = x.untag(*grid.dims)  # pyrefly: ignore[bad-argument-type]
-    return cx.cmap(self.pad_array, x.named_axes)(x, pads).tag(padded_grid)
+    return cx.cpmap(self.pad_array)(x, pads).tag(padded_grid)
 
   def trim(self, x: cx.Field) -> cx.Field:
     padded_lon_lat = tuple('padded_' + d for d in ['longitude', 'latitude'])
@@ -145,4 +145,4 @@ class LonLatBoundary(BoundaryCondition):
     pads = tuple(pad_sizes[d.removeprefix('padded_')] for d in padded_lon_lat)
     trimmed_grid = grid.coordinate
     x = x.untag(grid)
-    return cx.cmap(self.trim_array, x.named_axes)(x, pads).tag(trimmed_grid)
+    return cx.cpmap(self.trim_array)(x, pads).tag(trimmed_grid)

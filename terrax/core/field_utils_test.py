@@ -79,6 +79,23 @@ class SplitFieldAxisTest(parameterized.TestCase):
     self.assertEqual(actual['patch'].coordinate, xy_patch)
     self.assertEqual(actual['scalar'].shape, ())
 
+  def test_split_field_axis_to_multidim_coord_keeps_position(self):
+    b = cx.SizedAxis('b', 2)
+    flat_axis = cx.SizedAxis('flat', 10)
+    z = cx.SizedAxis('z', 3)
+    data = np.arange(60).reshape((2, 10, 3))
+    field = cx.field(data, b, flat_axis, z)
+    xy_patch = cx.coords.compose(cx.SizedAxis('x', 3), cx.SizedAxis('y', 3))
+    split_axes = {'patch': xy_patch, 'scalar': cx.Scalar()}
+    actual = field_utils.split_field_axis(field, flat_axis, split_axes)
+
+    expected_patch = cx.field(
+        data[:, :9, :].reshape((2, 3, 3, 3)), b, xy_patch, z
+    )
+    expected_scalar = cx.field(data[:, 9, :], b, z)
+    cx.testing.assert_fields_equal(actual['patch'], expected_patch)
+    cx.testing.assert_fields_equal(actual['scalar'], expected_scalar)
+
 
 class SplitToFieldsTest(parameterized.TestCase):
   """Tests that split_to_fields works as expected."""

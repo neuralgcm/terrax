@@ -121,7 +121,8 @@ class DistributionSampler(Sampler):
     sample_fn = lambda k: self.distribution.sample(
         seed=k, sample_shape=target_coord.shape
     )
-    return cx.cmap(sample_fn, seed.named_axes)(seed).tag(target_coord)
+    sample = cx.cmap(sample_fn, out_axes=(*seed.dims, ...))  # samples last.
+    return sample(seed).tag(target_coord)
 
 
 class RecordingSampler(Sampler):
@@ -215,8 +216,9 @@ class RecordingSampler(Sampler):
     tape_length = tape_axis.shape[0]
     idx = self.tape_position.get_value()
     update_fn = lambda t, d, i: jnp.where(i < tape_length, t.at[i].set(d), t)
-    update_fn = cx.cmap(update_fn, out_axes=tape.untag(tape_axis).named_axes)
-    updated_tape = update_fn(tape.untag(tape_axis), draw, idx).tag(tape_axis)
+    tape = tape.untag(tape_axis)
+    update_fn = cx.cmap(update_fn, out_axes=tape.dims)
+    updated_tape = update_fn(tape, draw, idx).tag(tape_axis)
     self.tape.set_value(updated_tape)
     # Update tape position.
     clip_fn = cx.cmap(functools.partial(jnp.clip, max=tape_length))

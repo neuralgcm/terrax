@@ -319,7 +319,7 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
 
       i_ax = self.interval_axis
       per_period = per_period.untag(i_ax)
-      update_per_period = cx.cmap(_update_per_period, per_period.named_axes)
+      update_per_period = cx.cmap(_update_per_period, out_axes=per_period.dims)
       updated_per_period = update_per_period(per_period, since_last).tag(i_ax)
       self.per_period[k].set_value(updated_per_period)
       self.since_last_update[k].set_value(
@@ -478,7 +478,7 @@ class TimeOffsetDiagnostic(TemporalDiagnosticModule):
         return jnp.where(is_update_step, updated, past)
 
       past = past.untag(self.offset_axis)
-      update_past = cx.cmap(_update_past, past.named_axes)
+      update_past = cx.cmap(_update_past, out_axes=past.dims)
       updated_past = update_past(past, latest).tag(self.offset_axis)
       self.past_values[k].set_value(updated_past)
 

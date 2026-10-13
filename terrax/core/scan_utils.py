@@ -244,17 +244,13 @@ def nest_data_for_scans(
   nested_data = []
   for i, spec in enumerate(scan_specs):  # pyrefly: ignore[not-iterable]
     shape = scan_steps[i:][::-1]  # pyrefly: ignore[unsupported-operation]
-    dummy_td = cx.coords.compose(*[cx.DummyAxis(None, s) for s in shape])
 
     # pylint: disable=cell-var-from-loop
     def _reshape(field: cx.Field):
-      coord = field.coordinate
-      td = _extract_timedelta(coord)
-      out_coord = cx.coords.replace_axes(coord, td, dummy_td)
-      out_axes = {d: i for i, d in enumerate(out_coord.dims) if d}
+      td = _extract_timedelta(field.coordinate)
       reshape_fn = lambda tree: jax.tree.map(lambda x: x.reshape(shape), tree)
-      reshape = cx.cmap(reshape_fn, out_axes=out_axes)
-      return reshape(field.untag(td))
+      # cpmap keeps the nested scan axes at the position of `td`.
+      return cx.cpmap(reshape_fn)(field.untag(td))
 
     fs_for_spec = pytree_utils.replace_with_matching_or_default(
         spec, inputs, None, check_used_all_replace_keys=False

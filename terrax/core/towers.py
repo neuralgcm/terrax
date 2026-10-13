@@ -53,7 +53,7 @@ class ForwardTower(nnx.Module):
       return net(x)
 
     field = field.untag(*self.inputs_in_dims)
-    cmap_apply_net = cx.cmap(apply_net, field.named_axes, vmap=nnx.vmap)
+    cmap_apply_net = cx.cpmap(apply_net, vmap=nnx.vmap)
     if self.apply_remat:
       cmap_apply_net = nnx.remat(cmap_apply_net)
 
@@ -167,9 +167,7 @@ class RecurrentTower(nnx.Module):
     def apply_cell(cell, carry, inputs):
       return cell(carry, inputs)
 
-    cmap_apply_cell = cx.cmap(
-        apply_cell, out_axes=inputs_untagged.named_axes, vmap=nnx.vmap
-    )
+    cmap_apply_cell = cx.cpmap(apply_cell, vmap=nnx.vmap)
     if self.apply_remat:
       cmap_apply_cell = nnx.remat(cmap_apply_cell)
 
@@ -297,7 +295,7 @@ class TransformerTower(nnx.Module):
     def apply_net(net, x, x_pe, z, z_pe, mask):
       return net(x, z, x_pe, z_pe, mask=mask)
 
-    cmap_apply_net = cx.cmap(apply_net, x.named_axes, vmap=nnx.vmap)
+    cmap_apply_net = cx.cpmap(apply_net, vmap=nnx.vmap)
     if self.apply_remat:
       cmap_apply_net = nnx.remat(cmap_apply_net)
 

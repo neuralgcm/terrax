@@ -201,20 +201,10 @@ def split_field_axis(
   split_results = cx.cpmap(split_fn)(field_untagged)
 
   leaves = []
-  for i, axis in enumerate(axes_leaves):
-    field_shard = split_results[i]
-    if isinstance(axis, cx.Scalar):
-      leaves.append(cx.cmap(lambda x: jnp.squeeze(x, axis=0))(field_shard))
-    elif axis.ndim == 1:
-      leaves.append(field_shard.tag(axis))
-    else:
-      ndim, pos_idx = axis.ndim, field_shard.dims.index(None)
-      out_axes = {
-          k: v if v < pos_idx else v + ndim - 1
-          for k, v in field_shard.named_axes.items()
-      }
-      reshape = functools.partial(jnp.reshape, shape=axis.shape)
-      leaves.append(cx.cmap(reshape, out_axes=out_axes)(field_shard).tag(axis))
+  for field_shard, axis in zip(split_results, axes_leaves, strict=True):
+    # cpmap keeps the reshaped axes at the position of `split_axis`.
+    reshape = functools.partial(jnp.reshape, shape=axis.shape)
+    leaves.append(cx.cpmap(reshape)(field_shard).tag(axis))
 
   return jax.tree.unflatten(treedef, leaves)
 

@@ -59,9 +59,7 @@ class SpectralRegridder:
     lon_slice = slice(0, target_lon_wavenumbers)
     total_slice = slice(0, target_total_wavenumbers)
     field = field.untag('longitude_wavenumber', 'total_wavenumber')
-    result = cx.cmap(lambda x: x[lon_slice, total_slice], field.named_axes)(
-        field
-    )
+    result = cx.cpmap(lambda x: x[lon_slice, total_slice])(field)
     return result.tag(self.target_coords)
 
   def pad_to_target_wavenumbers(
@@ -78,7 +76,7 @@ class SpectralRegridder:
     pad_total = (0, target_total_k - input_total_k)
     pad_fn = lambda x: jnp.pad(x, pad_width=(pad_lon, pad_total))
     field = field.untag('longitude_wavenumber', 'total_wavenumber')
-    result = cx.cmap(pad_fn, field.named_axes)(field)
+    result = cx.cpmap(pad_fn)(field)
     return result.tag(self.target_coords)
 
   def interpolate_field(self, field: cx.Field) -> cx.Field:
@@ -179,6 +177,6 @@ class ConservativeRegridder:
     lon_lat_dims = ('longitude', 'latitude')
     source_grid = cx.coords.compose(*[x.axes.get(d) for d in lon_lat_dims])  # pyrefly: ignore[bad-argument-type]
     x = inputs.untag(source_grid)
-    regrid_fn = cx.cmap(self._regrid_2d, x.named_axes)
+    regrid_fn = cx.cpmap(self._regrid_2d)
     x = regrid_fn(x, source_grid)
     return x.tag(self.target_grid)

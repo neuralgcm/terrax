@@ -240,8 +240,7 @@ class LinearOnPressure(nnx.Module):
       raise ValueError(f'Unknown {self.interpolation_space=}.')
     out_coord = cx.coords.replace_axes(f.coordinate, level, target_levels)
     # we specify out_axes to preserve the dimension order in the output.
-    out_axes = {d: i for i, d in enumerate(out_coord.dims)}
-    regrid_fn = cx.cmap(self.interpolate_array, out_axes)  # pyrefly: ignore[bad-argument-type]
+    regrid_fn = cx.cmap(self.interpolate_array, out_axes=out_coord.dims)
     return regrid_fn(desired, pressure.untag(level), f.untag(level))
 
   def __call__(
@@ -338,14 +337,13 @@ class ConservativeOnPressure(nnx.Module):
     sigma_b = self.target_levels.to_sigma_boundaries()
     target_bounds = sigma_b.fields['sigma_boundaries'] * surface_pressure
 
-    out_axes = {
-        d: i for i, d in enumerate(f.coordinate.dims) if d not in level.dims
-    }
-    regrid_fn = cx.cmap(self.regrid_array, out_axes=out_axes)  # pyrefly: ignore[bad-argument-type]
+    f_untagged = f.untag(level)
+    # regridded levels take the place of `level` in the output.
+    regrid_fn = cx.cmap(self.regrid_array, out_axes=f_untagged.dims)
     result = regrid_fn(
         target_bounds.untag(sigma_b),
         source_bounds.untag(axis),
-        f.untag(level),
+        f_untagged,
     )
     return result.tag(self.target_levels)
 
@@ -404,8 +402,7 @@ def get_surface_pressure(
   out_coord = cx.coords.replace_axes(
       geopotential.coordinate, levels, cx.Scalar()  # levels are reduced.
   )
-  out_axes = {d: i for i, d in enumerate(out_coord.dims)}
-  surface_pressure = cx.cmap(find_intercept, out_axes=out_axes)(  # pyrefly: ignore[bad-argument-type]
+  surface_pressure = cx.cmap(find_intercept, out_axes=out_coord.dims)(
       relative_heights.untag(levels), pressure.untag(levels)
   )
   return surface_pressure

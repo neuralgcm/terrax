@@ -863,7 +863,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
       return x.at[0, 0].add(_YLM_CONSTANT_NORMALIZATION_FACTOR * y)
 
     x = x.untag(self)
-    return cx.cmap(add_fn, x.named_axes)(x, c).tag(self)
+    return cx.cmap(add_fn, out_axes=x.dims)(x, c).tag(self)
 
   def clip_wavenumbers(self, x: cx.Field, n: int) -> cx.Field:
     if n <= 0:
