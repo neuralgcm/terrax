@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Defines observation operator API and sample operators for NeuralGCM."""
+"""Defines observation operator API and sample operators for Terrax."""
 
 import abc
 import dataclasses

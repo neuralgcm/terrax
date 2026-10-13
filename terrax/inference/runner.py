@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""High performance inference API for NeuralGCM models."""
+"""High performance inference API for Terrax models."""
 
 from collections.abc import Sequence
 import contextlib
@@ -180,7 +180,7 @@ def _atomic_write(path):
 
 @dataclasses.dataclass
 class InferenceRunner:
-  """High performance inference runner for NeuralGCM models."""
+  """High performance inference runner for Terrax models."""
 
   model: api.InferenceModel | None
   inputs: NestedData

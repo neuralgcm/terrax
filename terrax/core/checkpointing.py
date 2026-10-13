@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helper utilities for checkpointing Fiddle configs used in NeuralGCM."""
+"""Helper utilities for checkpointing Fiddle configs used in Terrax."""
 
 import dataclasses
 import json

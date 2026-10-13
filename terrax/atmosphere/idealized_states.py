@@ -29,7 +29,7 @@ from terrax.core import typing
 from terrax.core import units
 
 
-def _dino_state_to_neuralgcm_dict(
+def _dino_state_fields(
     state: dinosaur_primitive_equations.State,
     ylm_map: spherical_harmonics.FixedYlmMapping,
     levels: coordinates.SigmaLevels | coordinates.HybridLevels,
@@ -37,7 +37,7 @@ def _dino_state_to_neuralgcm_dict(
     as_nodal: bool = False,
     temperature_format: Literal['absolute', 'variation'] = 'absolute',
 ) -> dict[str, cx.Field]:
-  """Converts dinosaur state to neuralgcm state dict."""
+  """Converts dinosaur state to terrax state dict."""
   state_dict = state.asdict()  # pyrefly: ignore[missing-attribute]
   state_dict |= state_dict.pop('tracers')
   if temperature_format == 'absolute':
@@ -129,7 +129,7 @@ def isothermal_rest_atmosphere(
       meter_quantity=typing.units.meter,
   )
   dino_state = init_state_fn(rng)
-  state = _dino_state_to_neuralgcm_dict(
+  state = _dino_state_fields(
       dino_state, ylm_map, levels, aux, as_nodal, temperature_format
   )
   if in_si_units:
@@ -176,7 +176,7 @@ def steady_state_jw(
       typing.units.hPa,  # hPa quantity
   )
   dino_state = init_state_fn(rng)
-  state = _dino_state_to_neuralgcm_dict(
+  state = _dino_state_fields(
       dino_state, ylm_map, levels, aux, as_nodal, temperature_format
   )
   if in_si_units:
@@ -239,7 +239,7 @@ def perturbed_jw(
   dino_full_state = jax.tree.map(
       lambda x, y: x + y, dino_steady_state, dino_perturbation
   )
-  state = _dino_state_to_neuralgcm_dict(
+  state = _dino_state_fields(
       dino_full_state,
       ylm_map,
       levels,

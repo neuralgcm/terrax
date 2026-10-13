@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module-based API for calculating diagnostics of NeuralGCM models."""
+"""Module-based API for calculating diagnostics of Terrax models."""
 
 from typing import Literal, Protocol
 

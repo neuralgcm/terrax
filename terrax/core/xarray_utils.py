@@ -178,7 +178,7 @@ def field_from_xarray(
     data_array: xarray.DataArray,
     additional_coord_types: tuple[cx.Coordinate, ...] = (),
 ) -> cx.Field:
-  """Converts an xarray.DataArray to a Field using NeuralGCM coordinates."""
+  """Converts an xarray.DataArray to a Field using Terrax coordinates."""
   return cx.from_xarray(data_array, CORE_COORD_TYPES + additional_coord_types)  # pyrefly: ignore[bad-argument-type]
 
 
