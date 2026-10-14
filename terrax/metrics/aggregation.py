@@ -137,6 +137,14 @@ class AggregationState:
     }
 
 
+def _is_present(dim: cx.Coordinate | str, field: cx.Field) -> bool:
+  """Returns True if dim is present in field's dims/axes, False otherwise."""
+  if isinstance(dim, cx.Coordinate):
+    return all(ax == field.axes[ax.dims[0]] for ax in dim.axes)  # pyrefly: ignore[bad-index]
+  else:
+    return dim in field.dims
+
+
 @functools.partial(
     jax.tree_util.register_dataclass,
     data_fields=['context'],
@@ -237,7 +245,7 @@ class Aggregator:
         )
       weights *= bin_mask
 
-    untags = [d for d in self.dims_to_reduce if cx.contains_dims(stat_field, d)]
+    untags = [d for d in self.dims_to_reduce if _is_present(d, stat_field)]
     if not self.skip_missing and set(untags) != set(self.dims_to_reduce):
       missing_dims = set(self.dims_to_reduce) - set(untags)
       raise ValueError(f'skip_missing is False but have a {missing_dims=}')
@@ -249,7 +257,8 @@ class Aggregator:
         )
 
     # TODO(dkochkov): Consider using `jnp.dot` + `jnp.sum` here for efficiency.
-    return cx.reduce(jnp.sum, stat_field * weights, *untags)
+    sum_positional = cx.cmap(jnp.sum)
+    return sum_positional((stat_field * weights).untag(*untags))
 
   def aggregate_statistics(
       self,

@@ -133,8 +133,11 @@ class StreamNorm(nnx.Module):
         if m is not None:
           if not cx.is_field(m):
             raise ValueError(f'mask {m=} is not a field for {k=}')
-          m = m.broadcast_like(f)
-          w = cx.cmap(lambda m: m.astype(jnp.int32))(m.untag(*batch_dims))  # pyrefly: ignore[bad-argument-type]
+          mask_batch_dims = tuple(d for d in batch_dims if d in m.dims)
+          w = cx.cmap(lambda m: m.astype(jnp.int32))(m.untag(*mask_batch_dims))  # pyrefly: ignore[bad-argument-type]
+        # Broadcast w to x to count valid entries correctly.
+        ones = cx.cmap(lambda x: jnp.ones_like(x, dtype=jnp.int32))(x)
+        w = w * ones
 
       if self.skip_nans:
         is_not_nan = cx.cmap(lambda arr: (~jnp.isnan(arr)).astype(jnp.int32))(x)
@@ -144,7 +147,7 @@ class StreamNorm(nnx.Module):
           w = w * is_not_nan
 
       if w is None:
-        batch_size = int(np.prod([f.named_shape[d] for d in batch_dims]))  # pyrefly: ignore[bad-index]
+        batch_size = np.prod([f.named_shape[d] for d in batch_dims])  # pyrefly: ignore[bad-index]
         count_inc = batch_size
         batch_mean = cx.cmap(jnp.mean)(x)
         # Note: we need population variance here (sum of squared deviations).

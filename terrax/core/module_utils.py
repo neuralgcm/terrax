@@ -60,22 +60,23 @@ def ensure_unchanged_state_structure(
     )
 
   def _get_coord_struct(pytree: typing.Pytree) -> typing.Pytree:
-    def squeeze_excluded(f: typing.Pytree) -> typing.Pytree:
-      if not cx.is_field(f):
-        return f
-      if None in f.dims:
-        raise ValueError(
-            f'Module state fields must be fully labeled, got {f=}'
-        )
-      c = f.coordinate
+    to_coord = lambda c: c.coordinate if cx.is_field(c) else c
+
+    def squeeze_excluded(c: cx.Coordinate) -> cx.Coordinate:
+      if not cx.is_coord(c):
+        return c
       axes = [
           cx.DummyAxis(ax.dims[0], 1) if ax.dims[0] in excluded_dims else ax
           for ax in c.axes
       ]
-      return cx.shape_struct_field(cx.coords.compose(*axes))
+      return cx.coords.compose(*axes)
 
     field_struct = pytree_utils.shape_structure(pytree)
-    return jax.tree.map(squeeze_excluded, field_struct, is_leaf=cx.is_field)
+    coord_struct = jax.tree.map(to_coord, field_struct, is_leaf=cx.is_field)
+    coord_struct = jax.tree.map(
+        squeeze_excluded, coord_struct, is_leaf=cx.is_coord
+    )
+    return coord_struct
 
   @functools.wraps(method)
   def wrapper(module: nnx.Module, *args, **kwargs):
@@ -115,11 +116,6 @@ def vectorize_module(
       raise ValueError(
           'module state vectorization requires Field variables, but'
           f' encountered {type(x)=}'
-      )
-    if None in x.dims:
-      raise ValueError(
-          'module state vectorization requires fully labeled Field variables,'
-          f' but encountered {x=}'
       )
     return x.broadcast_like(cx.coords.compose(coord, x.coordinate))
 
