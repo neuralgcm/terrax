@@ -62,15 +62,16 @@ def _dino_state_fields(
   }
   if as_nodal:
     state_dict = transforms.ToNodal(ylm_map)(state_dict)
-  if 'orography' in aux_features:  # pyrefly: ignore[not-iterable]
-    state_dict['orography'] = cx.field(aux_features['orography'], grid)  # pyrefly: ignore[unsupported-operation]
-  if 'ref_temperatures' in aux_features:  # pyrefly: ignore[not-iterable]
-    ref_temperatures = cx.field(aux_features['ref_temperatures'], levels)  # pyrefly: ignore[unsupported-operation]
-    state_dict['ref_temperatures'] = ref_temperatures  # pyrefly: ignore[unsupported-operation]
-  if 'geopotential' in aux_features:  # pyrefly: ignore[not-iterable]
-    geopotential = cx.field(aux_features['geopotential'], levels, grid)  # pyrefly: ignore[unsupported-operation]
-    state_dict['geopotential'] = geopotential  # pyrefly: ignore[unsupported-operation]
-  return state_dict  # pyrefly: ignore[bad-return]
+  aux_features = aux_features or {}
+  if 'orography' in aux_features:
+    state_dict['orography'] = cx.field(aux_features['orography'], grid)
+  if 'ref_temperatures' in aux_features:
+    ref_temperatures = cx.field(aux_features['ref_temperatures'], levels)
+    state_dict['ref_temperatures'] = ref_temperatures
+  if 'geopotential' in aux_features:
+    geopotential = cx.field(aux_features['geopotential'], levels, grid)
+    state_dict['geopotential'] = geopotential
+  return state_dict
 
 
 def to_si_units(

@@ -73,10 +73,10 @@ class DataModel(api.Model):
       nnx.data(default_factory=dict, kw_only=True)
   )
   sim_units: units.SimUnits | None = nnx.static(default=None, kw_only=True)
-  nondim_transform: transforms.TransformABC = nnx.data(
+  nondim_transform: typing.Transform = nnx.data(
       default_factory=transforms.Identity, kw_only=True
   )
-  redim_transform: transforms.TransformABC = nnx.data(
+  redim_transform: typing.Transform = nnx.data(
       default_factory=transforms.Identity, kw_only=True
   )
   _dynamic_inputs_slice: dynamic_io.DynamicInputSlice = nnx.data(init=False)
@@ -96,7 +96,7 @@ class DataModel(api.Model):
     if self.observation_key not in self.operators:
       self.operators[self.observation_key] = (
           observation_operators.TransformObservationOperator(
-              transforms.Identity()  # pyrefly: ignore[bad-argument-type]
+              transforms.Identity()
           )
       )
 
@@ -179,10 +179,10 @@ class DataModel(api.Model):
     return result
 
   @property
-  def inputs_spec(  # pyrefly: ignore[bad-override]
+  def inputs_spec(
       self,
-  ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordSpec]]:
-    specs = {}
+  ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]]:
+    specs: dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]] = {}
     cs = {k: c for k, c in self.keys_to_coords.items()}
     cs['time'] = cx.Scalar()
     specs[self.observation_key] = {

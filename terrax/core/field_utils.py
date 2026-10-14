@@ -64,8 +64,13 @@ def combine_fields(
   aligned_dims_tuples = [
       (c,) if isinstance(c, str) else c.dims for c in dims_to_align
   ]
-  aligned_dims = tuple(itertools.chain(*aligned_dims_tuples))
-  _validate_aligned_dims(aligned_dims)  # pyrefly: ignore[bad-argument-type]
+  raw_aligned_dims = tuple(itertools.chain(*aligned_dims_tuples))
+  if None in raw_aligned_dims:
+    raise ValueError(
+        f'`dims_to_align` must be labeled, but got {raw_aligned_dims=}.'
+    )
+  aligned_dims = tuple(d for d in raw_aligned_dims if d is not None)
+  _validate_aligned_dims(aligned_dims)
 
   def _get_concat_axis(f: cx.Field) -> cx.Coordinate | None:
     """Returns Coordinate | None representing the axis to concatenate over."""
@@ -91,13 +96,15 @@ def combine_fields(
   concat_axes = {k: _get_concat_axis(v) for k, v in fields.items()}
   expand = cx.cmap(lambda x: x[np.newaxis])
   add_positional = lambda f, c: expand(f) if c is None else f.untag(*c.dims)
-  fields = [  # pyrefly: ignore[bad-assignment]
+  untagged_fields = [
       add_positional(f, concat_axes[k]) for k, f in sorted(fields.items())
   ]
   try:
-    result = cx.cpmap(jnp.concatenate)(fields).tag(out_axis_tag)
+    result = cx.cpmap(jnp.concatenate)(untagged_fields).tag(out_axis_tag)
   except ValueError as e:
-    raise ValueError(f'No unique out_axes found in inputs: {fields=}') from e
+    raise ValueError(
+        f'No unique out_axes found in inputs: {untagged_fields=}'
+    ) from e
   return result
 
 
@@ -290,8 +297,10 @@ def in_axes_for_coord(
   if coord.ndim != 1:
     raise ValueError(f'idx can be computed only for 1d coord, got {coord}')
   dim = coord.dims[0]
+  if dim is None:
+    raise ValueError(f'idx can be computed only for labeled coord, got {coord}')
   leaves, treedef = jax.tree.flatten(inputs, is_leaf=cx.is_field)
-  indices = [x.named_axes.get(dim) if cx.is_field(x) else None for x in leaves]  # pyrefly: ignore[bad-argument-type]
+  indices = [x.named_axes.get(dim) if cx.is_field(x) else None for x in leaves]
   return jax.tree.unflatten(treedef, indices)
 
 
@@ -300,9 +309,9 @@ def nest_in_axes(*in_axes_to_nest: typing.Pytree) -> tuple[typing.Pytree, ...]:
   if not in_axes_to_nest:
     return ()
 
-  def _validate_in_axes_for_leaf(*original_axes: Sequence[int | None]):
+  def _validate_in_axes_for_leaf(*original_axes: int | None):
     non_none_axes = [ax for ax in original_axes if ax is not None]
-    if any(ax < 0 for ax in non_none_axes):  # pyrefly: ignore[unsupported-operation]
+    if any(ax < 0 for ax in non_none_axes):
       raise ValueError(f'Negative axes are not allowed. Got: {original_axes}')
     if len(set(non_none_axes)) != len(non_none_axes):
       raise ValueError(

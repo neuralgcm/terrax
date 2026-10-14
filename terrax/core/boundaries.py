@@ -126,12 +126,14 @@ class LonLatBoundary(BoundaryCondition):
         *[x.axes.get(d, cx.DummyAxis(d, lon_lat_sizes[d])) for d in lon_lat]
     )
     padded_grid = coordinates.CoordinateWithPadding(grid, pad_sizes)
-    x = x.untag(*grid.dims)  # pyrefly: ignore[bad-argument-type]
+    x = x.untag(grid)
     return cx.cpmap(self.pad_array)(x, pads).tag(padded_grid)
 
   def trim(self, x: cx.Field) -> cx.Field:
     padded_lon_lat = tuple('padded_' + d for d in ['longitude', 'latitude'])
-    grid = cx.coords.compose(*[x.axes.get(d) for d in padded_lon_lat])  # pyrefly: ignore[bad-argument-type]
+    grid = cx.coords.compose(
+        *[x.axes[d] for d in padded_lon_lat if d in x.axes]
+    )
     if (
         not isinstance(grid, coordinates.CoordinateWithPadding)
         or grid.ndim != 2

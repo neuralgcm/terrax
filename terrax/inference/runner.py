@@ -51,13 +51,15 @@ def _queries_to_dummy_datatree(queries: typing.Queries) -> xarray.DataTree:
   for group, sub_query in queries.items():
     ds = xarray.Dataset()
     for var, c in sub_query.items():
+      if isinstance(c, typing.Auxiliary):
+        continue
       if isinstance(c, data_specs.FieldInQuerySpec):
         c = c.spec
-      coords = c.coordinate.to_xarray() if cx.is_field(c) else c.to_xarray()  # pyrefly: ignore[missing-attribute]
+      coords = c.coordinate.to_xarray() if cx.is_field(c) else c.to_xarray()
       ds[var] = xarray.DataArray(
           # TODO(shoyer): include dtype as part of the query spec?
-          data=dask.array.zeros(c.shape, np.float32),  # pyrefly: ignore[missing-attribute]
-          dims=c.dims,  # pyrefly: ignore[missing-attribute]
+          data=dask.array.zeros(c.shape, np.float32),
+          dims=c.dims,
           coords=coords,
       )
     outputs[group] = ds
@@ -295,6 +297,7 @@ class InferenceRunner:
     for ds_key, sub_query in self.output_query.items():
       ds_specs = {}
       for var_name, spec in sub_query.items():
+        spec, _ = typing.unwrap_auxiliary(spec)
         # we only need read specs for FieldInQuery.
         if isinstance(spec, data_specs.FieldInQuerySpec):
           var_spec = spec.spec
@@ -675,7 +678,7 @@ class InferenceRunner:
         query_fields = xarray_utils.read_from_xarray(
             queries_data, self._dynamic_queries_read_spec, strict_matches=False  # pyrefly: ignore[bad-argument-type]
         )
-      queries = data_specs.construct_query(query_fields, self.output_query)  # pyrefly: ignore[bad-argument-type]
+      queries = data_specs.construct_query(query_fields, self.output_query)
       split_queries = split_queries_by_frequency(
           queries, self.output_freqs, self.unique_output_freqs
       )

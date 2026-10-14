@@ -24,6 +24,7 @@ from typing import Callable, Protocol, Self, Sequence, TypeAlias
 import coordax as cx
 import einops
 from flax import nnx
+from flax import typing as flax_typing
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -94,9 +95,9 @@ class MultiHeadAttention(nnx.Module):
       out_features: int | None = None,
       in_kv_features: int | None = None,
       *,
-      dtype: nnx.Dtype | None = None,  # pyrefly: ignore[missing-attribute]
-      param_dtype: nnx.Dtype = jnp.float32,  # pyrefly: ignore[missing-attribute]
-      precision: nnx.PrecisionLike = None,  # pyrefly: ignore[missing-attribute]
+      dtype: flax_typing.Dtype | None = None,
+      param_dtype: flax_typing.Dtype = jnp.float32,
+      precision: flax_typing.PrecisionLike = None,
       kernel_init: nnx.initializers.Initializer = default_kernel_init,
       out_kernel_init: nnx.initializers.Initializer | None = None,
       bias_init: nnx.initializers.Initializer = nnx.initializers.zeros_init(),
@@ -445,9 +446,9 @@ class TransformerBase(nnx.Module, abc.ABC):
   def attention_key_source(
       self,
       x: typing.Array,
-      z: typing.Array,
-      x_pos_encoding: typing.Array,
-      z_pos_encoding: typing.Array,
+      z: typing.Array | None,
+      x_pos_encoding: typing.Array | None,
+      z_pos_encoding: typing.Array | None,
   ) -> typing.Array | None:
     """Computes the key source for attention layers.
 
@@ -467,9 +468,9 @@ class TransformerBase(nnx.Module, abc.ABC):
   def attention_value_source(
       self,
       x: typing.Array,
-      z: typing.Array,
-      x_pos_encoding: typing.Array,
-      z_pos_encoding: typing.Array,
+      z: typing.Array | None,
+      x_pos_encoding: typing.Array | None,
+      z_pos_encoding: typing.Array | None,
   ) -> typing.Array | None:
     """Computes the value source for attention layers.
 
@@ -490,11 +491,11 @@ class TransformerBase(nnx.Module, abc.ABC):
       self,
       attention: MultiHeadAttention,
       query: typing.Array,
-      key: typing.Array,
-      value: typing.Array,
-      mask: typing.Array,
-      query_pos_encoding: typing.Array,
-      kv_pos_encoding: typing.Array,
+      key: typing.Array | None,
+      value: typing.Array | None,
+      mask: typing.Array | None,
+      query_pos_encoding: typing.Array | None,
+      kv_pos_encoding: typing.Array | None,
       layer_idx: int,
   ) -> typing.Array:
     """Applies the `attention` to the given query, key, and value.
@@ -557,16 +558,16 @@ class TransformerBase(nnx.Module, abc.ABC):
     parts = zip(self.attentions, self.dense_layers, strict=True)
     for i, (attention, dense) in enumerate(parts):
       x_norm = pre_norms[2 * i](x)
-      keys = self.attention_key_source(x_norm, z, x_pos_enc, z_pos_enc)  # pyrefly: ignore[bad-argument-type]
-      values = self.attention_value_source(x_norm, z, x_pos_enc, z_pos_enc)  # pyrefly: ignore[bad-argument-type]
+      keys = self.attention_key_source(x_norm, z, x_pos_enc, z_pos_enc)
+      values = self.attention_value_source(x_norm, z, x_pos_enc, z_pos_enc)
       x_attn = self.apply_attention(
           attention=attention,
           query=x_norm,
-          key=keys,  # pyrefly: ignore[bad-argument-type]
-          value=values,  # pyrefly: ignore[bad-argument-type]
-          query_pos_encoding=x_pos_enc,  # pyrefly: ignore[bad-argument-type]
-          kv_pos_encoding=z_pos_enc,  # pyrefly: ignore[bad-argument-type]
-          mask=mask,  # pyrefly: ignore[bad-argument-type]
+          key=keys,
+          value=values,
+          query_pos_encoding=x_pos_enc,
+          kv_pos_encoding=z_pos_enc,
+          mask=mask,
           layer_idx=i,
       )
       x = gates[2 * i](x, self.activation(x_attn))
@@ -1022,7 +1023,7 @@ class WindowTransformerBlocks(TransformerBase):
       key: typing.Array | None,
       value: typing.Array | None,
       mask: typing.Array | None,
-      query_pos_encoding: typing.Array,
+      query_pos_encoding: typing.Array | None,
       kv_pos_encoding: typing.Array | None,
       layer_idx: int,
   ):
@@ -1058,6 +1059,10 @@ class WindowTransformerBlocks(TransformerBase):
     Returns:
       The output of the attention module, in windowed format.
     """
+    if query_pos_encoding is None:
+      raise ValueError(
+          'query_pos_encoding is required for WindowTransformerBlocks.'
+      )
     if kv_pos_encoding is None:
       kv_pos_encoding = query_pos_encoding
 
@@ -1319,7 +1324,9 @@ class SphericalPositionalEncoder(nnx.Module):
   ) -> cx.Field:
     """Returns positional encodings for `inputs` over dimensions `dims`."""
     lon_lat_dims = ('longitude', 'latitude')
-    grid = cx.coords.compose(*[inputs.axes.get(d) for d in lon_lat_dims])  # pyrefly: ignore[bad-argument-type]
+    grid = cx.coords.compose(
+        *[inputs.axes[d] for d in lon_lat_dims if d in inputs.axes]
+    )
     if not isinstance(grid, coordinates.LonLatGrid):
       raise ValueError(
           'SphericalPositionalEncoder generates encoding for LonLatGrid data '
@@ -1363,7 +1370,7 @@ class EpdTransformer(nnx.Module, pytree=False):
       latent_size: int,
       num_process_blocks: int,
       encode_factory: standard_layers.UnaryLayerFactory,
-      process_factory: standard_layers.UnaryLayerFactory,
+      process_factory: Callable[..., TransformerLayer],
       decode_factory: standard_layers.UnaryLayerFactory,
       post_encode_activation: Callable[[Array], Array] | None = None,
       pre_decode_activation: Callable[[Array], Array] | None = None,
@@ -1379,7 +1386,7 @@ class EpdTransformer(nnx.Module, pytree=False):
     return cls(
         encode=encode,
         decode=decode,
-        process_blocks=process_blocks,  # pyrefly: ignore[bad-argument-type]
+        process_blocks=process_blocks,
         post_encode_activation=post_encode_activation,
         pre_decode_activation=pre_decode_activation,
         final_activation=final_activation,

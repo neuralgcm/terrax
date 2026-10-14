@@ -14,6 +14,7 @@
 
 """Defines DataSpec objects that parameterize inputs/queries in experiments."""
 
+from collections.abc import Mapping
 import dataclasses
 import enum
 from typing import Any, Generic, TypeAlias, TypeVar
@@ -140,7 +141,11 @@ class CoordSpec:
 
     for ax, expected_ax in zip(candidate.axes, spec.coord.axes, strict=True):
       [dim] = expected_ax.dims
-      match_schema = spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)  # pyrefly: ignore[no-matching-overload]
+      if dim is None:
+        raise ValueError(
+            f'Expected labeled axis in {spec.coord=}, got {expected_ax}'
+        )
+      match_schema = spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)
       if (
           match_schema == AxisMatchRules.EXACT
           or match_schema == AxisMatchRules.REPLACED
@@ -163,8 +168,8 @@ class CoordSpec:
               f'Coordinate axis {ax} for dimension {dim} is not'
               f' of the expected type {type(expected_ax)}.'
           )
-        required_ticks = expected_ax.fields.get(dim)  # pyrefly: ignore[bad-argument-type]
-        present_ticks = ax.fields.get(dim)  # pyrefly: ignore[bad-argument-type]
+        required_ticks = expected_ax.fields.get(dim)
+        present_ticks = ax.fields.get(dim)
         if required_ticks is not None:
           if present_ticks is None or not np.all(
               np.isin(required_ticks.data, present_ticks.data)  # pyrefly: ignore[bad-argument-type]
@@ -336,21 +341,23 @@ def finalize_spec(
         ' different dims'
     )
   coord_axes = []
-  is_shard = lambda x: isinstance(x, parallelism.CoordinateShard)
   dims_and_axes = zip(
       source_coord.dims, coord_in_spec.axes, source_coord.axes, strict=True
   )
   for dim, spec_ax, coord_ax in dims_and_axes:
     if (
-        spec_ax.shape == coord_ax.shape
-        and coord_spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)  # pyrefly: ignore[no-matching-overload]
+        dim is not None
+        and spec_ax.shape == coord_ax.shape
+        and coord_spec.dim_match_rules.get(dim, AxisMatchRules.EXACT)
         == AxisMatchRules.REPLACED
     ):
       coord_axes.append(spec_ax)
     else:
-      if is_shard(spec_ax) and not is_shard(coord_ax):
-        spmd_shape = spec_ax.spmd_mesh_shape  # pyrefly: ignore[missing-attribute]
-        partitions = spec_ax.dimension_partitions  # pyrefly: ignore[missing-attribute]
+      if isinstance(spec_ax, parallelism.CoordinateShard) and (
+          not isinstance(coord_ax, parallelism.CoordinateShard)
+      ):
+        spmd_shape = spec_ax.spmd_mesh_shape
+        partitions = spec_ax.dimension_partitions
         coord_axes.append(
             parallelism.CoordinateShard(coord_ax, spmd_shape, partitions)
         )
@@ -439,10 +446,9 @@ def get_coord_types(
   if isinstance(coordinate, CoordSpec):
     coordinate = coordinate.coord
 
-  is_cartesian_prod = lambda x: isinstance(x, cx.CartesianProduct)
-  if is_cartesian_prod(coordinate):
+  if isinstance(coordinate, cx.CartesianProduct):
     # using dict.fromkeys to preserve order of appearance.
-    types = list(dict.fromkeys(type(x) for x in coordinate.coordinates))  # pyrefly: ignore[missing-attribute]
+    types = list(dict.fromkeys(type(x) for x in coordinate.coordinates))
   else:
     types = [type(coordinate)]
   # if LabeledAxis is present, move it to the end of the list to ensure that we
@@ -533,7 +539,16 @@ def validate_inputs(
 
 def construct_query(
     inputs: typing.NestedFields,
-    queries_spec: dict[str, dict[str, cx.Coordinate | cx.Field | QuerySpec]],
+    queries_spec: Mapping[
+        str,
+        Mapping[
+            str,
+            cx.Coordinate
+            | cx.Field
+            | QuerySpec
+            | typing.Auxiliary[cx.Coordinate | cx.Field | QuerySpec],
+        ],
+    ],
 ) -> typing.Queries:
   """Constructs query from data and OutputDataSpecs."""
   queries = {}
@@ -541,6 +556,7 @@ def construct_query(
     queries[data_key] = {}
     in_data = inputs.get(data_key, {})
     for var_name, spec in query_spec.items():
+      spec, is_aux = typing.unwrap_auxiliary(spec)
       spec, is_field_in_query = _maybe_unwrap_field_spec(spec)
 
       if is_field_in_query or cx.is_field(spec):
@@ -550,18 +566,26 @@ def construct_query(
                 f'Field in query for {data_key}/{var_name} is specified in'
                 ' queries and in the data, which is bug-prone'
             )
-          queries[data_key][var_name] = spec
+          q_entry = spec
         else:
           if var_name not in in_data:
             raise ValueError(
                 f'Required data for {data_key}/{var_name} is missing in'
                 f' {in_data.keys()=}'
             )
-          queries[data_key][var_name] = in_data[var_name]
+          q_entry = in_data[var_name]
       elif isinstance(spec, CoordSpec):
         x = in_data.get(var_name, None)
         coord = x.coordinate if (x is not None and cx.is_field(x)) else None
-        queries[data_key][var_name] = finalize_spec(spec, coord)
+        q_entry = finalize_spec(spec, coord)
       elif isinstance(spec, cx.Coordinate):
-        queries[data_key][var_name] = spec
+        q_entry = spec
+      else:
+        raise ValueError(
+            f'Unsupported query spec type for {data_key}/{var_name}:'
+            f' {type(spec)}'
+        )
+      queries[data_key][var_name] = (
+          typing.Auxiliary(q_entry) if is_aux else q_entry
+      )
   return queries

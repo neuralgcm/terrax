@@ -21,11 +21,11 @@ import numpy as np
 from terrax.core import pytree_utils
 
 
-class StreamingValue(nnx.Variable):
+class StreamingValue(nnx.Variable[dict[str, cx.Field]]):
   ...
 
 
-class StreamingCounter(nnx.Variable):
+class StreamingCounter(nnx.Variable[dict[str, cx.Field]]):
   ...
 
 
@@ -53,18 +53,18 @@ class StreamNorm(nnx.Module):
 
   Attributes:
     coords: Coordinates for keys over which normalization is done independently.
-    counters: Dictionary storing "counter" values for different keys.
-    means: Dictionary storing mean statistics for different keys.
-    m2: Dictionary storing squared sum statistics for different keys.
+    counters: Variable storing "counter" values for different keys.
+    means: Variable storing mean statistics for different keys.
+    m2: Variable storing squared sum statistics for different keys.
     epsilon: A small float added to variance to avoid dividing by zero.
     skip_unspecified: Whether to skip normalization for inputs not in `coords`.
     allow_missing: Whether to allow inputs to be missing keys in `coords`.
   """
 
   coords: dict[str, cx.Coordinate]
-  counters: dict[str, StreamingCounter] = nnx.data()
-  means: dict[str, StreamingValue] = nnx.data()
-  m2: dict[str, StreamingValue] = nnx.data()
+  counters: StreamingCounter = nnx.data()
+  means: StreamingValue = nnx.data()
+  m2: StreamingValue = nnx.data()
   epsilon: float
   skip_unspecified: bool
   skip_nans: bool
@@ -112,9 +112,9 @@ class StreamNorm(nnx.Module):
       mask: cx.Field | dict[str, cx.Field] | None = None,
   ):
     """Updates the statistics using the given inputs."""
-    counters = self.counters.get_value()  # pyrefly: ignore[missing-attribute]
-    means = self.means.get_value()  # pyrefly: ignore[missing-attribute]
-    m2s = self.m2.get_value()  # pyrefly: ignore[missing-attribute]
+    counters = self.counters.get_value()
+    means = self.means.get_value()
+    m2s = self.m2.get_value()
     for k, f in inputs.items():
       if k not in self.coords:
         continue
@@ -122,8 +122,10 @@ class StreamNorm(nnx.Module):
       mean = means[k]
       sum_squares = m2s[k]
       stat_coord = self.coords[k]
-      batch_dims = tuple(d for d in f.dims if d not in stat_coord.dims)
-      x = f.untag(*batch_dims)  # pyrefly: ignore[bad-argument-type]
+      batch_dims = tuple(
+          d for d in f.dims if d is not None and d not in stat_coord.dims
+      )
+      x = f.untag(*batch_dims)
       if cx.get_coordinate(x, missing_axes='skip') != stat_coord:
         raise ValueError(f'wrong coord on {k=}')
 
@@ -134,7 +136,7 @@ class StreamNorm(nnx.Module):
           if not cx.is_field(m):
             raise ValueError(f'mask {m=} is not a field for {k=}')
           m = m.broadcast_like(f)
-          w = cx.cmap(lambda m: m.astype(jnp.int32))(m.untag(*batch_dims))  # pyrefly: ignore[bad-argument-type]
+          w = cx.cmap(lambda m: m.astype(jnp.int32))(m.untag(*batch_dims))
 
       if self.skip_nans:
         is_not_nan = cx.cmap(lambda arr: (~jnp.isnan(arr)).astype(jnp.int32))(x)
@@ -144,7 +146,7 @@ class StreamNorm(nnx.Module):
           w = w * is_not_nan
 
       if w is None:
-        batch_size = int(np.prod([f.named_shape[d] for d in batch_dims]))  # pyrefly: ignore[bad-index]
+        batch_size = int(np.prod([f.named_shape[d] for d in batch_dims]))
         count_inc = batch_size
         batch_mean = cx.cmap(jnp.mean)(x)
         # Note: we need population variance here (sum of squared deviations).
@@ -171,9 +173,9 @@ class StreamNorm(nnx.Module):
       counters[k] = new_counter
       means[k] = mean
       m2s[k] = sum_squares
-    self.counters.set_value(counters)  # pyrefly: ignore[missing-attribute]
-    self.means.set_value(means)  # pyrefly: ignore[missing-attribute]
-    self.m2.set_value(m2s)  # pyrefly: ignore[missing-attribute]
+    self.counters.set_value(counters)
+    self.means.set_value(means)
+    self.m2.set_value(m2s)
 
   def stats(
       self, ddof: float = 1
@@ -181,10 +183,10 @@ class StreamNorm(nnx.Module):
     means = {}
     variances = {}
     for k in self.coords:
-      means[k] = self.means.get_value()[k]  # pyrefly: ignore[missing-attribute]
-      counter = self.counters.get_value()[k]  # pyrefly: ignore[missing-attribute]
+      means[k] = self.means.get_value()[k]
+      counter = self.counters.get_value()[k]
       divisor = counter - ddof
-      var = self.m2.get_value()[k] / divisor  # pyrefly: ignore[missing-attribute]
+      var = self.m2.get_value()[k] / divisor
       ones = cx.field(jnp.ones(var.shape), var.coordinate)
       variances[k] = cx.cmap(jnp.where)(divisor > 0, var, ones)
     return means, variances

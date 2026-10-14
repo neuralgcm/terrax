@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import overload
 
 import numpy as np
 from terrax.core import scales
@@ -83,11 +84,13 @@ class SimUnits:
     """Alias for `water_vapor_isobaric_heat_capacity`."""
     return self.water_vapor_isobaric_heat_capacity
 
-  def nondimensionalize_timedelta64(self, timedelta: np.timedelta64) -> Numeric:
+  def nondimensionalize_timedelta64(self, timedelta: np.timedelta64) -> float:
     """Non-dimensionalizes and rescales a numpy timedelta."""
     base_unit = 's'
-    return self.scale.nondimensionalize(
-        timedelta / np.timedelta64(1, base_unit) * typing.units(base_unit)
+    return float(
+        self.scale.nondimensionalize(
+            timedelta / np.timedelta64(1, base_unit) * typing.units(base_unit)
+        )
     )
 
   def dimensionalize_timedelta64(self, value: Numeric) -> np.timedelta64:
@@ -146,16 +149,16 @@ class SimUnits:
   ) -> SimUnits:
     """Constructs `SimUnits` from SI constants."""
     return cls(
-        scale.nondimensionalize(radius_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(angular_velocity_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(gravity_acceleration_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(ideal_gas_constant_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(water_vapor_gas_constant_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(water_vapor_isobaric_heat_capacity_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(water_density_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(latent_heat_vaporization_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(latent_heat_fusion_si),  # pyrefly: ignore[bad-argument-type]
-        scale.nondimensionalize(kappa_si),  # pyrefly: ignore[bad-argument-type]
+        float(scale.nondimensionalize(radius_si)),
+        float(scale.nondimensionalize(angular_velocity_si)),
+        float(scale.nondimensionalize(gravity_acceleration_si)),
+        float(scale.nondimensionalize(ideal_gas_constant_si)),
+        float(scale.nondimensionalize(water_vapor_gas_constant_si)),
+        float(scale.nondimensionalize(water_vapor_isobaric_heat_capacity_si)),
+        float(scale.nondimensionalize(water_density_si)),
+        float(scale.nondimensionalize(latent_heat_vaporization_si)),
+        float(scale.nondimensionalize(latent_heat_fusion_si)),
+        float(scale.nondimensionalize(kappa_si)),
         reference_datetime=reference_datetime,
         scale=scale,
     )
@@ -208,6 +211,22 @@ ONE_MINUTE_DT_UNITS = SimUnits.from_si(
 )
 
 
+@overload
+def maybe_nondimensionalize(
+    x: None,
+    sim_units: SimUnits,
+) -> None:
+  ...
+
+
+@overload
+def maybe_nondimensionalize(
+    x: typing.Numeric | typing.Quantity | str | np.timedelta64,
+    sim_units: SimUnits,
+) -> typing.Numeric:
+  ...
+
+
 def maybe_nondimensionalize(
     x: typing.Numeric | typing.Quantity | str | np.timedelta64 | None,
     sim_units: SimUnits,
@@ -241,6 +260,6 @@ def get_one_minute_dt_units() -> SimUnits:
 
 def nondimensionalize_timedelta64(
     timedelta64: np.timedelta64, sim_units: SimUnits
-) -> typing.Numeric:
+) -> float:
   """sim_units.nondimensionalize_timedelta64 fn-wrapper for fiddle configs."""
   return sim_units.nondimensionalize_timedelta64(timedelta64)

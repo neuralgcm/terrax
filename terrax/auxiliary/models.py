@@ -39,6 +39,8 @@ class StateModelABC(api.Model, abc.ABC):
   values from a coupling wrapper between advance steps.
   """
 
+  data_key: str
+
   @abc.abstractmethod
   def stage_updates(self, updates: dict[str, cx.Field]) -> None:
     """Stages updates to be applied at the next update boundary."""
@@ -210,10 +212,10 @@ class LabeledStateModel(StateModelABC):
     return self.model_timestep
 
   @property
-  def inputs_spec(  # pyrefly: ignore[bad-override]
+  def inputs_spec(
       self,
-  ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordSpec]]:
-    specs = {
+  ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]]:
+    specs: dict[str, cx.Coordinate | data_specs.CoordLikeSpec] = {
         k: data_specs.CoordSpec.with_any_timedelta(v)
         for k, v in self.prognostic_coords.items()
     }
@@ -303,8 +305,8 @@ class WithObservedState(api.Model):
     for direct_key, q in direct_queries.items():
       ds_key = direct_key.removesuffix('_state')
       obs_model = self.observation_models[ds_key]
-      raw_obs = obs_model.observe({obs_model.data_key: q})  # pyrefly: ignore[missing-attribute]
-      direct_outputs[direct_key] = raw_obs[obs_model.data_key]  # pyrefly: ignore[missing-attribute]
+      raw_obs = obs_model.observe({obs_model.data_key: q})
+      direct_outputs[direct_key] = raw_obs[obs_model.data_key]
     return direct_outputs
 
   def _observe_with_forwarding(
@@ -360,19 +362,19 @@ class WithObservedState(api.Model):
                 f'Operator {ds_key!r} requires key {in_k!r} to be provided '
                 f'for query forwarding. Got keys: {list(in_query.keys())}'
             )
-          q, _ = typing.unwrap_auxiliary(in_query[in_k])  # pyrefly: ignore[bad-argument-type]
+          q, _ = typing.unwrap_auxiliary(in_query[in_k])
           forwarded_query[obs_k] = q
 
         if forwarded_query:
-          aux_obs = obs_model.observe({obs_model.data_key: forwarded_query})  # pyrefly: ignore[missing-attribute]
-          aux_results = aux_obs[obs_model.data_key]  # pyrefly: ignore[missing-attribute]
+          aux_obs = obs_model.observe({obs_model.data_key: forwarded_query})
+          aux_results = aux_obs[obs_model.data_key]
           injected_fields = {}
           for in_k, obs_k in forwarding_key_mapping.items():
             if obs_k in aux_results:
               f = aux_results[obs_k]
               is_aux = isinstance(in_query[in_k], typing.Auxiliary)
               injected_fields[in_k] = typing.Auxiliary(f) if is_aux else f
-          enriched_queries[ds_key] = in_query | injected_fields
+          enriched_queries[ds_key] = dict(in_query) | injected_fields
         else:
           enriched_queries[ds_key] = in_query
       else:
@@ -386,9 +388,9 @@ class WithObservedState(api.Model):
     return self.base_model.timestep
 
   @property
-  def inputs_spec(  # pyrefly: ignore[bad-override]
+  def inputs_spec(
       self,
-  ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordSpec]]:
+  ) -> dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]]:
     specs = dict(self.base_model.inputs_spec)
     for obs_model in self.observation_models.values():
       for k, v in obs_model.inputs_spec.items():
@@ -396,4 +398,4 @@ class WithObservedState(api.Model):
           specs[k] = specs[k] | v
         else:
           specs[k] = v
-    return specs  # pyrefly: ignore[bad-return]
+    return specs

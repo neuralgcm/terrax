@@ -29,7 +29,6 @@ import numpy as np
 from terrax.core import coordinates
 from terrax.core import diagnostics
 from terrax.core import dynamic_io
-from terrax.core import observation_operators
 from terrax.core import orographies
 from terrax.core import random_processes
 from terrax.core import transforms
@@ -108,11 +107,11 @@ class ObservationValueFeatures(transforms.TransformABC):
     query: Query passed to ``operator.observe``.
   """
 
-  operator: observation_operators.ObservationOperatorABC
+  operator: typing.ObservationOperator
   query: dict[str, cx.Coordinate]
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    return self.operator.observe(inputs, self.query)  # pyrefly: ignore[bad-argument-type]
+    return self.operator.observe(inputs, self.query)
 
 
 @nnx.dataclass
@@ -347,6 +346,6 @@ class ClimatologyFeatures(transforms.PytreeTransformABC):
             raise ValueError(f'Unsupported {reduce_hour_method=}')
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da, (cx.LabeledAxis,))  # pyrefly: ignore[bad-argument-type]
+        candidate = xarray_utils.field_from_xarray(da, (cx.LabeledAxis,))
         full_coord = cx.coords.compose(day_axis, self.coords[key])
         feature.set_value(candidate.order_as(full_coord).data)

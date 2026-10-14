@@ -325,7 +325,7 @@ def _compute_aggregation(
   else:
     targets_slice = cx.tag(loaded_targets_slice, batch_axis)
 
-  queries = data_specs.construct_query(targets_slice, query_spec)  # pyrefly: ignore[bad-argument-type]
+  queries = data_specs.construct_query(targets_slice, query_spec)
   targets_only_slice = data_loading.filter_inputs_by_queries(
       targets_slice, query_spec
   )
@@ -572,20 +572,23 @@ def _construct_full_queries_spec(
   """Constructs a queries with extra dimensions present in the inputs spec."""
   if not isinstance(queries_spec, dict):
     raise ValueError('queries must be a dictionary.')
-  is_field_in_query = lambda x: isinstance(x, data_specs.FieldInQuerySpec)
   targets = {}
   for source, specs in queries_spec.items():
     if specs:
       targets[source] = {}
     for var_name, q_spec in specs.items():
       input_coord = inputs_spec[source][var_name]
-      q_spec_coord = q_spec.spec if is_field_in_query(q_spec) else q_spec  # pyrefly: ignore[missing-attribute]
+      q_spec_coord = (
+          q_spec.spec
+          if isinstance(q_spec, data_specs.FieldInQuerySpec)
+          else q_spec
+      )
       if not cx.contains_dims(input_coord, q_spec_coord):  # pyrefly: ignore[bad-argument-type]
         raise ValueError(
             f'query entry {source}/{var_name} has inconsistent coordinates with'
             f' {input_coord=}.'
         )
-      if is_field_in_query(q_spec):
+      if isinstance(q_spec, data_specs.FieldInQuerySpec):
         targets[source][var_name] = data_specs.FieldInQuerySpec(input_coord)
       else:
         targets[source][var_name] = input_coord
@@ -1007,7 +1010,7 @@ class RolloutTrainer:
     )
     process_fn = lambda proc_module, target_slice: proc_module(target_slice)
     target_struct = nnx.eval_shape(process_fn, process_obs, target_slice_struct)
-    queries_struct = data_specs.construct_query(data_slice_struct, queries_spec)  # pyrefly: ignore[bad-argument-type]
+    queries_struct = data_specs.construct_query(data_slice_struct, queries_spec)
     dummy_observe = lambda model, proc_module, q: proc_module(
         _drop_field_in_queries_outputs(model.observe(q), q)
     )
@@ -1196,7 +1199,7 @@ class RolloutTrainer:
       )
 
       # Construct queries and compute predictions for this level.
-      queries = data_specs.construct_query(t0_targets, query_spec)  # pyrefly: ignore[bad-argument-type]
+      queries = data_specs.construct_query(t0_targets, query_spec)
       targets_only = data_loading.filter_inputs_by_queries(
           t0_targets, query_spec
       )

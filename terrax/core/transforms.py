@@ -30,7 +30,8 @@ import functools
 import itertools
 import operator
 import re
-from typing import Any, Callable, Literal, Sequence, TypeAlias
+import types
+from typing import Any, Callable, Literal, Sequence, TypeAlias, overload
 
 import coordax as cx
 from flax import nnx
@@ -97,6 +98,14 @@ class PytreeTransformABC(TransformABC, pytree=True):
 
 class FieldTransformABC(TransformABC):
   """Base class for elementwise transforms supporting both single Fields and dicts."""
+
+  @overload
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    ...
+
+  @overload
+  def __call__(self, inputs: cx.Field) -> cx.Field:
+    ...
 
   def __call__(
       self, inputs: dict[str, cx.Field] | cx.Field
@@ -262,7 +271,7 @@ class PrescribedFields(PytreeTransformABC):
         da = dataset[key]
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da, extra_types)  # pyrefly: ignore[bad-argument-type]
+        candidate = xarray_utils.field_from_xarray(da, extra_types)
         candidate = candidate.order_as(*f.dims)
         if strict_matches:
           candidate = candidate.untag(f.coordinate).tag(f.coordinate)
@@ -393,13 +402,13 @@ class SelectKeys(PytreeTransformABC):
     self.mode = mode
     self.strict = strict
 
-  def __call__(self, data: dict[str, cx.Field]) -> dict[str, cx.Field]:
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     selected_keys = set()
     if callable(self.keys):
-      selected_keys = {k for k in data.keys() if self.keys(k)}
+      selected_keys = {k for k in inputs.keys() if self.keys(k)}
     elif self.mode == 'regex':
       for pattern in self.keys:
-        matched = {k for k in data.keys() if re.fullmatch(pattern, k)}
+        matched = {k for k in inputs.keys() if re.fullmatch(pattern, k)}
         if self.strict and not matched:
           raise KeyError(
               f'Select strict mode failed. Regex pattern {pattern!r} '
@@ -409,19 +418,19 @@ class SelectKeys(PytreeTransformABC):
     elif self.mode == 'match':
       selected_keys = set(self.keys)
       if self.strict:
-        missing = selected_keys - data.keys()
+        missing = selected_keys - inputs.keys()
         if missing:
           raise KeyError(f'Select strict mode failed. Missing keys: {missing}')
-      selected_keys = selected_keys.intersection(data.keys())
+      selected_keys = selected_keys.intersection(inputs.keys())
     else:
       raise ValueError(f'Unknown mode: {self.mode}')
 
     # Apply inversion logic if needed.
     if self.invert:
-      final_keys = set(data.keys()) - selected_keys
+      final_keys = set(inputs.keys()) - selected_keys
     else:
       final_keys = selected_keys
-    return {k: v for k, v in data.items() if k in final_keys}
+    return {k: v for k, v in inputs.items() if k in final_keys}
 
 
 @nnx.dataclass
@@ -443,31 +452,39 @@ class FilterByCoord(PytreeTransformABC):
     ['a']
   """
 
-  coords: cx.Coordinate | Sequence[cx.Coordinate] | None = None
-  types: type[cx.Coordinate] | Sequence[type[cx.Coordinate]] | None = None
-  invert: bool = False
+  coords: tuple[cx.Coordinate, ...]
+  types: tuple[type[cx.Coordinate], ...]
+  invert: bool
 
-  def __post_init__(self):
-    if self.coords is None and self.types is None:
+  def __init__(  # pylint: disable=redefined-outer-name
+      self,
+      coords: cx.Coordinate | Sequence[cx.Coordinate] | None = None,
+      types: type[cx.Coordinate] | Sequence[type[cx.Coordinate]] | None = None,
+      invert: bool = False,
+  ):
+    if coords is None and types is None:
       raise ValueError('At least one of `coords` or `types` must be provided.')
     # Standardize `coords` and `types` representation.
-    coords = () if self.coords is None else self.coords
+    coords = () if coords is None else coords
     self.coords = (coords,) if cx.is_coord(coords) else tuple(coords)
-    types = () if self.types is None else self.types
-    self.types = (types,) if isinstance(types, type) else tuple(types)
+    coord_types = () if types is None else types
+    self.types = (
+        (coord_types,) if isinstance(coord_types, type) else tuple(coord_types)
+    )
+    self.invert = invert
 
-  def __call__(self, data: dict[str, cx.Field]) -> dict[str, cx.Field]:
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     selected_keys = set()
-    for k, v in data.items():
+    for k, v in inputs.items():
       match = False
       v_axes = set(v.coordinate.axes)
       v_components = set(cx.coords.canonicalize(*v.coordinate.axes))
-      for c in self.coords:  # pyrefly: ignore[not-iterable]
+      for c in self.coords:
         if set(c.axes).issubset(v_axes):
           match = True
           break
       if not match:
-        for t in self.types:  # pyrefly: ignore[not-iterable]
+        for t in self.types:
           if any(isinstance(ax, t) for ax in v_components):
             match = True
             break
@@ -475,11 +492,11 @@ class FilterByCoord(PytreeTransformABC):
         selected_keys.add(k)
 
     if self.invert:
-      final_keys = set(data.keys()) - selected_keys
+      final_keys = set(inputs.keys()) - selected_keys
     else:
       final_keys = selected_keys
 
-    return {k: v for k, v in data.items() if k in final_keys}
+    return {k: v for k, v in inputs.items() if k in final_keys}
 
 
 @nnx.dataclass
@@ -755,7 +772,10 @@ class ExpandDims(PytreeFieldTransformABC):
     else:
       if cx.contains_dims(field, self.loc):
         axis_to_the_right = cx.get_coordinate_part(field, self.loc)
-        loc = field.named_axes[axis_to_the_right.dims[0]]  # pyrefly: ignore[bad-index]
+        dim = axis_to_the_right.dims[0]
+        if dim is None:
+          raise ValueError(f'Axis {self.loc} must be labeled in {field=}')
+        loc = field.named_axes[dim]
       else:
         raise ValueError(f'Axis {self.loc} not present in {field=}')
     out_coord = cx.coords.insert_axes(field.coordinate, {loc: self.axis})
@@ -949,12 +969,13 @@ class ApplyFnToKeys(PytreeTransformABC):
   """
 
   fn: Callable[[cx.Field], cx.Field]
-  keys: str | Sequence[str] | Callable[[str], bool]
+  keys: str | Sequence[str] | Callable[[str], bool] | None = None
   invert: bool = False
   include_remaining: bool = False
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    to_transform = SelectKeys(self.keys, self.invert)(inputs)
+    keys = tuple(inputs.keys()) if self.keys is None else self.keys
+    to_transform = SelectKeys(keys, self.invert)(inputs)
     if self.include_remaining:
       keep_as_is = {k: v for k, v in inputs.items() if k not in to_transform}
     else:
@@ -1041,7 +1062,7 @@ class WrapFn(TransformABC):
             'out_keys must be a sequence of the same length as the returned'
             ' sequence.'
         )
-      outputs = dict(zip(self.out_keys, result))  # pyrefly: ignore[bad-argument-type]
+      outputs = dict(zip(out_keys, result))
     else:
       raise TypeError(f'Unexpected return type {type(result)} from {self.fn}')
     return outputs
@@ -1325,13 +1346,20 @@ class InpaintHarmonics(TransformABC):
   default_mask_key: str | None = None
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    masks = self.compute_masks(inputs)
-    masks = {k: masks.get(k, masks.get(self.default_mask_key)) for k in inputs}  # pyrefly: ignore[bad-argument-type]
-    for k, mask in masks.items():
+    raw_masks = self.compute_masks(inputs)
+    default_mask = (
+        raw_masks.get(self.default_mask_key)
+        if self.default_mask_key is not None
+        else None
+    )
+    masks = {}
+    for k in inputs:
+      mask = raw_masks.get(k, default_mask)
       if mask is None:
         raise ValueError(f'No mask found for {k=}')
+      masks[k] = mask
     # Initialize masked values with mean of valid data.
-    current_guess = {k: _masked_to_mean(v, masks[k]) for k, v in inputs.items()}  # pyrefly: ignore[bad-argument-type]
+    current_guess = {k: _masked_to_mean(v, masks[k]) for k, v in inputs.items()}
 
     # Helper to reset valid pixels: where(mask, current, original)
     # mask is True for pixels to be inpainted, False is to be reset with inputs.
@@ -1425,10 +1453,12 @@ class ComputeMasks(PytreeTransformABC):
       )
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    is_str = lambda x: isinstance(x, str)
-    mask_keys = (self.mask_keys,) if is_str(self.mask_keys) else self.mask_keys
-    if mask_keys is None:
-      mask_keys = inputs.keys()
+    if self.mask_keys is None:
+      mask_keys = tuple(inputs.keys())
+    elif isinstance(self.mask_keys, str):
+      mask_keys = (self.mask_keys,)
+    else:
+      mask_keys = self.mask_keys
 
     mask_method = self.compute_mask_method
     combine_method = self.combine_method
@@ -1438,7 +1468,7 @@ class ComputeMasks(PytreeTransformABC):
 
     outputs = {}
     for k in mask_keys:
-      m = compute_mask_fn(inputs[k], self.threshold_value)  # pyrefly: ignore[bad-index]
+      m = compute_mask_fn(inputs[k], self.threshold_value)
       if self.reduce_dims is not None:
         m = cx.reduce(reduce_op, m, *self.reduce_dims, allow_missing=True)
       outputs[k] = m
@@ -1446,9 +1476,10 @@ class ComputeMasks(PytreeTransformABC):
     if combine_method is not None:
       if not outputs:
         raise ValueError('No masks computed to combine.')
+      assert self.output_key is not None
       combine = jnp.logical_and if combine_method == 'all' else jnp.logical_or
       combined = functools.reduce(cx.cmap(combine), outputs.values())
-      return {self.output_key: combined}  # pyrefly: ignore[bad-assignment]
+      return {self.output_key: combined}
     return outputs
 
 
@@ -1489,9 +1520,14 @@ class ApplyOverMasks(TransformABC):
         if callable(self.apply_mask_method)
         else APPLY_MASK_FNS[self.apply_mask_method]
     )
+    default_mask = (
+        masks.get(self.default_mask_key)
+        if self.default_mask_key is not None
+        else None
+    )
     outputs = {}
     for k, v in inputs.items():
-      mask = masks.get(k, masks.get(self.default_mask_key))  # pyrefly: ignore[bad-argument-type]
+      mask = masks.get(k, default_mask)
       if mask is None:
         raise ValueError(f'No mask found for {k=}')
       outputs[k] = apply_mask_fn(v, mask)
@@ -1693,7 +1729,7 @@ class Relu(PytreeTransformABC):
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     return ApplyFnToKeys(
         fn=cx.cpmap(jax.nn.relu),
-        keys=self.keys,  # pyrefly: ignore[bad-argument-type]
+        keys=self.keys,
         invert=self.invert,
         include_remaining=self.include_remaining,
     )(inputs)
@@ -2057,13 +2093,13 @@ class ConstrainToCoarse(TransformABC):
 
       coarse_field = coarse_outputs[key]
       hres_field = hres_outputs[key]
-      downsampled_hres = self.regrid_to_coarse({key: hres_field})[key]  # pyrefly: ignore[bad-index]
+      downsampled_hres = self.regrid_to_coarse({key: hres_field})[key]
       ratio = coarse_field / (
           downsampled_hres
           + self.epsilon
           * cx.cmap(lambda x: jnp.where(x >= 0, 1.0, -1.0))(downsampled_hres)
       )
-      upsampled_ratio = self.regrid_to_hres({key: ratio})[key]  # pyrefly: ignore[bad-index]
+      upsampled_ratio = self.regrid_to_hres({key: ratio})[key]
       conserved_hres_field = hres_field * upsampled_ratio
       hres_outputs[key] = conserved_hres_field
     return hres_outputs
@@ -2308,7 +2344,7 @@ class SanitizeGradients(TransformABC):
     >>> safe_tx = transforms.SanitizeGradients(transforms.Identity())
   """
 
-  transform: TransformABC
+  transform: Transform
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     @nnx.custom_vjp
@@ -2468,8 +2504,8 @@ class Where(TransformABC):
   """
 
   mask_key: str
-  true_transform: TransformABC = nnx.data()
-  false_transform: TransformABC = nnx.data()
+  true_transform: Transform = nnx.data()
+  false_transform: Transform = nnx.data()
   include_remaining: bool = False
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -2482,11 +2518,11 @@ class Where(TransformABC):
     if set(true_outputs.keys()) != set(false_outputs.keys()):
       raise ValueError('True and false transforms must have the same keys.')
 
+    where_fn = cx.cmap(lambda t, f, m: jnp.where(m, t, f))
     results = {}
     for k, true_val in true_outputs.items():
       if k != self.mask_key:
-        where_fn = cx.cmap(jnp.where, out_axes=true_val.dims)
-        results[k] = where_fn(mask, true_val, false_outputs[k])
+        results[k] = where_fn(true_val, false_outputs[k], mask)
     if self.include_remaining:
       results.update({k: v for k, v in inputs.items() if k not in results})
     return results
@@ -2535,9 +2571,11 @@ class EntrywiseBinaryOp(TransformABC):
       cls,
       op,
       fields: dict[str, cx.Field],
-      inputs_transform: Transform = Identity(),  # pyrefly: ignore[bad-function-definition]
+      inputs_transform: Transform | None = None,
       include_remaining: bool = False,
   ):
+    if inputs_transform is None:
+      inputs_transform = Identity()
     return cls(
         op=op,
         operand_transform=PrescribedFields(fields),
@@ -2609,7 +2647,8 @@ class NestedTransform(nnx.Module, pytree=False):
   def __init__(
       self,
       transform: (
-          typing.Transform | dict[str | type(...), TransformWithOptionalKey]  # pyrefly: ignore[invalid-annotation]
+          typing.Transform
+          | dict[str | types.EllipsisType, TransformWithOptionalKey]
       ),
       default_transform: typing.Transform | None = None,
   ):

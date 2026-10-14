@@ -26,8 +26,6 @@ import jax.numpy as jnp
 from terrax.core import boundaries
 from terrax.core import typing
 
-Array = typing.Array
-
 default_w_init = nnx.initializers.lecun_normal()
 default_b_init = nnx.initializers.zeros_init()
 
@@ -320,7 +318,7 @@ class ConvLevel(nnx.Conv):
       output_size: int,
       *,
       kernel_size: int,
-      strides: int = 1,
+      strides: int | Sequence[int] = 1,
       padding: str = 'SAME',
       input_dilation: int = 1,
       kernel_dilation: int = 1,
@@ -400,7 +398,7 @@ class CnnLevel(nnx.Module):
               input_size=din,
               output_size=dout,
               kernel_size=kernel,
-              strides=strides,  # pyrefly: ignore[bad-argument-type]
+              strides=strides,
               input_dilation=input_dilation,
               kernel_dilation=dilation,
               padding=padding,
@@ -480,9 +478,9 @@ class Epd(nnx.Module):
   encode: UnaryLayer
   decode: UnaryLayer
   process_blocks: Sequence[UnaryLayer] = nnx.data()
-  post_encode_activation: Callable[[Array], Array] | None = None
-  pre_decode_activation: Callable[[Array], Array] | None = None
-  final_activation: Callable[[Array], Array] | None = None
+  post_encode_activation: Callable[[jax.Array], jax.Array] | None = None
+  pre_decode_activation: Callable[[jax.Array], jax.Array] | None = None
+  final_activation: Callable[[jax.Array], jax.Array] | None = None
 
   @property
   def input_size(self) -> int:
@@ -503,9 +501,9 @@ class Epd(nnx.Module):
       encode_factory: UnaryLayerFactory,
       process_factory: UnaryLayerFactory,
       decode_factory: UnaryLayerFactory,
-      post_encode_activation: Callable[[Array], Array] | None = None,
-      pre_decode_activation: Callable[[Array], Array] | None = None,
-      final_activation: Callable[[Array], Array] | None = None,
+      post_encode_activation: Callable[[jax.Array], jax.Array] | None = None,
+      pre_decode_activation: Callable[[jax.Array], jax.Array] | None = None,
+      final_activation: Callable[[jax.Array], jax.Array] | None = None,
       rngs: nnx.Rngs,
   ) -> Epd:
     encode = encode_factory(input_size, latent_size, rngs=rngs)
@@ -523,17 +521,17 @@ class Epd(nnx.Module):
         final_activation=final_activation,
     )
 
-  def __call__(self, inputs: Array) -> Array:
+  def __call__(self, inputs: jax.Array) -> jax.Array:
     """Applies all EPD layers to inputs."""
-    encoded = self.encode(inputs)  # pyrefly: ignore[bad-argument-type]
+    encoded = self.encode(inputs)
     if self.post_encode_activation is not None:
       encoded = self.post_encode_activation(encoded)
     current = encoded
     for process_block in self.process_blocks:
-      current = current + process_block(current)  # pyrefly: ignore[bad-argument-type]
+      current = current + process_block(current)
     if self.pre_decode_activation is not None:
       current = self.pre_decode_activation(current)
-    out = self.decode(current)  # pyrefly: ignore[bad-argument-type]
+    out = self.decode(current)
     if self.final_activation is not None:
       return self.final_activation(out)
     return out
@@ -577,10 +575,10 @@ class Sequential(nnx.Module, pytree=False):
       built_layers.append(layer_factory(d_in, d_out, rngs=rngs))
     return cls(layers=tuple(built_layers))
 
-  def __call__(self, inputs: Array) -> Array:
+  def __call__(self, inputs: jax.Array) -> jax.Array:
     current = inputs
     for layer in self.layers:
-      current = layer(current)  # pyrefly: ignore[bad-argument-type]
+      current = layer(current)
     return current
 
 
@@ -589,8 +587,8 @@ class CnnLonLat(nnx.Module, pytree=False):
   """CNN that uses ConvLonLat layers and preserves tail axis shape."""
 
   conv_layers: Sequence[ConvLonLat] = nnx.data()
-  activation: Callable[[Array], Array]
-  activation_final: Callable[[Array], Array] = lambda x: x
+  activation: Callable[[jax.Array], jax.Array]
+  activation_final: Callable[[jax.Array], jax.Array] = lambda x: x
 
   @classmethod
   def build_using_factories(
@@ -602,8 +600,8 @@ class CnnLonLat(nnx.Module, pytree=False):
       hidden_layers: int,
       kernel_size: tuple[int, int] = (3, 3),
       dilation: int = 1,
-      activation: Callable[[jnp.ndarray], jnp.ndarray] = jax.nn.gelu,
-      activation_final: Callable[[Array], Array] = lambda x: x,
+      activation: Callable[[jax.Array], jax.Array] = jax.nn.gelu,
+      activation_final: Callable[[jax.Array], jax.Array] = lambda x: x,
       use_bias: bool = True,
       rngs: nnx.Rngs,
   ) -> CnnLonLat:
@@ -623,13 +621,13 @@ class CnnLonLat(nnx.Module, pytree=False):
       )
     return cls(
         conv_layers=tuple(layers),
-        activation=activation,  # pyrefly: ignore[bad-argument-type]
+        activation=activation,
         activation_final=activation_final,
     )
 
-  def __call__(self, inputs: Array) -> Array:
+  def __call__(self, inputs: jax.Array) -> jax.Array:
     for i, layer in enumerate(self.conv_layers):
-      inputs = layer(inputs)  # pyrefly: ignore[bad-argument-type]
+      inputs = layer(inputs)
       if i != len(self.conv_layers) - 1:
         inputs = self.activation(inputs)
     return self.activation_final(inputs)

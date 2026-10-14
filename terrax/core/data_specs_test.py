@@ -20,6 +20,7 @@ import jax
 import numpy as np
 from terrax.core import coordinates
 from terrax.core import data_specs
+from terrax.core import typing
 
 
 class ValidateInputsTest(parameterized.TestCase):
@@ -349,6 +350,33 @@ class ConstructQueryTest(parameterized.TestCase):
     }
     queries = data_specs.construct_query(inputs, queries_spec)
     chex.assert_trees_all_equal(queries, {'data': {'u': u, 'v': y}})
+
+  def test_construct_query_with_auxiliary(self):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
+    z = cx.LabeledAxis('z', np.linspace(0, 1.0, num=3))
+    rng = np.random.RandomState(42)
+    u = cx.field(rng.randn(*x.shape), x)
+    w = cx.field(rng.randn(*z.shape), z)
+    inputs = {'data': {'u': u}}
+    queries_spec = {
+        'data': {
+            'u': typing.Auxiliary(data_specs.FieldInQuerySpec(spec=x)),
+            'v': typing.Auxiliary(data_specs.CoordSpec(y)),
+            'w': typing.Auxiliary(w),
+            'y_coord': typing.Auxiliary(y),
+        }
+    }
+    queries = data_specs.construct_query(inputs, queries_spec)
+    expected = {
+        'data': {
+            'u': typing.Auxiliary(u),
+            'v': typing.Auxiliary(y),
+            'w': typing.Auxiliary(w),
+            'y_coord': typing.Auxiliary(y),
+        }
+    }
+    chex.assert_trees_all_equal(queries, expected)
 
 
 class CoordSpecTest(parameterized.TestCase):

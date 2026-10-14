@@ -20,7 +20,6 @@ import pathlib
 from absl.testing import absltest
 from absl.testing import parameterized
 import coordax as cx
-from fiddle.experimental import auto_config
 from flax import nnx
 import jax
 import numpy as np
@@ -102,7 +101,6 @@ class MockModel(api.Model):
     }
 
 
-@auto_config.auto_config
 def construct_model(
     assimilation_noise: random_processes.RandomProcessModule | None = None,
 ) -> MockModel:
@@ -166,11 +164,6 @@ class RunnerTest(parameterized.TestCase):
       field_in_queries_coord: cx.Coordinate | None = None,
       use_dynamic_query_inputs: bool = False,
   ):
-    if 'GITHUB_ACTIONS' in os.environ:
-      self.skipTest(
-          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
-          'serialization.'
-      )
     if ensemble_size is not None:
       assimilation_noise = random_processes.UniformUncorrelated.construct(
           minval=-0.1, maxval=0.1, coord=cx.Scalar(), rngs=nnx.Rngs(0)
@@ -179,9 +172,7 @@ class RunnerTest(parameterized.TestCase):
       assimilation_noise = None
 
     module_model = construct_model(assimilation_noise)
-    model = api.InferenceModel.from_model_api(
-        module_model, construct_model.as_buildable(assimilation_noise)
-    )
+    model = api.InferenceModel.from_model_api(module_model)
     init_times = np.array(
         [np.datetime64('2025-01-01'), np.datetime64('2025-01-02')]
     )
@@ -376,9 +367,7 @@ class RunnerTest(parameterized.TestCase):
 
   def test_inference_runner_with_output_freq_per_dataset_key(self):
     module_model = construct_model()
-    model = api.InferenceModel.from_model_api(
-        module_model, construct_model.as_buildable()
-    )
+    model = api.InferenceModel.from_model_api(module_model)
     init_times = np.array(
         [np.datetime64('2025-01-01'), np.datetime64('2025-01-02')]
     )

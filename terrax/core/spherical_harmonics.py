@@ -472,7 +472,9 @@ class YlmMapper:
   def _extract_nodal_grid(self, x: cx.Field) -> coordinates.LonLatGrid:
     """Returns LonLatGrid from coordinates of `x`."""
     if 'longitude' in x.axes and 'latitude' in x.axes:
-      return cx.coords.compose(x.axes['longitude'], x.axes['latitude'])  # pyrefly: ignore[bad-return]
+      grid = cx.coords.compose(x.axes['longitude'], x.axes['latitude'])
+      assert isinstance(grid, coordinates.LonLatGrid)
+      return grid
     else:
       raise ValueError(f'No LonLatGrid in {x.axes=}')
 
@@ -481,9 +483,11 @@ class YlmMapper:
   ) -> coordinates.SphericalHarmonicGrid:
     """Returns SphericalHarmonicGrid from coordinates of `x`."""
     if 'longitude_wavenumber' in x.axes and 'total_wavenumber' in x.axes:
-      return cx.coords.compose(  # pyrefly: ignore[bad-return]
+      grid = cx.coords.compose(
           x.axes['longitude_wavenumber'], x.axes['total_wavenumber']
       )
+      assert isinstance(grid, coordinates.SphericalHarmonicGrid)
+      return grid
     else:
       raise ValueError(f'No SphericalHarmonicGrid in {x.axes=}')
 

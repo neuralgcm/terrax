@@ -259,12 +259,11 @@ class PerVariableLoss(Loss, PerVariableMetric):
     """Sums up the per-variable losses with optional weights."""
     if not metric_values:
       return cx.field(0.0)
-
-    total_loss = 0.0
     ws = collections.defaultdict(lambda: 1.0) | (self.variable_weights or {})
-    for var_name, value in sorted(metric_values.items()):
-      total_loss += ws[var_name] * value
-    return total_loss  # pyrefly: ignore[bad-return]
+    terms: list[cx.Field] = [
+        ws[k] * v for k, v in sorted(metric_values.items())
+    ]
+    return sum(terms[1:], start=terms[0])
 
   def debug_terms(
       self,
@@ -330,11 +329,11 @@ class SumLoss(Loss):
       }
       term_totals[term_name] = loss_term.total(term_metric_values)
 
-    final_loss = 0.0
+    if not term_totals:
+      return cx.field(0.0)
     ws = collections.defaultdict(lambda: 1.0) | (self.term_weights or {})
-    for term_name, term_total_loss in sorted(term_totals.items()):
-      final_loss += ws[term_name] * term_total_loss
-    return final_loss  # pyrefly: ignore[bad-return]
+    terms: list[cx.Field] = [ws[k] * v for k, v in sorted(term_totals.items())]
+    return sum(terms[1:], start=terms[0])
 
   def debug_terms(
       self,

@@ -50,10 +50,15 @@ CORE_COORD_TYPES = (
 )
 
 
+DatasetOrDataArray = TypeVar(
+    'DatasetOrDataArray', xarray.Dataset, xarray.DataArray
+)
+
+
 def xarray_nondimensionalize(
-    ds: xarray.Dataset | xarray.DataArray,
+    ds: DatasetOrDataArray,
     sim_units: units.SimUnits,
-) -> xarray.Dataset | xarray.DataArray:
+) -> DatasetOrDataArray:
   return xarray.apply_ufunc(sim_units.nondimensionalize, ds)
 
 
@@ -143,7 +148,7 @@ def time_field_from_xarray_coords(
 
 def xarray_to_fields(
     ds: xarray.Dataset,
-    additional_coord_types: tuple[cx.Coordinate, ...] = (),
+    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
 ) -> dict[str, cx.Field]:
   """Converts an xarray dataset to a dictionary of coordax.Field objects.
 
@@ -164,7 +169,7 @@ def xarray_to_fields(
 
 def xarray_to_fields_with_time(
     ds: xarray.Dataset,
-    additional_coord_types: tuple[cx.Coordinate, ...] = (),
+    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
 ) -> dict[str, cx.Field]:
   """Same as xarray_to_fields, but with required time in `ds` or `ds.coords`."""
   fields = xarray_to_fields(ds, additional_coord_types)
@@ -176,10 +181,12 @@ def xarray_to_fields_with_time(
 
 def field_from_xarray(
     data_array: xarray.DataArray,
-    additional_coord_types: tuple[cx.Coordinate, ...] = (),
+    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
 ) -> cx.Field:
   """Converts an xarray.DataArray to a Field using Terrax coordinates."""
-  return cx.from_xarray(data_array, CORE_COORD_TYPES + additional_coord_types)  # pyrefly: ignore[bad-argument-type]
+  return cx.from_xarray(
+      data_array, CORE_COORD_TYPES + tuple(additional_coord_types)
+  )
 
 
 def validate_xarray_inputs(
@@ -237,7 +244,7 @@ def read_from_xarray(
     coord_types = data_specs.get_coord_types(spec)
     if not strict_matches:
       coord_types += (cx.LabeledAxis,)
-    return field_from_xarray(da, coord_types)  # pyrefly: ignore[bad-argument-type]
+    return field_from_xarray(da, coord_types)
 
   result = {}
   for data_key, data_spec in in_spec.items():

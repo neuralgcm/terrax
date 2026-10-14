@@ -16,11 +16,13 @@
 
 import abc
 import dataclasses
-from typing import Sequence
+from typing import Sequence, TypeAlias
 
 import coordax as cx
 from flax import nnx
 from terrax.core import typing
+
+ObservationOperator: TypeAlias = typing.ObservationOperator
 
 
 class ObservationOperatorABC(nnx.Module, abc.ABC):
@@ -65,7 +67,7 @@ class DataObservationOperator(ObservationOperatorABC):
     observations = {}
     valid_keys = list(self.fields.keys())
     for k, raw_entry in query.items():
-      entry, is_aux = typing.unwrap_auxiliary(raw_entry)  # pyrefly: ignore[bad-argument-type]
+      entry, is_aux = typing.unwrap_auxiliary(raw_entry)
       if is_aux:
         continue
       if cx.is_field(entry):
@@ -129,7 +131,7 @@ class TransformObservationOperator(ObservationOperatorABC):
     unwrapped_query = {}
     auxiliary_keys = set()
     for k, v in query.items():
-      inner, is_aux = typing.unwrap_auxiliary(v)  # pyrefly: ignore[bad-argument-type]
+      inner, is_aux = typing.unwrap_auxiliary(v)
       unwrapped_query[k] = inner
       if is_aux:
         auxiliary_keys.add(k)
@@ -248,7 +250,7 @@ class DispatchByCoordinateObservationOperator(ObservationOperatorABC):
     coord_to_sub_query = {coord: {} for coord in self.coord_to_operator}
 
     for k, raw_entry in query.items():
-      entry, _ = typing.unwrap_auxiliary(raw_entry)  # pyrefly: ignore[bad-argument-type]
+      entry, _ = typing.unwrap_auxiliary(raw_entry)
       if cx.is_field(entry):
         entry_coord = entry.coordinate
       elif cx.is_coord(entry):

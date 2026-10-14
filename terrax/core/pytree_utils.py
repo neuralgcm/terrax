@@ -17,7 +17,7 @@
 from collections import abc
 import dataclasses
 import functools
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -173,8 +173,8 @@ def unflatten_dict(
 
 
 def merge_nested_dicts(
-    dict_a: dict[str, Any],
-    dict_b: dict[str, Any],
+    dict_a: Mapping[str, Any],
+    dict_b: Mapping[str, Any],
     *,
     consolidate_duplicates: bool = False,
 ) -> dict[str, Any]:
@@ -230,7 +230,7 @@ def replace_with_matching_or_default(
 
 def filter_nested_dict(
     filter_fn: Callable[[Any], bool],
-    dictionary: dict[str, Any],
+    dictionary: Mapping[str, Any],
 ) -> dict[str, Any]:
   """Returns a recursively filtered `dictionary`.
 

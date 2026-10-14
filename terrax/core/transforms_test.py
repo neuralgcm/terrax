@@ -1564,7 +1564,7 @@ class SanitizedNanGradTransformTest(parameterized.TestCase):
   )
   def test_equivalence_no_nans(
       self,
-      transform_factory: Callable[[], transforms.TransformABC],
+      transform_factory: Callable[[], transforms.Transform],
       inputs: dict[str, cx.Field],
   ):
     """Verifies sanitized matches original for clean inputs."""
@@ -1608,7 +1608,7 @@ class SanitizedNanGradTransformTest(parameterized.TestCase):
   )
   def test_gradients_with_nans(
       self,
-      transform_factory: Callable[[], transforms.TransformABC],
+      transform_factory: Callable[[], transforms.Transform],
       inputs: dict[str, cx.Field],
       inputs_filtered: dict[str, cx.Field],
   ):
@@ -1790,6 +1790,26 @@ class NestedTransformTest(parameterized.TestCase):
     actual = transform(inputs)
     expected = {'a': cx.field(jnp.array([10.0, 200.0]), x)}
     chex.assert_trees_all_equal(actual, expected)
+
+    with self.subTest('broadcast_true_branch_and_preserve_dims'):
+      y = cx.SizedAxis('y', 3)
+      broadcast_inputs = {
+          'mask': cx.field(jnp.array([True, False]), x),
+          'a': cx.field(jnp.ones((3, 2)), y, x),
+      }
+      true_1d = transforms.PrescribedFields(
+          {'a': cx.field(jnp.array([10.0, 20.0, 30.0]), y)}
+      )
+      false_2d = transforms.SelectKeys('a')
+      actual_bcast = transforms.Where('mask', true_1d, false_2d)(
+          broadcast_inputs
+      )
+      expected_bcast = {
+          'a': cx.field(
+              jnp.array([[10.0, 1.0], [20.0, 1.0], [30.0, 1.0]]), y, x
+          )
+      }
+      chex.assert_trees_all_equal(actual_bcast, expected_bcast)
 
   def test_compute_masks_combine_and_reduce(self):
     x = cx.SizedAxis('x', 2)

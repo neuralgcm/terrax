@@ -68,7 +68,7 @@ class ExtractPrecipitationPlusEvaporation(nnx.Module):
       self,
       tendencies: dict[str, cx.Field],
       prognostics: dict[str, cx.Field],
-  ) -> dict[str, cx.Field]:
+  ) -> cx.Field:
     to_nodal = self.ylm_map.to_nodal
     p_surface = cx.cmap(jnp.exp)(to_nodal(prognostics['log_surface_pressure']))
     scale = 1 / self.sim_units.gravity_acceleration
@@ -90,8 +90,12 @@ class ExtractPrecipitationPlusEvaporation(nnx.Module):
       prognostics = args[self.prognostics_arg_key]
     else:
       prognostics = kwargs.get(self.prognostics_arg_key)
-    p_plus_e_rate = self._compute_p_plus_e_rate(tendencies, prognostics)  # pyrefly: ignore[bad-argument-type]
-    return {'precipitation_plus_evaporation_rate': p_plus_e_rate}  # pyrefly: ignore[bad-assignment]
+    if not isinstance(prognostics, dict):
+      raise ValueError(
+          f'Prognostics must be a dictionary, got {type(prognostics)=} instead.'
+      )
+    p_plus_e_rate = self._compute_p_plus_e_rate(tendencies, prognostics)
+    return {'precipitation_plus_evaporation_rate': p_plus_e_rate}
 
 
 PrecipitationScales = Literal['rate', 'cumulative', 'mass_rate']
@@ -143,14 +147,43 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
   prognostics_arg_key: str | int = 'prognostics'
   precipitation_scaling: PrecipitationScales = 'rate'
   evaporation_scaling: PrecipitationScales = 'rate'
-  dt: float | np.timedelta64 | None = None
+  dt: float | None = None
   precipitation_key: str = 'precipitation'
   evaporation_key: str = 'evaporation'
   output_precipitation_key: str | None = None
   output_evaporation_key: str | None = None
   sim_units: units.SimUnits = nnx.static(kw_only=True)
 
-  def __post_init__(self):
+  def __init__(
+      self,
+      observation_operator: typing.ObservationOperator,
+      operator_query: dict[str, cx.Coordinate],
+      extract_p_plus_e: ExtractPrecipitationPlusEvaporation,
+      prognostics_arg_key: str | int = 'prognostics',
+      precipitation_scaling: PrecipitationScales = 'rate',
+      evaporation_scaling: PrecipitationScales = 'rate',
+      dt: float | np.timedelta64 | None = None,
+      precipitation_key: str = 'precipitation',
+      evaporation_key: str = 'evaporation',
+      output_precipitation_key: str | None = None,
+      output_evaporation_key: str | None = None,
+      *,
+      sim_units: units.SimUnits,
+  ):
+    self.observation_operator = observation_operator
+    self.operator_query = operator_query
+    self.extract_p_plus_e = extract_p_plus_e
+    self.prognostics_arg_key = prognostics_arg_key
+    self.precipitation_scaling = precipitation_scaling
+    self.evaporation_scaling = evaporation_scaling
+    if isinstance(dt, np.timedelta64):
+      dt = units.nondimensionalize_timedelta64(dt, sim_units)
+    self.dt = dt
+    self.precipitation_key = precipitation_key
+    self.evaporation_key = evaporation_key
+    self.output_precipitation_key = output_precipitation_key
+    self.output_evaporation_key = output_evaporation_key
+    self.sim_units = sim_units
     valid_keys = set([self.precipitation_key, self.evaporation_key])
     query_keys = set(self.operator_query.keys())
     if len(query_keys.intersection(valid_keys)) != 1:
@@ -159,8 +192,6 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
       )
     [self.observe_key] = valid_keys.intersection(query_keys)
     [self.diagnosed_key] = valid_keys.difference(query_keys)
-    if isinstance(self.dt, np.timedelta64):
-      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)  # pyrefly: ignore[bad-assignment]
     # Build output key mapping for renaming results.
     self._output_key_map = {}
     if self.output_precipitation_key is not None:
@@ -216,7 +247,7 @@ class ExtractPrecipitationAndEvaporation(nnx.Module):
     [p_plus_e] = self.extract_p_plus_e(tendencies, *args, **kwargs).values()
     prognostics = self._extract_prognostics(*args, **kwargs)
     observation = self.observation_operator.observe(
-        prognostics, query=self.operator_query  # pyrefly: ignore[bad-argument-type]
+        prognostics, query=self.operator_query
     )
     observation = observation[self.observe_key]
     precipitation_and_evaporation = {
@@ -249,7 +280,7 @@ class ExtractPrecipitationAndEvaporationWithConstraints(
     [p_plus_e] = self.extract_p_plus_e(tendencies, *args, **kwargs).values()
     prognostics = self._extract_prognostics(*args, **kwargs)
     observation = self.observation_operator.observe(
-        prognostics, query=self.operator_query  # pyrefly: ignore[bad-argument-type]
+        prognostics, query=self.operator_query
     )
     observation = observation[self.observe_key]
     if self.observe_key == self.precipitation_key:
@@ -309,13 +340,12 @@ class ExtractColumnDryAirMass(nnx.Module):
       )
     q_fields = [to_nodal(prognostics[k]) for k in self.moisture_species]
     if q_fields:
-      q_total = sum(q_fields)
+      one_minus_q = 1.0 - sum(q_fields[1:], start=q_fields[0])
     else:
-      q_total = 0.0
-    assert isinstance(q_total, (cx.Field, float, int))
+      one_minus_q = cx.field(1.0)
 
     column_dry_air_mass = (1 / g) * self.levels.integrate_over_pressure(
-        1.0 - q_total, p_surface_field, self.sim_units  # pyrefly: ignore[bad-argument-type]
+        one_minus_q, p_surface_field, self.sim_units
     )
     return {'column_dry_air_mass': column_dry_air_mass}
 
@@ -489,7 +519,7 @@ class ExtractEnergyResiduals(nnx.Module):
     )
 
     net_energy_terms = self.observation_operator.observe(
-        prognostics, query=self.energy_fluxes_query  # pyrefly: ignore[bad-argument-type]
+        prognostics, query=self.energy_fluxes_query
     )
 
     # Assuming observation_operator returns RT and FS fluxes in J/m^2
@@ -552,14 +582,36 @@ class ExtractColumnEnergyBudget(nnx.Module):
       default=None
   )
   energy_fluxes_query: dict[str, cx.Coordinate] | None = None
-  dt: float | np.timedelta64 | None = None
+  dt: float | None = None
   use_evaporation_for_latent_heat: bool = False
   use_liquid_ice_moist_static_energy: bool = False
   prognostics_arg_key: str | int | None = None
 
-  def __post_init__(self):
-    if isinstance(self.dt, np.timedelta64):
-      self.dt = units.nondimensionalize_timedelta64(self.dt, self.sim_units)  # pyrefly: ignore[bad-assignment]
+  def __init__(
+      self,
+      ylm_map: spherical_harmonics.FixedYlmMapping,
+      levels: coordinates.SigmaLevels | coordinates.HybridLevels,
+      sim_units: units.SimUnits,
+      model_orography: orographies.ModalOrography,
+      observation_operator: typing.ObservationOperator | None = None,
+      energy_fluxes_query: dict[str, cx.Coordinate] | None = None,
+      dt: float | np.timedelta64 | None = None,
+      use_evaporation_for_latent_heat: bool = False,
+      use_liquid_ice_moist_static_energy: bool = False,
+      prognostics_arg_key: str | int | None = None,
+  ):
+    self.ylm_map = ylm_map
+    self.levels = levels
+    self.sim_units = sim_units
+    self.model_orography = model_orography
+    self.observation_operator = observation_operator
+    self.energy_fluxes_query = energy_fluxes_query
+    if isinstance(dt, np.timedelta64):
+      dt = units.nondimensionalize_timedelta64(dt, sim_units)
+    self.dt = dt
+    self.use_evaporation_for_latent_heat = use_evaporation_for_latent_heat
+    self.use_liquid_ice_moist_static_energy = use_liquid_ice_moist_static_energy
+    self.prognostics_arg_key = prognostics_arg_key
     if self.energy_fluxes_query is not None:
       self.rt_keys = ['top_net_thermal_radiation', 'top_net_solar_radiation']
       self.fs_keys = [
@@ -656,7 +708,7 @@ class ExtractColumnEnergyBudget(nnx.Module):
             ' provided.'
         )
       net_energy_terms = self.observation_operator.observe(
-          prognostics, query=self.energy_fluxes_query  # pyrefly: ignore[bad-argument-type]
+          prognostics, query=self.energy_fluxes_query
       )
 
       # Assuming observation_operator returns RT and FS fluxes in J/m^2

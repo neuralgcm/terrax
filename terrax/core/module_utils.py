@@ -20,7 +20,7 @@ import dataclasses
 import functools
 import itertools
 import operator
-from typing import Any, Callable, Iterable, Literal, NamedTuple, Sequence, TypeVar, overload
+from typing import Any, Callable, Literal, NamedTuple, Sequence, TypeVar, overload
 
 import chex
 import coordax as cx
@@ -485,7 +485,7 @@ def vectorize_module_fn(
     """Wrapped function that applies vectorization."""
     vmap_axes = axes_to_vectorize
     if isinstance(vmap_axes, Sequence):
-      vmap_axes = cx.coords.compose(*axes_to_vectorize)  # pyrefly: ignore[not-iterable]
+      vmap_axes = cx.coords.compose(*vmap_axes)
     if isinstance(vmap_axes, cx.Coordinate):
       axes_seq = vmap_axes.axes  # ensures that axes are 1d.
     else:
@@ -510,24 +510,21 @@ def vectorize_module_fn(
       spmd_axis_names = custom_spmd_axis_names
       axis_names = custom_axis_names
 
-    is_str = lambda x: isinstance(x, str)
-    is_sequence = lambda x: isinstance(x, Sequence)
-    if spmd_axis_names is None or is_str(spmd_axis_names):
+    if spmd_axis_names is None or isinstance(spmd_axis_names, str):
       spmd_axis_names = [spmd_axis_names] * len(axes_seq)
-    elif is_sequence(spmd_axis_names):
+    elif isinstance(spmd_axis_names, Sequence):
       if len(spmd_axis_names) != len(axes_seq):
         raise ValueError(
-            # pyrefly: ignore[bad-argument-type]
             'custom_spmd_axis_names must have length equal to the rank of '
-            f'axes_to_vectorize, got {len(custom_spmd_axis_names)=} and '
+            f'axes_to_vectorize, got {len(spmd_axis_names)=} and '
             f'{len(axes_seq)=}'
         )
     else:
       raise ValueError(f'Unsupported {type(custom_spmd_axis_names)=}')
 
-    if axis_names is None or is_str(axis_names):
+    if axis_names is None or isinstance(axis_names, str):
       axis_names = [axis_names] * len(axes_seq)
-    elif is_sequence(axis_names):
+    elif isinstance(axis_names, Sequence):
       if len(axis_names) != len(axes_seq):
         raise ValueError(
             'custom_axis_names must have length equal to the rank of '
@@ -600,7 +597,7 @@ def format_callbacks(callback_specs):
     return callback_specs
   if isinstance(callback_specs, nnx.Module):  # single callback.
     return ModuleAndMethod(callback_specs, '__call__')  # call default method.
-  if isinstance(callback_specs, Iterable) and (len(callback_specs) == 2):  # pyrefly: ignore[bad-argument-type]
+  if isinstance(callback_specs, Sequence) and (len(callback_specs) == 2):
     return ModuleAndMethod(*callback_specs)
   raise TypeError(f'Unexpected {type(callback_specs)=}')
 
@@ -645,14 +642,14 @@ def with_callback(
     callback_fn(result, *args, **kwargs)
     return result
 
-  attrs = {
+  attrs: dict[str, Any] = {
       '__init__': __init__,
       '__getattr__': __getattr__,
       method_name: wrapped_fn,
   }
   if dataclasses.is_dataclass(base_class):
     for field in dataclasses.fields(base_class):
-      attrs[field.name] = property(  # pyrefly: ignore[unsupported-operation]
+      attrs[field.name] = property(
           lambda self, field=field: getattr(self.wrapped_instance, field.name)
       )
   cls = type(

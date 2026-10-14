@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import functools
-from typing import Any, Callable, Generic, Protocol, TypeVar
+from typing import Any, Callable, Generic, Mapping, Protocol, TypeVar
 
 import coordax as cx
 from flax import nnx
@@ -44,11 +44,12 @@ ShapeFloatStruct = functools.partial(ShapeDtypeStruct, dtype=jnp.float32)
 Quantity = scales.Quantity
 
 T = TypeVar('T')
+T_co = TypeVar('T_co', covariant=True)
 
 
 @jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass
-class Auxiliary(Generic[T]):
+class Auxiliary(Generic[T_co]):
   """Wrapper indicating a supporting field/coord excluded from final output.
 
   Use this to mark query entries that are needed for internal computation
@@ -60,7 +61,7 @@ class Auxiliary(Generic[T]):
   3. **Filter:** Exclude keys whose original query entry was ``Auxiliary``.
   """
 
-  spec: T
+  spec: T_co
 
   def tree_flatten(self):
     return (self.spec,), None
@@ -84,7 +85,7 @@ def unwrap_auxiliary(spec: T | Auxiliary[T]) -> tuple[T, bool]:
 Fields = dict[str, cx.Field]
 NestedFields = dict[str, Fields]
 Observation = dict[str, dict[str, cx.Field]]
-Query = dict[
+Query = Mapping[
     str,
     cx.Coordinate | cx.Field | Auxiliary[cx.Coordinate] | Auxiliary[cx.Field],
 ]

@@ -575,7 +575,7 @@ class ExtractFixedQueryObservations(nnx.Module):
   def __call__(self, result, *args, **kwargs) -> dict[str, cx.Field]:
     del result  # unused.
     prognostics = self._extract_prognostics(*args, **kwargs)
-    extracted = self.observation_operator.observe(prognostics, query=self.query)  # pyrefly: ignore[bad-argument-type]
+    extracted = self.observation_operator.observe(prognostics, query=self.query)
     if self.transform is not None:
       extracted = self.transform(extracted)
     return extracted

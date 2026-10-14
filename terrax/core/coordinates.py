@@ -94,7 +94,7 @@ class TimeDelta(cx.Coordinate):
     object.__setattr__(self, 'deltas', deltas.astype('timedelta64[s]'))
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('timedelta',)
 
   @property
@@ -105,11 +105,11 @@ class TimeDelta(cx.Coordinate):
   def fields(self):
     return {'timedelta': cx.field(self.deltas, self)}
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     return coordax.experimental.map_indexers_using_ticks(
         self, indexers, ticks_are_sorted=True, method=method
     )
@@ -234,7 +234,7 @@ class LonLatGrid(cx.Coordinate):
     )
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('longitude', 'latitude')
 
   @property
@@ -265,19 +265,22 @@ class LonLatGrid(cx.Coordinate):
     """Remaps indexers to labeled axes."""
     longitudes_axis = cx.LabeledAxis('longitude', self.fields['longitude'].data)
     latitudes_axis = cx.LabeledAxis('latitude', self.fields['latitude'].data)
-    remap = {self.axes[0]: longitudes_axis, self.axes[1]: latitudes_axis}
+    remap: dict[str | cx.Coordinate, cx.Coordinate] = {
+        self.axes[0]: longitudes_axis,
+        self.axes[1]: latitudes_axis,
+    }
     axes = (longitudes_axis, latitudes_axis)
     indexers = {  # swap self.axes to LabeledAxes for both keys and idx values.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     return indexers, axes
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: coordax.experimental.SelMethod = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     # When slicing by longitude/latitude, we remap respective axes to
     # LabeledAxis, since sliced LonLatGrid is not necessarily a LonLatGrid.
     # This allows us to reuse 1d indexing logic. When returning, keys must be
@@ -295,17 +298,21 @@ class LonLatGrid(cx.Coordinate):
       consumed.update(sub_consumed)
 
     # Remap LabeledAxes keys back to self.axes to ensure keys consistency.
-    from_labeled = {l_ax: ax for l_ax, ax in zip((lon_ax, lat_ax), self.axes)}
+    from_labeled: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        l_ax: ax for l_ax, ax in zip((lon_ax, lat_ax), self.axes)
+    }
     consumed = {from_labeled.get(ax, ax) for ax in consumed}
     mapped = {from_labeled.get(k, k): v for k, v in mapped.items()}
-    return mapped, consumed  # pyrefly: ignore[bad-return]
+    return mapped, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     indexers, l_axes = self._remap_indexers_to_labeled_axes(indexers)
     l_isel = cx.coords.compose(*l_axes).isel(indexers)
     # If selected axis was not sliced, we preserve the original axis.
-    labeled_to_orig = {ax: orig for ax, orig in zip(l_axes, self.axes)}
-    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])  # pyrefly: ignore[no-matching-overload]
+    labeled_to_orig: dict[cx.Coordinate, cx.Coordinate] = {
+        ax: orig for ax, orig in zip(l_axes, self.axes)
+    }
+    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])
 
   def integrate(
       self,
@@ -713,7 +720,7 @@ class LonLatGrid(cx.Coordinate):
         latitude_nodes=latitude_nodes,
         latitude_spacing=latitude_spacing,
         longitude_offset=longitude_offset,
-        lon_lat_padding=tuple(int(x) for x in lon_lat_padding),  # pyrefly: ignore[bad-argument-type]
+        lon_lat_padding=(int(lon_lat_padding[0]), int(lon_lat_padding[1])),
     )
     result_lat = np.rad2deg(result._ylm_grid.latitudes)
     if not np.allclose(result_lat, lat, atol=1e-3):
@@ -756,7 +763,7 @@ class SphericalHarmonicGrid(cx.Coordinate):
     )
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('longitude_wavenumber', 'total_wavenumber')
 
   @property
@@ -791,19 +798,22 @@ class SphericalHarmonicGrid(cx.Coordinate):
     ls_ax = cx.LabeledAxis(
         'total_wavenumber', self.fields['total_wavenumber'].data
     )
-    remap = {self.axes[0]: ms_ax, self.axes[1]: ls_ax}
+    remap: dict[str | cx.Coordinate, cx.Coordinate] = {
+        self.axes[0]: ms_ax,
+        self.axes[1]: ls_ax,
+    }
     axes = (ms_ax, ls_ax)
     indexers = {  # swap self.axes to LabeledAxes for both keys and idx values.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     return indexers, axes
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     # When slicing by longitude/total wavenumber, we remap respective axes to
     # LabeledAxis, since sliced SphericalHarmonicGrid is not necessarily a
     # SphericalHarmonicGrid. This allows us to reuse 1d indexing logic. When
@@ -822,17 +832,21 @@ class SphericalHarmonicGrid(cx.Coordinate):
       consumed.update(sub_consumed)
 
     # Remap LabeledAxes keys back to self.axes to ensure keys consistency.
-    from_labeled = {l_ax: ax for l_ax, ax in zip((ms_ax, ls_ax), self.axes)}
+    from_labeled: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        l_ax: ax for l_ax, ax in zip((ms_ax, ls_ax), self.axes)
+    }
     consumed = {from_labeled.get(ax, ax) for ax in consumed}
     mapped = {from_labeled.get(k, k): v for k, v in mapped.items()}
-    return mapped, consumed  # pyrefly: ignore[bad-return]
+    return mapped, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     indexers, l_axes = self._remap_indexers_to_labeled_axes(indexers)
     l_isel = cx.coords.compose(*l_axes).isel(indexers)
     # If selected axis was not sliced, we preserve the original axis.
-    labeled_to_orig = {ax: orig for ax, orig in zip(l_axes, self.axes)}
-    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])  # pyrefly: ignore[no-matching-overload]
+    labeled_to_orig: dict[cx.Coordinate, cx.Coordinate] = {
+        ax: orig for ax, orig in zip(l_axes, self.axes)
+    }
+    return cx.coords.compose(*[labeled_to_orig.get(c, c) for c in l_isel.axes])
 
   def add_constant(
       self,
@@ -1117,7 +1131,10 @@ class SphericalHarmonicGrid(cx.Coordinate):
         longitude_wavenumbers=longitude_wavenumbers,
         total_wavenumbers=coords.sizes['total_wavenumber'],
         spherical_harmonics_method=spherical_harmonics_method,
-        wavenumber_padding=tuple(int(x) for x in wavenumber_padding),  # pyrefly: ignore[bad-argument-type]
+        wavenumber_padding=(
+            int(wavenumber_padding[0]),
+            int(wavenumber_padding[1]),
+        ),
     )
 
     expected = candidate.fields['longitude_wavenumber'].data
@@ -1170,7 +1187,7 @@ class SigmaLevels(cx.Coordinate):
     object.__setattr__(self, 'sigma_levels', sigma_levels)
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('sigma',)
 
   @property
@@ -1189,28 +1206,30 @@ class SigmaLevels(cx.Coordinate):
   def sigma_boundaries(self) -> SigmaBoundaries:
     return SigmaBoundaries(boundaries=self.boundaries)
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.sigma_levels.centers)
-    remap = {self: sigma_labeled}
+    remap: dict[str | cx.Coordinate, cx.Coordinate] = {self: sigma_labeled}
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     i_indexers, consumed = sigma_labeled.map_indexers(indexers, method)
-    from_labeled = {sigma_labeled: self}
-    consumed = {from_labeled.get(k, k) for k in consumed}  # pyrefly: ignore[no-matching-overload]
-    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}  # pyrefly: ignore[no-matching-overload]
+    from_labeled: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        sigma_labeled: self
+    }
+    consumed = {from_labeled.get(k, k) for k in consumed}
+    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}
     return i_indexers, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.sigma_levels.centers)
-    remap = {self: sigma_labeled}
+    remap: dict[str | cx.Coordinate, cx.Coordinate] = {self: sigma_labeled}
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     l_isel = sigma_labeled.isel(indexers)
@@ -1347,7 +1366,7 @@ class SigmaBoundaries(SigmaLevels):
   """Coordinate that represents boundaries of SigmaLevels."""
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('sigma_boundaries',)
 
   @property
@@ -1366,24 +1385,30 @@ class SigmaBoundaries(SigmaLevels):
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.boundaries)
-    remap = {self: sigma_labeled}
+    remap: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        self: sigma_labeled
+    }
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     i_indexers, consumed = sigma_labeled.map_indexers(indexers, method)
-    from_labeled = {sigma_labeled: self}
-    consumed = {from_labeled.get(k, k) for k in consumed}  # pyrefly: ignore[no-matching-overload]
-    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}  # pyrefly: ignore[no-matching-overload]
+    from_labeled: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        sigma_labeled: self
+    }
+    consumed = {from_labeled.get(k, k) for k in consumed}
+    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}
     return i_indexers, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     sigma_labeled = cx.LabeledAxis(self.dims[0], self.boundaries)
-    remap = {self: sigma_labeled}
+    remap: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        self: sigma_labeled
+    }
     indexers = {  # remaped to sigma_labeled.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     l_isel = sigma_labeled.isel(indexers)
@@ -1415,7 +1440,10 @@ class SigmaBoundaries(SigmaLevels):
           f'dimension {dim!r} != "sigma_boundaries"'
       )
     sigma_dim = dim.removesuffix('_boundaries')
-    return cls.from_sigma_levels(SigmaLevels.from_xarray((sigma_dim,), coords))  # pyrefly: ignore[bad-argument-type]
+    sigma_levels = SigmaLevels.from_xarray((sigma_dim,), coords)
+    if isinstance(sigma_levels, cx.coords.NoCoordinateMatch):
+      return sigma_levels
+    return cls.from_sigma_levels(sigma_levels)
 
 
 @jax.tree_util.register_static
@@ -1440,7 +1468,7 @@ class PressureLevels(cx.Coordinate):
     object.__setattr__(self, 'pressure_levels', pressure_levels)
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('pressure',)
 
   @property
@@ -1451,11 +1479,11 @@ class PressureLevels(cx.Coordinate):
   def fields(self):
     return {'pressure': cx.field(self.centers, self)}
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     return coordax.experimental.map_indexers_using_ticks(
         self,
         indexers,
@@ -1619,7 +1647,7 @@ class HybridLevels(cx.Coordinate):
     object.__setattr__(self, 'hybrid_levels', hybrid_levels)
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('hybrid',)
 
   @property
@@ -1639,7 +1667,10 @@ class HybridLevels(cx.Coordinate):
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     hybrid_labeled = cx.LabeledAxis(self.dims[0], self.fields['hybrid'].data)
-    idxrs = {{self: hybrid_labeled}.get(k, k): v for k, v in indexers.items()}  # pyrefly: ignore[no-matching-overload]
+    remap: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        self: hybrid_labeled
+    }
+    idxrs = {remap.get(k, k): v for k, v in indexers.items()}
     return hybrid_labeled.isel(idxrs)
 
   def asdict(self) -> dict[str, Any]:
@@ -1859,7 +1890,7 @@ class LayerLevels(cx.Coordinate):
   name: str = 'layer_index'
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return (self.name,)
 
   @property
@@ -1870,28 +1901,34 @@ class LayerLevels(cx.Coordinate):
   def fields(self):
     return {self.name: cx.field(np.arange(self.n_layers), self)}
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     labeled_layers = cx.LabeledAxis(self.name, np.arange(self.n_layers))
-    remap = {self: labeled_layers}
+    remap: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        self: labeled_layers
+    }
     indexers = {  # remaped to labeled_layers.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     i_indexers, consumed = labeled_layers.map_indexers(indexers, method)
-    from_labeled = {labeled_layers: self}
-    consumed = {from_labeled.get(k, k) for k in consumed}  # pyrefly: ignore[no-matching-overload]
-    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}  # pyrefly: ignore[no-matching-overload]
+    from_labeled: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        labeled_layers: self
+    }
+    consumed = {from_labeled.get(k, k) for k in consumed}
+    i_indexers = {from_labeled.get(k, k): v for k, v in i_indexers.items()}
     return i_indexers, consumed
 
   def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
     labeled_layers = cx.LabeledAxis(self.name, np.arange(self.n_layers))
-    remap = {self: labeled_layers}
+    remap: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        self: labeled_layers
+    }
     indexers = {  # remaped to labeled_layers.
-        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v  # pyrefly: ignore[no-matching-overload]
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
         for k, v in indexers.items()
     }
     l_isel = labeled_layers.isel(indexers)
@@ -1920,12 +1957,14 @@ class LayerLevels(cx.Coordinate):
 
 
 def validate_nonnegative_depth(centers: Iterable[float] | np.ndarray):
-  if not np.min(centers) >= 0:  # pyrefly: ignore[no-matching-overload]
+  centers = np.asarray(centers)
+  if not np.min(centers) >= 0:
     raise ValueError('SoilLevels coordinate should have non-negative depth.')
 
 
 def validate_increasing_depth(centers: Iterable[float] | np.ndarray):
-  if not np.min(np.diff(centers)) > 0:  # pyrefly: ignore[no-matching-overload]
+  centers = np.asarray(centers)
+  if not np.min(np.diff(centers)) > 0:
     raise ValueError(
         'SoilLevels coordinate should have monotonically increasing depth,'
         ' starting at the soil surface.'
@@ -1951,7 +1990,7 @@ class SoilLevels(cx.Coordinate):
     object.__setattr__(self, 'centers', centers)
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return ('soil_levels',)
 
   @property
@@ -1962,11 +2001,11 @@ class SoilLevels(cx.Coordinate):
   def fields(self):
     return {'soil_levels': cx.field(self.centers, self)}
 
-  def map_indexers(  # pyrefly: ignore[bad-override]
+  def map_indexers(
       self,
       indexers: dict[str | cx.Coordinate, Any],
       method: Literal['nearest'] | None = None,
-  ) -> tuple[dict[str, Any], set[str]]:
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
     return coordax.experimental.map_indexers_using_ticks(
         self,
         indexers,
@@ -2045,7 +2084,7 @@ class CoordinateWithPadding(cx.Coordinate):
       )
 
   @property
-  def dims(self):
+  def dims(self) -> tuple[str, ...]:
     return tuple(f'padded_{d}' for d in self.coordinate.dims)
 
   @property

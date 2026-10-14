@@ -240,14 +240,14 @@ def _get_sample_origins(
 
   # Convert to a list of slice objects.
   if time_slices is None:
-    time_slices = [time_slices]  # pyrefly: ignore[bad-assignment]
+    slices = [_make_slice(None)]
   elif all(isinstance(x, str) for x in time_slices) and len(time_slices) == 2:
-    time_slices = [time_slices]  # pyrefly: ignore[bad-assignment]
+    slices = [slice(*time_slices)]
+  elif all(isinstance(x, Sequence) and len(x) == 2 for x in time_slices):
+    slices = [_make_slice(x) for x in time_slices]
   else:
-    if not all(isinstance(x, Sequence) and len(x) == 2 for x in time_slices):
-      raise ValueError(f'Unsupported time_slices: {time_slices=}')
+    raise ValueError(f'Unsupported time_slices: {time_slices=}')
 
-  time_slices = [_make_slice(x) for x in time_slices]  # pyrefly: ignore[bad-assignment, not-iterable]
   time_axis_step = np.unique(np.diff(time_axis.values))
   if time_axis_step.size != 1:
     raise ValueError(
@@ -263,7 +263,7 @@ def _get_sample_origins(
   stride_between_windows = stride_between_windows.item()  # get int value.
   # Collect origin times from each slice.
   sample_origins = []
-  for ts in time_slices:  # pyrefly: ignore[not-iterable]
+  for ts in slices:
     slice_times = pd.Series(time_axis, index=time_axis).loc[ts].index
     candidates = slice_times[::stride_between_windows]
 
@@ -314,16 +314,14 @@ def sel_timedelta_fields(
 
   def _slice_field(x):
     in_timedelta_axis = x.axes['timedelta']
-    if isinstance(in_timedelta_axis, parallelism.CoordinateShard):
-      wrap_as_shard = True
-      td_axis = in_timedelta_axis.coordinate
-    elif isinstance(in_timedelta_axis, coordinates.TimeDelta):
-      wrap_as_shard = False
-      td_axis = in_timedelta_axis
-    else:
+    wrap_as_shard = isinstance(in_timedelta_axis, parallelism.CoordinateShard)
+    td_axis = (
+        in_timedelta_axis.coordinate if wrap_as_shard else in_timedelta_axis
+    )
+    if not isinstance(td_axis, coordinates.TimeDelta):
       raise ValueError(f'Unexpected type {type(in_timedelta_axis)}')
 
-    deltas = td_axis.deltas  # pyrefly: ignore[missing-attribute]
+    deltas = td_axis.deltas
 
     if isinstance(values, slice):
       if values.step is not None:
@@ -343,7 +341,7 @@ def sel_timedelta_fields(
         stop_idx = np.searchsorted(deltas, stop_val, side='right')
 
       get_slice = lambda x: x[start_idx:stop_idx]
-      out_td = td_axis[start_idx:stop_idx]  # pyrefly: ignore[bad-index]
+      out_td = td_axis[start_idx:stop_idx]
 
     else:
       # Scalar value
@@ -354,7 +352,7 @@ def sel_timedelta_fields(
       idx = indices[0]
       # Using slice [idx:idx+1] to preserve dimension.
       get_slice = lambda x: x[idx : idx + 1]
-      out_td = td_axis[idx : idx + 1]  # pyrefly: ignore[bad-index]
+      out_td = td_axis[idx : idx + 1]
 
     if wrap_as_shard:
       out_td = parallelism.CoordinateShard(

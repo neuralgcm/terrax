@@ -68,11 +68,11 @@ class Lorenz96Base(api.Model):
     # Adds input-like obs-operators if not set explicitly for dmeo purposes.
     if 'slow' not in self.operators and hasattr(self, 'x'):
       sel_x_and_t = transforms.SelectKeys(['x', 'time'])
-      obs_op = observation_operators.TransformObservationOperator(sel_x_and_t)  # pyrefly: ignore[bad-argument-type]
+      obs_op = observation_operators.TransformObservationOperator(sel_x_and_t)
       self.operators['slow'] = obs_op
     if 'fast' not in self.operators and hasattr(self, 'y'):
       sel_y_and_t = transforms.SelectKeys(['y', 'time'])
-      obs_op = observation_operators.TransformObservationOperator(sel_y_and_t)  # pyrefly: ignore[bad-argument-type]
+      obs_op = observation_operators.TransformObservationOperator(sel_y_and_t)
       self.operators['fast'] = obs_op
 
   @property
