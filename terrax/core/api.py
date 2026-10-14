@@ -418,7 +418,7 @@ class VectorizedModel(Model):
       return model.diagnostic_values()
 
     v_axis = self._vec_coord_for_filter(typing.Diagnostic)
-    return self.run_vectorized(run_get_diagnostic_values, v_axis)
+    self.run_vectorized(run_get_diagnostic_values, v_axis)
 
   @property
   def dynamic_inputs_spec(
