@@ -242,6 +242,205 @@ class ModelCalibratorsTest(absltest.TestCase):
     ):
       calibrator(model, None, None)
 
+  def test_set_variable_tags_and_clear(self):
+    class CoupledParent(nnx.Module):
+
+      def __init__(self):
+        self.atmosphere = MockModelParams(l1=nnx.Param(1.0), l2=nnx.Param(2.0))
+        self.ocean = MockModelParams(l1=nnx.Param(3.0), l2=nnx.Param(4.0))
+
+    model = CoupledParent()
+    tag_calibrator = model_calibrators.SetVariableTags(
+        component_key='atmosphere',
+        tag='non_trainable',
+    )
+    self.assertTrue(tag_calibrator.run_on_restore)
+    tag_calibrator(model, None, None)
+
+    trainable_filter = nnx.All(nnx.Param, nnx.Not(nnx.WithTag('non_trainable')))
+    trainable_state = nnx.state(model, trainable_filter)
+    frozen_state = nnx.state(model, nnx.WithTag('non_trainable'))
+
+    self.assertIn('ocean', trainable_state)
+    self.assertNotIn('atmosphere', trainable_state)
+    self.assertIn('atmosphere', frozen_state)
+    self.assertNotIn('ocean', frozen_state)
+
+    clear_calibrator = model_calibrators.SetVariableTags(
+        component_key='atmosphere',
+        tag=None,
+    )
+    clear_calibrator(model, None, None)
+    all_trainable = nnx.state(model, trainable_filter)
+    self.assertIn('atmosphere', all_trainable)
+    self.assertIn('ocean', all_trainable)
+
+  def test_set_variable_tags_sequence_and_filter(self):
+    class CoupledParent(nnx.Module):
+
+      def __init__(self):
+        self.atmosphere = MockModelParams(l1=nnx.Param(1.0), l2=nnx.Param(2.0))
+        self.ocean = MockModelParams(l1=nnx.Param(3.0), l2=nnx.Param(4.0))
+
+    model = CoupledParent()
+    calibrator = model_calibrators.SetVariableTags(
+        component_key=('atmosphere', 'ocean'),
+        tag='frozen_l1',
+        variable_filter=nnx.All(nnx.Param, nnx.PathContains('l1')),
+    )
+    calibrator(model, None, None)
+
+    frozen_state = nnx.state(model, nnx.WithTag('frozen_l1'))
+    self.assertIn('l1', frozen_state['atmosphere'])
+    self.assertNotIn('l2', frozen_state['atmosphere'])
+    self.assertIn('l1', frozen_state['ocean'])
+    self.assertNotIn('l2', frozen_state['ocean'])
+
+  def test_set_variable_tags_raises_on_no_matching_variables(self):
+    model = ParentModel(1.0, 2.0)
+    calibrator = model_calibrators.SetVariableTags(
+        component_key='my_component',
+        tag='non_trainable',
+        variable_filter=nnx.WithTag('non_existent'),
+    )
+    with self.assertRaisesRegex(ValueError, 'No variables matching'):
+      calibrator(model, None, None)
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_preserves_existing_tags(self, mock_load):
+    mock_load.return_value = MockModelParams(
+        l1=nnx.Param(3.0), l2=nnx.Param(4.0)
+    )
+    model = ParentModel(1.0, 2.0)
+
+    model_calibrators.SetVariableTags(
+        component_key='my_component', tag='non_trainable'
+    )(model, None, None)
+    model_calibrators.LoadModelComponentParams(
+        component_key='my_component',
+        ckpt_path_or_dir='/dummy/path',
+        is_training_checkpoint=False,
+    )(model, None, None)
+
+    self.assertEqual(model.my_component.l1.get_value(), 3.0)
+    self.assertEqual(model.my_component.l1.tag, 'non_trainable')
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_component_key_supports_mapping_and_nested_paths(self, mock_load):
+    class ModelWithOperators(nnx.Module):
+
+      def __init__(self):
+        self.operators = nnx.data({
+            'q07_era5:surface': MockModelParams(
+                l1=nnx.Param(1.0), l2=nnx.Param(2.0)
+            ),
+            'other:surface': MockModelParams(
+                l1=nnx.Param(5.0), l2=nnx.Param(6.0)
+            ),
+        })
+
+    mock_load.return_value = MockModelParams(
+        l1=nnx.Param(10.0), l2=nnx.Param(20.0)
+    )
+    model = ModelWithOperators()
+
+    model_calibrators.SetVariableTags(
+        component_key='operators.q07_era5:surface',
+        tag='trainable',
+    )(model, None, None)
+    model_calibrators.LoadModelComponentParams(
+        component_key='operators.q07_era5:surface',
+        ckpt_path_or_dir='/dummy/path',
+    )(model, None, None)
+
+    op = model.operators['q07_era5:surface']
+    self.assertEqual(op.l1.get_value(), 10.0)
+    self.assertEqual(op.l2.get_value(), 20.0)
+    self.assertEqual(op.l1.tag, 'trainable')
+    self.assertFalse(model.operators['other:surface'].l1.has_metadata('tag'))
+
+    with self.assertRaisesRegex(KeyError, 'missing:surface'):
+      model_calibrators.SetVariableTags(
+          component_key='operators.missing:surface', tag='trainable'
+      )(model, None, None)
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_raises_on_inner_value_mismatch(
+      self, mock_load
+  ):
+    mock_load.return_value = MockModelParams(
+        l1=nnx.Param({'a': 3.0}), l2=nnx.Param(4.0)
+    )
+    model = MockModelParams(l1=nnx.Param({'b': 1.0}), l2=nnx.Param(2.0))
+
+    calibrator = model_calibrators.LoadModelComponentParams(
+        component_key=None,
+        ckpt_path_or_dir='/dummy/path',
+    )
+    with self.assertRaisesRegex(
+        ValueError, 'Parameter structures do not match'
+    ):
+      calibrator(model, None, None)
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_multiple_param_types(self, mock_load):
+
+    class ParamAndStat(nnx.Module):
+
+      def __init__(self, param: float, stat: float):
+        self.param = nnx.Param(param)
+        self.stat = nnx.BatchStat(stat)
+
+    mock_load.return_value = ParamAndStat(3.0, 4.0)
+    model = ParamAndStat(1.0, 2.0)
+    model_calibrators.LoadModelComponentParams(
+        component_key=None,
+        ckpt_path_or_dir='/dummy/path',
+        param_types=(nnx.Param, nnx.BatchStat),
+    )(model, None, None)
+
+    self.assertEqual(model.param.get_value(), 3.0)
+    self.assertEqual(model.stat.get_value(), 4.0)
+
+  def test_set_variable_tags_untags_shared_subcomponents_via_top_level_key(
+      self,
+  ):
+    class DownscalingOperator(nnx.Module):
+
+      def __init__(self, coarse_op: nnx.Module):
+        self.tower = MockModelParams(l1=nnx.Param(1.0), l2=nnx.Param(2.0))
+        self.ref_coarse = coarse_op
+
+    class ModelWithSharedOperators(nnx.Module):
+
+      def __init__(self):
+        coarse_op = MockModelParams(l1=nnx.Param(5.0), l2=nnx.Param(6.0))
+        downscale_op = DownscalingOperator(coarse_op=coarse_op)
+        self.operators = nnx.data({
+            'tl63_era5:surface': coarse_op,
+            'q07_era5:surface': downscale_op,
+        })
+
+    model = ModelWithSharedOperators()
+
+    # Tag the downscaling operator (which also touches the shared coarse_op),
+    # then clear tags on the coarse operator via its top-level key.
+    model_calibrators.SetVariableTags(
+        component_key='operators.q07_era5:surface',
+        tag='trainable',
+    )(model, None, None)
+    model_calibrators.SetVariableTags(
+        component_key='operators.tl63_era5:surface',
+        tag=None,
+    )(model, None, None)
+
+    q07_op = model.operators['q07_era5:surface']
+    tl63_op = model.operators['tl63_era5:surface']
+    self.assertEqual(q07_op.tower.l1.tag, 'trainable')
+    self.assertEqual(q07_op.tower.l2.tag, 'trainable')
+    self.assertFalse(tl63_op.l1.has_metadata('tag'))
+    self.assertFalse(q07_op.ref_coarse.l1.has_metadata('tag'))
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -39,7 +39,6 @@ import optax
 import orbax.checkpoint as ocp
 from orbax.checkpoint import checkpoint_managers as ocp_managers
 from terrax.core import api
-from terrax.core import checkpointing as model_checkpointing
 from terrax.core import coordinates
 from terrax.core import data_specs
 from terrax.core import parallelism
@@ -431,18 +430,25 @@ class ExperimentState(NamedTuple):
 
   Attributes:
     opt_state: State of the Optax optimizer.
-    params: Model parameters (nnx.Param variables) optimized by the optimizer.
-    ema_params: Exponential moving average of model parameters.
-    non_params: Model variables not optimized by the optimizer (nnx.Variable
-      objects that are not params or temporary variables), typically set via
-      pretraining. Examples include normalization statistics, and static
-      orography and land/sea masks loaded from data.
+    params: Trainable model parameters (`nnx.Param` variables matching
+      `RolloutTrainer.trainable_parameters_filter`) optimized by the optimizer.
+    ema_params: Exponential moving average of `params`.
+    non_params: Persistent model variables not optimized by the optimizer,
+      including frozen `nnx.Param`s, normalization statistics, and static
+      fields such as orography and land/sea masks.
   """
 
   opt_state: PyTree
   params: nnx.State
   ema_params: nnx.State
   non_params: nnx.State
+
+
+def _split_all_params(
+    params: nnx.State, non_params: nnx.State
+) -> tuple[nnx.State, nnx.State]:
+  """Splits `(params, non_params)` into all `nnx.Param`s and other state."""
+  return nnx.split_state(nnx.merge_state(params, non_params), nnx.Param, ...)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -811,6 +817,8 @@ class RolloutTrainer:
   model: api.Model
   data_loader: data_loading.DataLoader
   process_observations: nnx.Module
+  # Calibrators with `run_on_restore=True` run when the trainer is constructed,
+  # others only when training starts from scratch, each in the listed order.
   calibration_modules: Sequence[model_calibrators.ModelCalibrator] | None
   train_schedule: TrainSchedule
   eval_schedule: EvalSchedule
@@ -821,6 +829,9 @@ class RolloutTrainer:
   remat_config: RematConfig
   ensemble_axis: cx.SizedAxis
   online_metrics_saver: OnlineMetricsSaver
+  # Selects trainable variables among nnx.Param instances. Other params are
+  # kept fixed in `ExperimentState.non_params`.
+  trainable_parameters_filter: nnx.filterlib.Filter = nnx.Param
   compute_loss_on_host: bool = False
   include_initial_loss: bool = False
   use_data_loading_callback: bool = False
@@ -894,17 +905,16 @@ class RolloutTrainer:
     if not self.eval_schedule.stages:
       raise ValueError('EvalSchedule must have at least one stage.')
 
-    self.init_params = nnx.state(self.model, nnx.Param)
-
-    # exponentially moving average params tracking.
-    ema_module = EMAParamsTree(
-        self.init_params, self.optimization_config.ema_num_steps
+    # Track EMA of trainable params; EMAParamsTree wraps the pytree in a single
+    # nnx.Param, so its graphdef does not depend on the pytree structure.
+    ema_graphdef = nnx.graphdef(
+        EMAParamsTree({}, self.optimization_config.ema_num_steps)
     )
-    ema_static = nnx.graphdef(ema_module)
 
     def update_ema(inputs, ema_state):
-      ema_params, (_, new_ema_state) = ema_static.apply(ema_state)(inputs)
-      return ema_params, new_ema_state
+      ema_module = nnx.merge(ema_graphdef, ema_state)
+      ema_params = ema_module(inputs)
+      return ema_params, nnx.state(ema_module, nnx.Param)
 
     def init_ema(rng, inputs):
       del rng  # unused.
@@ -914,6 +924,9 @@ class RolloutTrainer:
     self._ema_init = jax.jit(init_ema)
     self._ema_update = jax.jit(update_ema)
     self._eval_components_cache = {}
+    # Apply calibrators that configure non-checkpointed metadata (e.g. variable
+    # tags) upfront so all trainer methods see the configured model.
+    self._run_calibrators(run_on_restore=True)
 
   def _standardize_queries_specs(self) -> None:
     """Validates and standardizes queries specs of all stages."""
@@ -1463,6 +1476,42 @@ class RolloutTrainer:
         process_fn,
         process_obs,
         batch_axis,
+    )
+
+  @property
+  def _effective_trainable_filter(self) -> nnx.filterlib.Filter:
+    """Returns filter for trainable `nnx.Param` variables."""
+    return nnx.All(nnx.Param, self.trainable_parameters_filter)
+
+  def _split_model_state_for_training(self) -> tuple[nnx.State, nnx.State]:
+    """Splits model state into trainable params and other persistent state."""
+    # Unlike `core.checkpointing.split_model_state_for_saving`, which groups all
+    # `nnx.Param`s into `params`, training keeps frozen `nnx.Param`s in
+    # `non_params` so optimizer and EMA states only track trainable weights.
+    params, _, non_params = nnx.state(
+        self.model,
+        self._effective_trainable_filter,
+        (typing.SimulationVariable, typing.DynamicInput),
+        ...,
+    )
+    # Models without parameters are supported with the default filter, but a
+    # custom filter that matches no parameters is likely a misconfiguration.
+    is_custom_filter = self.trainable_parameters_filter is not nnx.Param
+    if is_custom_filter and not jax.tree.leaves(params):
+      raise ValueError(
+          'No trainable parameters matched'
+          f' {self.trainable_parameters_filter=}.'
+      )
+    return params, non_params
+
+  def _split_state_for_training(
+      self, params: nnx.State, non_params: nnx.State
+  ) -> tuple[nnx.State, nnx.State]:
+    """Splits `(params, non_params)` into trainable params and other state."""
+    return nnx.split_state(
+        nnx.merge_state(params, non_params),
+        self._effective_trainable_filter,
+        ...,
     )
 
   def _split_model_and_process_obs(self):
@@ -2120,6 +2169,46 @@ class RolloutTrainer:
         metadata=self.checkpoint_config.metadata,
     )
 
+  def _run_calibrators(self, *, run_on_restore: bool) -> None:
+    """Runs calibrators with matching `run_on_restore` on `self.model`."""
+    for calibrator in self.calibration_modules or ():
+      if calibrator.run_on_restore == run_on_restore:
+        self.model = calibrator(  # pyrefly: ignore[bad-assignment]
+            self.model, self.data_loader, self.train_schedule
+        )
+
+  def _restore_checkpoint(
+      self,
+      manager: ocp.CheckpointManager,
+      step: int | None,
+      *,
+      restore_optimizer_state: bool = True,
+  ) -> Any:
+    """Restores checkpoint at `step` from `manager` for the current model."""
+    args = self.get_checkpoint_state(
+        restore=True, restore_optimizer_state=restore_optimizer_state
+    )
+    try:
+      return manager.restore(step, args=args)
+    except ValueError as e:
+      if not restore_optimizer_state:
+        raise
+      if manager is self.checkpoint_manager:  # Resuming this experiment.
+        remedy = (
+            'start a new `experiment_dir` that initializes from this checkpoint'
+            ' via `InitialCheckpoint(..., reset_optimizer_state=True)`'
+        )
+      else:
+        remedy = 'use `InitialCheckpoint(..., reset_optimizer_state=True)`'
+      raise ValueError(
+          f'Failed to restore checkpoint at {step=} from {manager.directory}.'
+          ' A likely cause is that trainable parameters (selected by'
+          ' `trainable_parameters_filter` and variable tags set by calibrators)'
+          ' differ from those used to save the checkpoint, in which case'
+          ' optimizer and EMA states cannot be restored. To train a different'
+          f' set of parameters, {remedy}.'
+      ) from e
+
   def initialize_experiment(self) -> tuple[int, AutoRestart, ExperimentState]:
     """Initialize this experiment at the start of the training loop."""
     latest_step = self.checkpoint_manager.latest_step()
@@ -2130,37 +2219,35 @@ class RolloutTrainer:
 
     if latest_step is not None:
       logging.info('Resuming training from saved checkpoint')
-      args = self.get_checkpoint_state(restore=True)
-      ckpt = self.checkpoint_manager.restore(latest_step, args=args)
-      return self._initialize_from_checkpoint(ckpt)  # pyrefly: ignore[bad-argument-type]
+      ckpt = self._restore_checkpoint(self.checkpoint_manager, latest_step)
+      return self._initialize_from_checkpoint(ckpt)
 
     elif initial_dir is not None:
       logging.info('Starting training with weights from another experiment')
       initial_checkpoint = self.initial_checkpoint
       assert initial_checkpoint is not None
-      args = self.get_checkpoint_state(restore=True)
+      reset_optimizer_state = initial_checkpoint.reset_optimizer_state
       with checkpointing.read_only_manager(initial_dir) as manager:
-        ckpt = manager.restore(initial_checkpoint.checkpoint_step, args=args)
-
-      if initial_checkpoint.reset_optimizer_state:
-        logging.info('Resetting optimizer state, only using EMA params')
-        return self._initialize_for_fresh_start(
-            ckpt.ema_params, ckpt.non_params
+        ckpt = self._restore_checkpoint(
+            manager,
+            initial_checkpoint.checkpoint_step,
+            restore_optimizer_state=not reset_optimizer_state,
         )
+
+      if reset_optimizer_state:
+        logging.info('Resetting optimizer state, only using EMA params')
+        params, non_params = self._split_state_for_training(
+            ckpt.ema_params, ckpt.get('non_params', nnx.State({}))
+        )
+        return self._initialize_for_fresh_start(params, non_params)
       else:
         return self._initialize_from_checkpoint(ckpt)
 
     else:
       logging.info('Starting training with new weights')
-      if self.calibration_modules:
-        for calibrator in self.calibration_modules:
-          self.model = calibrator(  # pyrefly: ignore[bad-assignment]
-              self.model, self.data_loader, self.train_schedule
-          )
-      split_state = model_checkpointing.split_model_state_for_saving(self.model)
-      return self._initialize_for_fresh_start(
-          split_state.params, split_state.non_params
-      )
+      self._run_calibrators(run_on_restore=False)
+      params, non_params = self._split_model_state_for_training()
+      return self._initialize_for_fresh_start(params, non_params)
 
   def _initialize_for_fresh_start(
       self, params: nnx.State, non_params: nnx.State
@@ -2178,9 +2265,11 @@ class RolloutTrainer:
     start_step = ckpt.metadata['step']
     logging.info(f'Restored experiment from checkpoint at step={start_step}')
     auto_restart = AutoRestart(**ckpt.metadata['auto_restart'])
-    non_params = ckpt.get('non_params', nnx.State({}))
+    params, non_params = self._split_state_for_training(
+        ckpt.params, ckpt.get('non_params', nnx.State({}))
+    )
     experiment_state = ExperimentState(
-        ckpt.opt_state, ckpt.params, ckpt.ema_state, non_params
+        ckpt.opt_state, params, ckpt.ema_state, non_params
     )
     experiment_state = train_utils.ensure_replicated(
         experiment_state, mesh=self.spmd_mesh
@@ -2198,9 +2287,8 @@ class RolloutTrainer:
         f'Using buffered checkpoint, which has step={saved_step}. Ideally '
         f'would have used {target_step=}'
     )
-    args = self.get_checkpoint_state(restore=True)
-    ckpt = self.checkpoint_manager.restore(saved_step, args=args)
-    start_step, _, experiment_state = self._initialize_from_checkpoint(ckpt)  # pyrefly: ignore[bad-argument-type]
+    ckpt = self._restore_checkpoint(self.checkpoint_manager, saved_step)
+    start_step, _, experiment_state = self._initialize_from_checkpoint(ckpt)
     return (start_step, experiment_state)
 
   def save_checkpoint(
@@ -2227,6 +2315,7 @@ class RolloutTrainer:
       auto_restart: AutoRestart | None = None,
       save: bool = False,
       restore: bool = False,
+      restore_optimizer_state: bool = True,
   ) -> ocp.args.Composite:
     """Returns a checkpoint state for a given experiment_state."""
     if save and not restore:
@@ -2248,23 +2337,28 @@ class RolloutTrainer:
 
     if experiment_state is None:
       assert restore
-      split_state = model_checkpointing.split_model_state_for_saving(self.model)
-      experiment_state = self._make_initial_experiment_state(
-          split_state.params, split_state.non_params
-      )
+      params, non_params = self._split_model_state_for_training()
+      experiment_state = self._make_initial_experiment_state(params, non_params)
 
     opt_state, params, ema_state, non_params = experiment_state
     ema_params, _ = self._ema_update(params, ema_state)
+    # Training checkpoints store all `nnx.Param`s in `params`/`ema_params` and
+    # other persistent variables in `non_params` (matching
+    # `core.checkpointing.split_model_state_for_saving`), so checkpoints can be
+    # loaded without knowing `trainable_parameters_filter`.
+    ckpt_params, ckpt_non_params = _split_all_params(params, non_params)
+    ckpt_ema_params, _ = _split_all_params(ema_params, non_params)
 
     composite_args = {
-        'params': wrap_pytree(params),
-        'ema_params': wrap_pytree(ema_params),
-        'opt_state': wrap_pytree(opt_state),
-        'ema_state': wrap_pytree(ema_state),
+        'params': wrap_pytree(ckpt_params),
+        'ema_params': wrap_pytree(ckpt_ema_params),
         'metadata': metadata,
     }
-    if jax.tree.leaves(non_params):
-      composite_args['non_params'] = wrap_pytree(non_params)
+    if not restore or restore_optimizer_state:
+      composite_args['opt_state'] = wrap_pytree(opt_state)
+      composite_args['ema_state'] = wrap_pytree(ema_state)
+    if jax.tree.leaves(ckpt_non_params):
+      composite_args['non_params'] = wrap_pytree(ckpt_non_params)
     ckpt_state = ocp.args.Composite(**composite_args)
     return ckpt_state
 

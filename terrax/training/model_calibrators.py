@@ -14,8 +14,9 @@
 """Model calibration utilities."""
 
 import abc
+from collections.abc import Mapping, Sequence
 import dataclasses
-from typing import Any, TypeAlias
+from typing import Any, ClassVar, TypeAlias
 
 import coordax as cx
 from flax import nnx
@@ -33,8 +34,60 @@ DataLoader: TypeAlias = data_loading.DataLoader
 TrainSchedule: TypeAlias = Any  # Avoid circular import with trainer.py
 
 
+def _get_component(model: Any, key: str | None) -> Any:
+  """Returns the model component at a '.'-separated `key` path.
+
+  Each part of `key` is looked up as a key of a mapping or as an attribute
+  otherwise. Mapping keys that contain '.' cannot be addressed.
+
+  Args:
+    model: Model to retrieve the component from.
+    key: Path to the component. If None or empty, returns `model`.
+
+  Raises:
+    KeyError: If a mapping along the path does not contain the next part.
+  """
+  if not key:
+    return model
+  component = model
+  for part in key.split('.'):
+    if isinstance(component, Mapping):
+      if part not in component:
+        raise KeyError(f'{part!r} of {key=} not found in {list(component)}.')
+      component = component[part]
+    else:
+      component = getattr(component, part)
+  return component
+
+
+def _canonicalize_component_keys(
+    component_key: str | Sequence[str] | None,
+) -> tuple[str | None, ...]:
+  """Returns `component_key` as a tuple of keys accepted by `_get_component`."""
+  if component_key is None or isinstance(component_key, str):
+    return (component_key,)
+  return tuple(component_key)
+
+
 class ModelCalibrator(abc.ABC):
-  """Abstract base class for model calibrators."""
+  """Abstract base class for model calibrators.
+
+  Calibrators are expected to update existing model variables in place (e.g.
+  via `set_value`) rather than add or replace variables, which would drop
+  metadata set by other calibrators (e.g. tags set by `SetVariableTags`).
+
+  `RolloutTrainer` runs calibrators in two groups, each in the listed order:
+  calibrators with `run_on_restore=True` run when the trainer is constructed,
+  all others run only when training starts from scratch, i.e. not when
+  restoring from a checkpoint.
+
+  Attributes:
+    run_on_restore: Whether this calibrator should also apply when training is
+      restored from a checkpoint. Set to True for calibrators that configure
+      model metadata that is not saved in checkpoints (e.g. variable tags).
+  """
+
+  run_on_restore: ClassVar[bool] = False
 
   @abc.abstractmethod
   def __call__(
@@ -101,15 +154,29 @@ class UpdateSubmodulesFromXarray(ModelCalibrator):
     return model
 
 
+def _has_collected_stats(stream_norm: transforms.StreamNorm) -> bool:
+  """Returns whether `stream_norm` has accumulated statistics for any field."""
+  counters = stream_norm.stream_norm.counters.get_value()
+  return any(bool((count.data > 0).any()) for count in counters.values())
+
+
 @dataclasses.dataclass
 class CollectNormalizationStats(ModelCalibrator):
-  """Collects normalization statistics by running the model on data."""
+  """Collects normalization statistics by running the model on data.
+
+  By default, statistics of all `StreamNorm` modules in the model are updated.
+  `component_key` restricts updates to `StreamNorm` modules of the given model
+  component(s), and `skip_initialized` skips modules that already have
+  statistics (e.g. loaded from a checkpoint).
+  """
 
   train_stage_idx: int
   rng_seed: int
   time_start: str
   time_end: str
   batch_count: int
+  component_key: str | Sequence[str] | None = None
+  skip_initialized: bool = False
 
   def __call__(
       self,
@@ -117,6 +184,24 @@ class CollectNormalizationStats(ModelCalibrator):
       data_loader: DataLoader,
       train_schedule: TrainSchedule,
   ) -> Model:
+    stream_norms = []
+    for key in _canonicalize_component_keys(self.component_key):
+      component = _get_component(model, key)
+      for stream_norm in module_utils.retrieve_subclass_modules(
+          component, transforms.StreamNorm
+      ):
+        if not any(stream_norm is seen for seen in stream_norms):
+          stream_norms.append(stream_norm)
+
+    if self.skip_initialized:
+      stream_norms = [s for s in stream_norms if not _has_collected_stats(s)]
+
+    if not stream_norms:  # No stats to collect, can return early.
+      return model
+
+    for stream_norm in stream_norms:
+      stream_norm.update_stats = True
+
     rng = jax.random.key(self.rng_seed)
 
     def unroll_fn(model, inputs, dynamic_data, rng, queries):
@@ -128,11 +213,6 @@ class CollectNormalizationStats(ModelCalibrator):
       return observed
 
     unroll_fn = nnx.jit(unroll_fn)
-    stats_modules = module_utils.retrieve_subclass_modules(
-        model, transforms.StreamNorm
-    )
-    for m in stats_modules:
-      m.update_stats = True
 
     train_stage = train_schedule.stages[self.train_stage_idx]
     data_iter = data_loader.build_eval_inputs(
@@ -160,8 +240,8 @@ class CollectNormalizationStats(ModelCalibrator):
       jax.block_until_ready(result)
 
     # Set update_stats to False to avoid updating stats during training.
-    for m in stats_modules:
-      m.update_stats = False
+    for stream_norm in stream_norms:
+      stream_norm.update_stats = False
 
     return model
 
@@ -197,10 +277,10 @@ class LoadModelComponentParams(ModelCalibrator):
           path=self.ckpt_path_or_dir
       )
 
-    loaded_state = nnx.state(component, *self.param_types)
+    loaded_state = nnx.state(component, self.param_types)
     key = self.component_key
-    to_update = getattr(model, key) if key else model
-    target_state = nnx.state(to_update, *self.param_types)
+    to_update = _get_component(model, key)
+    target_state = nnx.state(to_update, self.param_types)
 
     if self.load_subset:
       loaded_vars = {
@@ -234,14 +314,75 @@ class LoadModelComponentParams(ModelCalibrator):
       for path in common_keys:
         target_vars[path].set_value(loaded_vars[path].get_value())
     else:
-      # Ensure there are no discrepancies between the parameter structures.
-      loaded_struct = jax.tree.structure(loaded_state)
-      target_struct = jax.tree.structure(target_state)
+      # Compare and update using pure dicts of values so existing variable
+      # metadata (e.g. tags set by `SetVariableTags`) is preserved.
+      loaded_values = nnx.to_pure_dict(loaded_state)
+      target_values = nnx.to_pure_dict(target_state)
+      loaded_struct = jax.tree.structure(loaded_values)
+      target_struct = jax.tree.structure(target_values)
       if loaded_struct != target_struct:
         raise ValueError(
             f'Parameter structures do not match for component {key}.\n'
             f'Loaded structure: {loaded_struct}\n'
             f'Target structure: {target_struct}'
         )
-      nnx.update(to_update, loaded_state)
+      nnx.update(to_update, loaded_values)
+    return model
+
+
+@dataclasses.dataclass
+class SetVariableTags(ModelCalibrator):
+  """Sets or clears (`tag=None`) metadata tags on matching component variables.
+
+  Tags can also be set directly in model code (e.g. via
+  `nnx.Param(value, tag=...)`), in which case they are part of the model
+  definition and persist in model checkpoints. This calibrator instead sets
+  tags for a specific training experiment, e.g. to select trainable parameters
+  via `RolloutTrainer.trainable_parameters_filter` (such as `nnx.WithTag(...)`
+  or `nnx.Not(nnx.WithTag(...))`).
+
+  Each variable holds at most one tag, so tags set by later calibrators replace
+  earlier ones. Flax also uses the `tag` metadata to identify RNG streams, hence
+  `variable_filter` should not select `nnx.RngState` variables.
+
+  Attributes:
+    component_key: Key(s) of model components whose variables are updated, see
+      `_get_component`. If None, updates variables of the whole model.
+    tag: Tag to set on matching variables. If None, removes existing tags.
+    variable_filter: Filter that selects variables to update.
+    run_on_restore: True, since tags are not saved in checkpoints and hence need
+      to be set whenever the trainer is constructed.
+  """
+
+  component_key: str | Sequence[str] | None
+  tag: str | None
+  variable_filter: nnx.filterlib.Filter = nnx.Param
+  run_on_restore: ClassVar[bool] = True
+
+  def __call__(
+      self,
+      model: Model,
+      data_loader: DataLoader,
+      train_schedule: TrainSchedule,
+  ) -> Model:
+    del data_loader, train_schedule  # Unused.
+    is_selected = nnx.filterlib.to_predicate(self.variable_filter)
+    for key in _canonicalize_component_keys(self.component_key):
+      component = _get_component(model, key)
+      variables = [
+          node
+          for path, node in nnx.iter_graph(component)
+          if isinstance(node, nnx.Variable) and is_selected(path, node)
+      ]
+      if not variables:
+        raise ValueError(
+            f'No variables matching {self.variable_filter=} found for'
+            f' component {key!r}.'
+        )
+      for variable in variables:
+        if self.tag is None:
+          if variable.has_metadata('tag'):
+            variable.del_metadata('tag')
+        else:
+          variable.set_metadata(tag=self.tag)
     return model

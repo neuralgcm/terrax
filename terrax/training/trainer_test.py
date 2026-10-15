@@ -40,7 +40,17 @@ from terrax.metrics import probabilistic_losses
 from terrax.metrics import scaling
 from terrax.toy_model_examples import lorenz96
 from terrax.training import data_loading
+from terrax.training import model_calibrators
 from terrax.training import trainer
+
+
+class DampingParameterization(nnx.Module):
+
+  def __init__(self, rate: float = 0.5):
+    self.rate = nnx.Param(jnp.array(rate))
+
+  def __call__(self, prognostics: dict[str, cx.Field], dt: float) -> cx.Field:
+    return -self.rate.get_value() * prognostics['x'] * dt
 
 
 class TestLorenz96(lorenz96.Lorenz96):
@@ -83,6 +93,19 @@ def _construct_spec(supported_spec, timedelta):
       supported_spec,
       is_leaf=lambda x: isinstance(x, data_specs.CoordSpec),
   )
+
+
+def _make_coupled_model() -> TestLorenz96:
+  """Returns a Lorenz96 model with a `damping` parameterization component."""
+  damping = DampingParameterization(rate=0.5)
+  model = TestLorenz96(
+      k_axis=cx.LabeledAxis('k', np.arange(8)),
+      dt=0.01,
+      forcing=nnx.Param(jnp.array(8.0)),
+      parameterizations=(damping,),
+  )
+  model.damping = damping
+  return model
 
 
 class TrainerTest(parameterized.TestCase):
@@ -807,6 +830,220 @@ class TrainerTest(parameterized.TestCase):
     result = initial_evaluator.evaluate(pred, target)
     mse_val = result['mse'].metric_values(mse)
     cx.testing.assert_fields_allclose(mse_val['x'], cx.field(0.0))
+
+  def _create_coupled_model_trainer(
+      self,
+      model: TestLorenz96,
+      data_loader: data_loading.DataLoader,
+      experiment_dir: str,
+      *,
+      freeze_damping: bool = False,
+      duration: int = 2,
+      initial_checkpoint: trainer.InitialCheckpoint | None = None,
+      trainable_parameters_filter: nnx.filterlib.Filter | None = None,
+  ) -> trainer.RolloutTrainer:
+    """Returns a trainer for a model created by `_make_coupled_model`."""
+    queries_specs = self._create_queries_specs(model)
+    eval_metrics, loss = self._create_evaluators(
+        dims_to_reduce=('ensemble', 'batch', 'k')
+    )
+    eval_metrics = evaluators.FlattenedEvaluator(eval_metrics)
+    loss = evaluators.FlattenedEvaluator(loss)
+    dt_slow = model.timestep * 4
+    timedelta = coordinates.TimeDelta(np.arange(2) * dt_slow)
+    inputs_spec = _construct_spec(model.inputs_spec, timedelta)
+    dyn_spec = _construct_spec(model.dynamic_inputs_spec, timedelta)
+    train_stage = trainer.TrainStage(
+        duration=duration,
+        inputs_spec=inputs_spec,
+        dynamic_inputs_spec=dyn_spec,
+        queries_spec=queries_specs,
+        loss=loss,
+        time_sample_offset=dt_slow,
+        batch_size_per_device=1,
+        shuffle_buffer_size=0,
+        train_time_slice=None,
+        eval_time_slice=None,
+    )
+    eval_schedule = trainer.EvalSchedule(
+        stages=[
+            trainer.EvalSchema(
+                cadence=2,
+                inputs_spec=inputs_spec,
+                dynamic_inputs_spec=dyn_spec,
+                queries_spec=queries_specs,
+                metrics_evaluator=eval_metrics,
+                loss_evaluator=loss,
+                time_sample_offset=dt_slow,
+                batch_size_per_device=1,
+                num_batches=1,
+                train_time_slice=None,
+                eval_time_slice=None,
+                name='eval',
+            )
+        ]
+    )
+    calibrators = None
+    if freeze_damping:
+      calibrators = [
+          model_calibrators.SetVariableTags(
+              component_key='damping', tag='non_trainable'
+          )
+      ]
+    if trainable_parameters_filter is None:
+      # Pass a negated tag filter without wrapping in nnx.All(nnx.Param, ...)
+      # to verify RolloutTrainer still restricts trainable parameters to
+      # nnx.Param. Without tagged variables, all params are trainable.
+      trainable_parameters_filter = nnx.Not(nnx.WithTag('non_trainable'))
+    return trainer.RolloutTrainer(
+        experiment_dir=experiment_dir,
+        model=model,
+        data_loader=data_loader,
+        process_observations=transforms.Identity(),
+        calibration_modules=calibrators,
+        train_schedule=trainer.TrainSchedule(stages=[train_stage]),
+        eval_schedule=eval_schedule,
+        optimization_config=trainer.OptimizationConfig(
+            optax.adam(1e-1), ema_num_steps=10
+        ),
+        initial_checkpoint=initial_checkpoint,
+        checkpoint_config=trainer.CheckpointConfig(
+            save_interval_steps=2,
+            keep_every_n_steps=10,
+            model_config_str='{}',
+        ),
+        auto_restart_config=trainer.AutoRestartConfig(),
+        remat_config=trainer.RematConfig(),
+        ensemble_axis=cx.SizedAxis('ensemble', 2),
+        online_metrics_saver=InMemorySaver(),
+        trainable_parameters_filter=trainable_parameters_filter,
+    )
+
+  def test_trainer_with_trainable_parameters_filter(self):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    data_loader = self._create_data_loader(all_data)
+    model = _make_coupled_model()
+    rollout_trainer = self._create_coupled_model_trainer(
+        model, data_loader, self.test_dir, freeze_damping=True
+    )
+    rollout_trainer.run_training()
+
+    forcing_after_stage1 = float(model.forcing.get_value())
+    self.assertNotAlmostEqual(forcing_after_stage1, 8.0)
+    self.assertAlmostEqual(float(model.damping.rate.get_value()), 0.5)
+
+    # Verify saved checkpoint stores distinct ema_params and params, and
+    # includes full model parameters (both trainable and non-trainable).
+    restore_args = rollout_trainer.get_checkpoint_state(restore=True)
+    ckpt = rollout_trainer.checkpoint_manager.restore(2, args=restore_args)
+    saved_forcing = float(ckpt.params['forcing'].get_value())
+    saved_ema_forcing = float(ckpt.ema_params['forcing'].get_value())
+    self.assertAlmostEqual(saved_forcing, forcing_after_stage1)
+    self.assertNotAlmostEqual(saved_ema_forcing, saved_forcing)
+    self.assertAlmostEqual(
+        float(ckpt.params['damping']['rate'].get_value()), 0.5
+    )
+    self.assertAlmostEqual(
+        float(ckpt.ema_params['damping']['rate'].get_value()), 0.5
+    )
+
+    # Verify resuming from checkpoint preserves tags and only updates trainable
+    # parameters.
+    resumed_model = _make_coupled_model()
+    resumed_trainer = self._create_coupled_model_trainer(
+        resumed_model,
+        data_loader,
+        self.test_dir,
+        freeze_damping=True,
+        duration=4,
+    )
+    resumed_trainer.run_training()
+
+    forcing_after_resume = float(resumed_model.forcing.get_value())
+    self.assertNotAlmostEqual(forcing_after_resume, forcing_after_stage1)
+    self.assertAlmostEqual(float(resumed_model.damping.rate.get_value()), 0.5)
+
+  def test_trainer_raises_if_no_parameters_are_trainable(self):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    rollout_trainer = self._create_coupled_model_trainer(
+        _make_coupled_model(),
+        self._create_data_loader(all_data),
+        self.test_dir,
+        trainable_parameters_filter=nnx.WithTag('missing_tag'),
+    )
+    with self.assertRaisesRegex(ValueError, 'No trainable parameters matched'):
+      rollout_trainer.run_training()
+
+  def test_new_trainer_restores_checkpoint_with_frozen_parameters(self):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    data_loader = self._create_data_loader(all_data)
+    self._create_coupled_model_trainer(
+        _make_coupled_model(), data_loader, self.test_dir, freeze_damping=True
+    ).run_training()
+
+    # Tags are set when the trainer is constructed, hence checkpoints with
+    # frozen parameters can be restored without initializing the experiment.
+    model = _make_coupled_model()
+    new_trainer = self._create_coupled_model_trainer(
+        model, data_loader, self.test_dir, freeze_damping=True
+    )
+    self.assertEqual(model.damping.rate.tag, 'non_trainable')
+    restore_args = new_trainer.get_checkpoint_state(restore=True)
+    ckpt = new_trainer.checkpoint_manager.restore(2, args=restore_args)
+    self.assertAlmostEqual(
+        float(ckpt.params['damping']['rate'].get_value()), 0.5
+    )
+
+  def test_warm_start_with_newly_frozen_parameters(self):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    data_loader = self._create_data_loader(all_data)
+    source_dir = self.create_tempdir().full_path
+    source_trainer = self._create_coupled_model_trainer(
+        _make_coupled_model(), data_loader, source_dir
+    )
+    source_trainer.run_training()
+    source_ema_params = source_trainer.checkpoint_manager.restore(
+        2, args=source_trainer.get_checkpoint_state(restore=True)
+    ).ema_params
+    source_damping = float(source_ema_params['damping']['rate'].get_value())
+    source_forcing = float(source_ema_params['forcing'].get_value())
+    self.assertNotAlmostEqual(source_damping, 0.5)  # damping was trained.
+    checkpoint_dir = os.path.join(source_dir, 'checkpoints')
+
+    with self.subTest('restoring_optimizer_state_raises'):
+      warm_start_trainer = self._create_coupled_model_trainer(
+          _make_coupled_model(),
+          data_loader,
+          self.create_tempdir().full_path,
+          freeze_damping=True,
+          initial_checkpoint=trainer.InitialCheckpoint(
+              checkpoint_dir=checkpoint_dir,
+              checkpoint_step=2,
+              reset_optimizer_state=False,
+          ),
+      )
+      with self.assertRaisesRegex(ValueError, 'reset_optimizer_state=True'):
+        warm_start_trainer.run_training()
+
+    with self.subTest('resetting_optimizer_state_keeps_frozen_parameters'):
+      model = _make_coupled_model()
+      self._create_coupled_model_trainer(
+          model,
+          data_loader,
+          self.create_tempdir().full_path,
+          freeze_damping=True,
+          initial_checkpoint=trainer.InitialCheckpoint(
+              checkpoint_dir=checkpoint_dir,
+              checkpoint_step=2,
+              reset_optimizer_state=True,
+          ),
+      ).run_training()
+      self.assertAlmostEqual(
+          float(model.damping.rate.get_value()), source_damping
+      )
+      self.assertNotAlmostEqual(
+          float(model.forcing.get_value()), source_forcing
+      )
 
 
 if __name__ == '__main__':
