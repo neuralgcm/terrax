@@ -23,6 +23,7 @@ import numpy as np
 from terrax.core import coordinates
 from terrax.core import data_specs
 from terrax.core import pytree_utils
+from terrax.core import typing
 
 CoordOrFinalizedQuery: TypeAlias = data_specs.FinalizedQuerySpec
 # Concrete spec excludes `OptionalSpec` and `CoordSpec` types, leaving only
@@ -36,7 +37,8 @@ InputsLike: TypeAlias = dict[str, dict[str, cx.Field]] | dict[str, cx.Field]
 
 
 def _get_coord(spec: CoordOrFinalizedQuery) -> cx.Coordinate:
-  """Unwraps FieldInQuerySpec if present."""
+  """Unwraps Auxiliary and FieldInQuerySpec if present."""
+  spec, _ = typing.unwrap_auxiliary(spec)
   if isinstance(spec, data_specs.FieldInQuerySpec):
     return spec.spec
   return spec
@@ -51,8 +53,10 @@ def _extract_timedelta(
 
 
 def _is_spec_leaf(x) -> bool:
-  """Returns True if x is a Coordinate or FieldInQuerySpec."""
-  return isinstance(x, (cx.Coordinate, data_specs.FieldInQuerySpec))
+  """Returns True if x is a Coordinate, FieldInQuerySpec, or Auxiliary."""
+  return isinstance(
+      x, (cx.Coordinate, data_specs.FieldInQuerySpec, typing.Auxiliary)
+  )
 
 
 def _drop_none_from_nested_dict(nested: ConcreteSpecs) -> ConcreteSpecs:

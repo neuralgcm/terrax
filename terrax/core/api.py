@@ -773,7 +773,10 @@ def _unroll_for_queries(
   )
   # pylint: enable=cell-var-from-loop
 
-  is_scannable_field = lambda x: cx.is_field(x) and 'timedelta' in x.dims
+  def is_scannable_field(x):
+    x, _ = typing.unwrap_auxiliary(x)
+    return cx.is_field(x) and 'timedelta' in x.dims
+
   is_close_over_query = lambda x: not is_scannable_field(x)
   scannable_field_queries_specs = tuple(
       pytree_utils.filter_nested_dict(is_scannable_field, q) for q in queries
@@ -959,7 +962,7 @@ def unroll_from_advance(
 def forecast_steps(
     model: InferenceModel,
     inputs: dict[str, dict[str, cx.Field]],
-    queries: typing.Query | tuple[typing.Query, ...],
+    queries: typing.Queries | tuple[typing.Queries, ...],
     timedelta: np.timedelta64 | tuple[np.timedelta64, ...],
     steps: int,
     *,
@@ -1014,7 +1017,7 @@ def forecast_steps(
 def unroll_for_template(
     model: InferenceModel,
     initial_state: typing.SimulationState,
-    template: dict[str, dict[str, cx.Field | cx.Coordinate]],
+    template: typing.Queries,
     dynamic_inputs: typing.Pytree | None = None,
     process_observations_fn: Callable[[typing.Observation], Any] = lambda x: x,
 ) -> tuple[typing.SimulationState, typing.Pytree]:
@@ -1042,10 +1045,16 @@ def unroll_for_template(
       - unroll: A trajectory of observations matching the template structure.
   """
   dt = model.timestep
-  coord_or_field = lambda x: cx.is_field(x) or cx.is_coord(x)
-  to_coord = lambda x: x.coordinate if cx.is_field(x) else x
+  is_query_leaf = lambda x: (
+      cx.is_field(x) or cx.is_coord(x) or isinstance(x, typing.Auxiliary)
+  )
+
+  def to_coord(x):
+    x, _ = typing.unwrap_auxiliary(x)
+    return x.coordinate if cx.is_field(x) else x
+
   combined_coords = jax.tree.map(
-      to_coord, template, is_leaf=coord_or_field
+      to_coord, template, is_leaf=is_query_leaf
   )
   has_t0 = list({
       cx.coords.extract(c, coordinates.TimeDelta).deltas[0]
