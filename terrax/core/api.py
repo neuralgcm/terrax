@@ -715,6 +715,9 @@ def _unroll_for_queries(
       or NO `TimeDelta` coordinate (indicating they apply to that specific
       nesting level and should be closed over in that level' computation).
     - All time-varying leaves must share a unique final lead time.
+    - Entries wrapped in `typing.Auxiliary` are passed to `observe` but are not
+      included in the outputs. Entries that are closed over may be repeated at
+      several nesting levels, but each key can be scanned over at only one.
 
   Args:
     model: The inference model to unroll.
@@ -763,9 +766,11 @@ def _unroll_for_queries(
   outputs_spec = {}  # contains flat coordinates spec for the final outputs.
   # pylint: disable=cell-var-from-loop
   for q, td in zip(queries, timedelta_coords, strict=True):
-    not_aux = lambda x: not isinstance(x, typing.Auxiliary)
-    q = pytree_utils.filter_nested_dict(not_aux, q)
-    spec = jax.tree.map(lambda x: _out_spec(x, td), q, is_leaf=coord_or_field)
+    # Keeps dataset keys without outputs, matching observations of `observe`.
+    outputs = data_specs.filter_queries_spec(q, lambda p: p.is_output)
+    spec = jax.tree.map(
+        lambda x: _out_spec(x, td), outputs, is_leaf=coord_or_field
+    )
     outputs_spec = pytree_utils.merge_nested_dicts(outputs_spec, spec)
 
   all_steps = scan_utils.scan_steps_from_timedeltas(
@@ -798,11 +803,11 @@ def _unroll_for_queries(
   queries_to_close_over = tuple(
       pytree_utils.filter_nested_dict(is_close_over_query, q) for q in queries
   )
-  # To nest data for scans we combine all queries, extract scannable fields and
-  # nest them according to the full scan structure.
-  merged_query = functools.reduce(pytree_utils.merge_nested_dicts, queries, {})
-  scannable_queries = pytree_utils.filter_nested_dict(
-      is_scannable_field, merged_query
+  # To nest data for scans we combine scannable fields of all levels and nest
+  # them according to the full scan structure. Hence each key can be scanned
+  # over at only one nesting level.
+  scannable_queries = functools.reduce(
+      pytree_utils.merge_nested_dicts, scannable_field_queries_specs, {}
   )
   if prepend_init:  # remove t=0 from scannable queries for nested scan compat.
     scannable_queries = jax.tree.map(
@@ -856,13 +861,18 @@ def _unroll_for_queries(
 
   if prepend_init:  # prepends t0 observations to raveled result.
     dt0 = np.array([np.timedelta64(0, 's')])
-    t0_query = jax.tree.map(
-        lambda x: x.isel(timedelta=0) if 'timedelta' in x.dims else x,
-        merged_query,
-        is_leaf=coord_or_field,
-    )
-    t0_raw_obs = model.observe(initial_state, t0_query, dynamic_inputs)
-    t0_obs = process_observations_fn(t0_raw_obs)
+    sel_t0 = lambda x: x.isel(timedelta=0) if 'timedelta' in x.dims else x
+    # Levels are observed separately rather than as one merged query, so that
+    # closed over entries, e.g. supporting fields, may repeat across levels.
+    t0_obs = {}
+    for q in queries:
+      if not q:
+        continue
+      t0_query = jax.tree.map(sel_t0, q, is_leaf=coord_or_field)
+      t0_raw_obs = model.observe(initial_state, t0_query, dynamic_inputs)
+      t0_obs = pytree_utils.merge_nested_dicts(
+          t0_obs, process_observations_fn(t0_raw_obs)
+      )
     # expand leading dimension. Coordax auto-adds unlabeled dimension.
     t0_obs_expanded = jax.tree.map(lambda x: x[None, ...], t0_obs)
     concat_array_fn = lambda x, y: jnp.concatenate([x, y], axis=0)
@@ -924,6 +934,7 @@ def unroll_from_advance(
     initial_state: The starting state for the simulation.
     queries: Single or nested queries specifying what to observe at each level
       of nesting. If a tuple, it must have the same length as `timedelta`.
+      Entries wrapped in `typing.Auxiliary` are used but not returned.
     timedelta: A single timedelta or a tuple of timedeltas specifying the
       observation frequency. If a tuple, it must be ordered from finest to
       coarsest frequency. Timedeltas must be congruent.
@@ -996,6 +1007,7 @@ def forecast_steps(
     inputs: Input fields used for assimilation.
     queries: Single or nested queries specifying what to observe at each level
       of nesting. If a tuple, it must have the same length as `timedelta`.
+      Entries wrapped in `typing.Auxiliary` are used but not returned.
     timedelta: A single timedelta or a tuple of timedeltas specifying the
       observation frequency. If a tuple, it must be ordered from finest to
       coarsest frequency. Timedeltas must be congruent.
@@ -1042,7 +1054,8 @@ def unroll_for_template(
   Fields or Coordinates. Coordinate leaves must have Timedelta axes with
   congruent timedeltas and share a unique final lead time. Field leaves are
   used to specify field in queries components and are also expected to have a
-  TimeDelta axis.
+  TimeDelta axis. Leaves wrapped in `typing.Auxiliary` are used for observation
+  but are not included in the outputs.
 
   Args:
     model: The inference model to unroll.

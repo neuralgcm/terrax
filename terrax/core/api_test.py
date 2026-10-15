@@ -613,6 +613,42 @@ class InferenceHelpersTest(parameterized.TestCase):
     )
     self.assertIn('prognostics', trajectory)
 
+  @parameterized.parameters(False, True)
+  def test_unroll_from_advance_with_auxiliary_field_at_two_levels(
+      self, prepend_init
+  ):
+    """Tests that nested queries can share a supporting field."""
+    state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
+    location = typing.Auxiliary(cx.field(np.ones(self.x.shape), self.x))
+    queries = (
+        {'prognostics': {'population': self.x, 'location': location}},
+        {'prognostics': {'time': cx.Scalar(), 'location': location}},
+    )
+    _, trajectory = api.unroll_from_advance(
+        self.model,
+        initial_state=state,
+        timedelta=(self.model.timestep, self.model.timestep * 2),
+        steps=2,
+        queries=queries,
+        dynamic_inputs=self.dynamic_inputs,
+        prepend_init=prepend_init,
+    )
+    self.assertEqual(set(trajectory['prognostics']), {'population', 'time'})
+
+  def test_unroll_from_advance_with_only_auxiliary_entries(self):
+    """Tests unrolling a dataset key whose entries are all Auxiliary."""
+    state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
+    location = typing.Auxiliary(cx.field(np.ones(self.x.shape), self.x))
+    _, trajectory = api.unroll_from_advance(
+        self.model,
+        initial_state=state,
+        timedelta=self.model.timestep,
+        steps=2,
+        queries={'prognostics': {'location': location}},
+        dynamic_inputs=self.dynamic_inputs,
+    )
+    self.assertEqual(trajectory, {'prognostics': {}})
+
   def test_unroll_for_template_returns_expected_coordinates(self):
     """Tests unroll_for_template returns expected coordinates."""
     state = self.model.assimilate(self.inputs, self.dynamic_inputs, self.rng)
