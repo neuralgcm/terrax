@@ -181,15 +181,25 @@ class InstantDiagnostic(DiagnosticModule):
 class IntervalDiagnostic(TemporalDiagnosticModule):
   """A diagnostic that tracks interval-accumulated values of fields.
 
-  This diagnostic enables tracking of values accumulated over time `interval`,
-  with sub-intervals of duration `resolution`. To provide the
-  temporal context for accumulation this class requires an explicit call to
-  `advance_clock` with time increments smaller than `resolution`.
+  This diagnostic tracks values accumulated over time `interval`, discretized
+  into sub-intervals of duration `resolution`. Internal time is held fixed
+  between `advance_clock` calls:
+    * `__call__` extracts diagnostic values and accumulates them for the current
+      clock step (and updates `{k}_instant` immediately when
+      `include_instant=True`).
+    * `advance_clock` advances the internal clock by `timedelta` (no larger than
+      `resolution`). When `accumulation_frequency` is set, values accumulated
+      since the previous `advance_clock` are added to the sub-interval total
+      only when the updated clock is a multiple of `accumulation_frequency`, and
+      the per-step accumulator (`latest_update`) is reset to zero. When the
+      clock reaches `resolution`, the completed sub-interval total is committed
+      to `per_period`.
 
-  A call to `diagnostic_values` returns the accumulated values over the last
-  completed interval, not including potential accumulation since the last
-  sub-interval update. It includes `timedelta_since_sub_interval` to indicate
-  the time since the last sub-interval update.
+  `diagnostic_values` returns the accumulated values over the last completed
+  `interval` (not including in-progress accumulation since the last completed
+  `resolution` sub-interval), along with `{k}_instant` from the most recent
+  `__call__` if `include_instant=True`. If `include_dt_offset=True`,
+  `timedelta_since_sub_interval` is also included, primarily for debugging.
 
   Examples::
 
@@ -213,15 +223,19 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
     resolution: The duration of sub-intervals over which values are accumulated.
     default_timedelta: Time increment to use in `advance_clock` if
       explicit `timedelta` is not provided in the inputs. If specified,
-      `resolution` must be a multiple of `default_timedelta`.
+      `resolution` (and `accumulation_frequency`, if set) must be a multiple of
+      `default_timedelta`.
     accumulation_frequency: Optional frequency at which diagnostic values are
-      accumulated. If specified, `resolution` must be a multiple of
-      `accumulation_frequency`.
-    include_instant: Whether to include additional instantaneous diagnostics.
-    include_dt_offset: Whether to include an additional diagnostic for the time
-      since the last sub-interval update.
-    dt_mod_freq: Time since the last interval update.
+      accumulated in `advance_clock`. If specified, `resolution` must be a
+      multiple of `accumulation_frequency`.
+    include_instant: Whether to include `{k}_instant` diagnostics with values
+      from the most recent `__call__`.
+    include_dt_offset: Whether to include `timedelta_since_sub_interval` for the
+      time since the last sub-interval update.
+    dt_mod_freq: Time since the last sub-interval update.
     since_last_update: The accumulated values since the last sub-interval.
+    latest_update: The accumulated values from `__call__` since the last
+      `advance_clock` when `accumulation_frequency` is set.
     per_period: The accumulated values for each `resolution` sub-interval.
     interval_axis: The coordinate axis for the interval dimension.
   """
@@ -238,6 +252,7 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
   since_last_update: dict[str, typing.Diagnostic] = nnx.data(
       init=False
   )
+  latest_update: dict[str, typing.Diagnostic] = nnx.data(init=False)
   interval_axis: coordinates.TimeDelta = nnx.static(init=False)
   per_period: dict[str, typing.Diagnostic] = nnx.data(init=False)
   periods: int = nnx.static(init=False)
@@ -270,6 +285,12 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
               f'{self.accumulation_frequency=} must be a multiple of '
               f'{self.default_timedelta=}.'
           )
+      self.latest_update = {
+          k: Diagnostic(cx.field(jnp.zeros(c.shape), c))
+          for k, c in self.extract_coords.items()
+      }
+    else:
+      self.latest_update = {}
 
     self.dt_mod_freq = typing.Diagnostic(cx.field(jdt.Timedelta()))
     self.since_last_update = {
@@ -298,6 +319,8 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
     for k in self.extract_coords:
       self.since_last_update[k].set_value(zeros_like(self.since_last_update[k]))
       self.per_period[k].set_value(zeros_like(self.per_period[k]))
+      if self.accumulation_frequency is not None:
+        self.latest_update[k].set_value(zeros_like(self.latest_update[k]))
       if self.include_instant:
         self.instants[k].set_value(zeros_like(self.instants[k]))
 
@@ -306,12 +329,26 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
     del args, kwargs  # unused.
     timedelta = _get_timedelta(inputs, self.default_timedelta)
     dt = self.dt_mod_freq.get_value() + timedelta
+    should_accumulate = None
+    if self.accumulation_frequency is not None:
+      freq = jdt.to_timedelta(self.accumulation_frequency)
+      should_accumulate = (dt == freq * (dt // freq)).data
     new_dt, is_update_step = _update_clock(dt, self.resolution)
     self.dt_mod_freq.set_value(new_dt)
 
     for k in self.extract_coords:
       per_period = self.per_period[k].get_value()
       since_last = self.since_last_update[k].get_value()
+      if should_accumulate is not None:
+        v = self.latest_update[k].get_value()
+        inc = jax.lax.cond(
+            should_accumulate,
+            lambda x: x,
+            cx.field(0.0).broadcast_like,
+            v,
+        )
+        since_last = since_last + inc
+        self.latest_update[k].set_value(cx.field(0.0).broadcast_like(v))
 
       def _update_per_period(per_period, since_last):
         updated = jnp.concatenate([per_period[1:], since_last[None]])
@@ -355,32 +392,16 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
   def __call__(self, inputs, *args, **kwargs):
     """Updates the internal module state from the inputs."""
     diagnostics = self.extract(inputs, *args, **kwargs)
-    should_accumulate = None
-    if self.accumulation_frequency is not None:
-      timedelta = _get_timedelta(inputs, self.default_timedelta)
-      dt = self.dt_mod_freq.get_value() + timedelta
-      freq = jdt.to_timedelta(self.accumulation_frequency)
-      should_accumulate = (dt == freq * (dt // freq)).data
-      diagnostics = {
-          k: jax.lax.cond(
-              should_accumulate, lambda x: x, cx.field(0.0).broadcast_like, v
-          )
-          for k, v in diagnostics.items()
-      }
-
+    target = (
+        self.since_last_update
+        if self.accumulation_frequency is None
+        else self.latest_update
+    )
     for k, v in diagnostics.items():
       if k in self.extract_coords:
-        self.since_last_update[k].set_value(
-            self.since_last_update[k].get_value() + v
-        )
+        target[k].set_value(target[k].get_value() + v)
         if self.include_instant:
-          new_instant = v
-          if should_accumulate is not None:
-            previous = self.instants[k].get_value()
-            new_instant = jax.lax.cond(
-                should_accumulate, lambda x, y: x, lambda x, y: y, v, previous
-            )
-          self.instants[k].set_value(new_instant)
+          self.instants[k].set_value(v.order_as(self.extract_coords[k]))
 
 
 @nnx.dataclass
