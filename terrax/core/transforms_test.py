@@ -532,6 +532,55 @@ class TransformsTest(parameterized.TestCase):
       with self.assertRaisesRegex(ValueError, 'No matching grid for'):
         clip_transform(inputs)
 
+  def test_apply_modal_filter(self):
+    nodal_grid = coordinates.LonLatGrid.T21()
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    ylm_map = spherical_harmonics.FixedYlmMapping(nodal_grid, ylm_grid)
+    f1 = spatial_filters.ExponentialModalFilter(
+        ylm_map, attenuation=4.0, order=1
+    )
+    f2 = spatial_filters.ExponentialModalFilter(
+        ylm_map, attenuation=2.0, order=1
+    )
+    u = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    s = cx.field(1.0)
+
+    with self.subTest('single_filter'):
+      tx = transforms.ApplyModalFilter(f1)
+      actual = tx({'u': u})
+      cx.testing.assert_fields_allclose(actual['u'], f1.filter_modal(u))
+
+    with self.subTest('sequential_modal_filter'):
+      sequential_filter = spatial_filters.SequentialModalFilter(
+          filters=[f1, f2], ylm_map=ylm_map
+      )
+      tx = transforms.ApplyModalFilter(sequential_filter)
+      actual = tx({'u': u})
+      expected_u = f2.filter_modal(f1.filter_modal(u))
+      cx.testing.assert_fields_allclose(actual['u'], expected_u)
+
+    with self.subTest('skip_missing_true'):
+      tx = transforms.ApplyModalFilter(f1, skip_missing=True)
+      actual = tx({'u': u, 's': s})
+      cx.testing.assert_fields_allclose(actual['u'], f1.filter_modal(u))
+      cx.testing.assert_fields_equal(actual['s'], s)
+
+    with self.subTest('skip_missing_false_raises'):
+      tx = transforms.ApplyModalFilter(f1, skip_missing=False)
+      with self.assertRaises(ValueError):
+        tx({'u': u, 's': s})
+
+    with self.subTest('warns_if_wrapped_filter_skips_missing'):
+      skipping_filter = spatial_filters.ExponentialModalFilter(
+          ylm_map, skip_missing=True
+      )
+      with self.assertNoLogs(level='WARNING'):
+        transforms.ApplyModalFilter(f1, skip_missing=True)
+        transforms.ApplyModalFilter(skipping_filter, skip_missing=True)
+      with self.assertLogs(level='WARNING'):
+        tx = transforms.ApplyModalFilter(skipping_filter, skip_missing=False)
+      cx.testing.assert_fields_equal(tx({'s': s})['s'], s)
+
   def test_to_modal(self):
     nodal_grid = coordinates.LonLatGrid.T21()
     inputs = {

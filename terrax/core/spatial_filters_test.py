@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from absl.testing import absltest
+import coordax as cx
 import jax
+import jax.numpy as jnp
 import numpy as np
 from terrax.core import coordinates
 from terrax.core import spatial_filters
@@ -70,6 +72,39 @@ class SpatialFiltersTest(absltest.TestCase):
         timescale=np.timedelta64(40, 'm'),
     )
     self.assertEqual(filter_mod.attenuation, 1.5)
+
+  def test_exponential_modal_filter_skip_missing(self):
+    mapping = spherical_harmonics.FixedYlmMapping(
+        lon_lat_grid=coordinates.LonLatGrid.T21(),
+        ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
+    )
+    scalar = cx.field(2.0)
+    filter_skip = spatial_filters.ExponentialModalFilter(
+        ylm_map=mapping, skip_missing=True
+    )
+    cx.testing.assert_fields_equal(filter_skip.filter_modal(scalar), scalar)
+
+    filter_strict = spatial_filters.ExponentialModalFilter(
+        ylm_map=mapping, skip_missing=False
+    )
+    with self.assertRaises(ValueError):
+      filter_strict.filter_modal(scalar)
+
+  def test_exponential_modal_filter_under_jit(self):
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    mapping = spherical_harmonics.FixedYlmMapping(
+        lon_lat_grid=coordinates.LonLatGrid.T21(), ylm_grid=ylm_grid
+    )
+    inputs = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    filter_modal = jax.jit(lambda f, x: f.filter_modal(x))
+    for name, attenuation in [('static', 4.0), ('traced', jnp.array(4.0))]:
+      with self.subTest(name):
+        modal_filter = spatial_filters.ExponentialModalFilter(
+            ylm_map=mapping, attenuation=attenuation, order=2
+        )
+        expected = modal_filter.filter_modal(inputs)
+        actual = filter_modal(modal_filter, inputs)
+        cx.testing.assert_fields_allclose(actual, expected, rtol=1e-6)
 
 
 if __name__ == '__main__':

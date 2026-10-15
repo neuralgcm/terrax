@@ -45,7 +45,11 @@ class ModalSpatialFilter(SpatialFilter):
 
 @nnx.dataclass
 class ExponentialModalFilter(ModalSpatialFilter):
-  """Modal filter that removes high frequency components."""
+  """Modal filter that removes high frequency components.
+
+  If `skip_missing` is True, `filter_modal` returns fields without a
+  `SphericalHarmonicGrid` unchanged instead of raising an error.
+  """
 
   ylm_map: spherical_harmonics.FixedYlmMapping | spherical_harmonics.YlmMapper
   attenuation: float = 16.0
@@ -55,15 +59,24 @@ class ExponentialModalFilter(ModalSpatialFilter):
 
   def _filter_field(self, x: cx.Field) -> cx.Field:
     """Returns filtered ``x``."""
-    ylm_grid = cx.coords.extract(
-        x.coordinate, coordinates.SphericalHarmonicGrid
-    )
+    try:
+      ylm_grid = cx.coords.extract(
+          x.coordinate, coordinates.SphericalHarmonicGrid
+      )
+    except ValueError:
+      if self.skip_missing:
+        return x
+      raise
     ls = ylm_grid.fields['total_wavenumber']
-    k = ls / ls.data.max()
     a = self.attenuation
     c = self.cutoff
     p = self.order
-    scale = cx.cpmap(jnp.exp)((k > c) * (-a * (((k - c) / (1 - c)) ** (2 * p))))
+    # Evaluates `scale` at trace time unless filter parameters are traced.
+    with jax.ensure_compile_time_eval():
+      k = ls / ls.data.max()
+      scale = cx.cpmap(jnp.exp)(
+          (k > c) * (-a * (((k - c) / (1 - c)) ** (2 * p)))
+      )
     return x * scale
 
   def filter_modal(self, inputs: typing.Pytree) -> typing.Pytree:
@@ -83,6 +96,7 @@ class ExponentialModalFilter(ModalSpatialFilter):
       ),
       order: int = 18,
       cutoff: float = 0.0,
+      skip_missing: bool = False,
       *,
       sim_units: units.SimUnits | None = None,
   ):
@@ -111,6 +125,7 @@ class ExponentialModalFilter(ModalSpatialFilter):
         attenuation=(dt / timescale),  # pyrefly: ignore[bad-argument-type, unsupported-operation]
         order=order,
         cutoff=cutoff,
+        skip_missing=skip_missing,
     )
 
 

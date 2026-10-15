@@ -28,6 +28,7 @@ import abc
 import collections
 import functools
 import itertools
+import logging
 import operator
 import re
 import types
@@ -1321,6 +1322,58 @@ class ClipWavenumbers(PytreeFieldTransformABC):
         wavenumbers_for_grid=wavenumbers_for_grid,
         skip_missing=skip_missing,
     )
+
+
+@nnx.dataclass
+class ApplyModalFilter(PytreeFieldTransformABC):
+  """Applies a modal spatial filter to inputs on ``SphericalHarmonicGrid``.
+
+  Args:
+    modal_filter: A ``ModalSpatialFilter`` to apply via ``filter_modal``. Use
+      ``SequentialModalFilter`` to apply multiple filters in order.
+    skip_missing: If ``True``, fields without a ``SphericalHarmonicGrid``
+      coordinate are passed through unchanged. If ``False``, such fields are
+      passed to ``modal_filter``, which raises an error unless it is configured
+      to skip them (e.g. ``ExponentialModalFilter(skip_missing=True)``).
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import coordinates, spatial_filters
+    >>> from terrax.core import spherical_harmonics, transforms
+    >>> grid = coordinates.LonLatGrid.T21()
+    >>> ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    >>> ylm_map = spherical_harmonics.FixedYlmMapping(grid, ylm_grid)
+    >>> modal_filter = spatial_filters.ExponentialModalFilter(ylm_map)
+    >>> inputs = {'u': cx.field(jnp.ones(ylm_grid.shape), ylm_grid)}
+    >>> out = transforms.ApplyModalFilter(modal_filter)(inputs)
+    >>> out['u'].coordinate == ylm_grid
+    True
+  """
+
+  modal_filter: spatial_filters.ModalSpatialFilter = nnx.data()
+  skip_missing: bool = False
+
+  def __post_init__(self):
+    wraps_skipping_filter = any(
+        isinstance(node, spatial_filters.ModalSpatialFilter)
+        and getattr(node, 'skip_missing', False)
+        for _, node in nnx.iter_graph(self.modal_filter)
+    )
+    if wraps_skipping_filter and not self.skip_missing:
+      logging.warning(
+          'ApplyModalFilter(skip_missing=False) wraps modal filters with'
+          ' skip_missing=True, which pass through fields without a'
+          ' SphericalHarmonicGrid instead of raising an error.'
+      )
+
+  def _transform_field(self, field: cx.Field) -> cx.Field:
+    if self.skip_missing:
+      try:
+        cx.coords.extract(field.coordinate, coordinates.SphericalHarmonicGrid)
+      except ValueError:
+        return field
+    return self.modal_filter.filter_modal(field)
 
 
 @nnx.dataclass
