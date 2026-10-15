@@ -455,6 +455,88 @@ class RunnerTest(parameterized.TestCase):
     ).astype(float)
     np.testing.assert_allclose(slow['bar'].to_numpy(), expected_bar, rtol=1e-5)
 
+  @parameterized.named_parameters(
+      dict(testcase_name='with_query_data', has_query_data=True),
+      dict(testcase_name='without_query_data', has_query_data=False),
+  )
+  def test_inference_runner_with_optional_field_query(self, has_query_data):
+    model = api.InferenceModel.from_model_api(construct_model())
+    init_times = np.array([np.datetime64('2025-01-01')])
+    one_h = np.timedelta64(1, 'h')
+    x = cx.LabeledAxis('x', np.array([0.1, 0.2, 0.3]))
+    loc = cx.LabeledAxis('loc', np.array([1, 2]))
+    inputs = {
+        'state': xarray.Dataset(
+            {
+                'foo': (('time',), np.array([0.0])),
+                'bar': (('time', 'x'), np.array([[1.0, 2.0, 3.0]])),
+            },
+            coords={'time': init_times} | x.to_xarray(),
+        )
+    }
+    delta = xarray.Dataset({'foo': 1.0, 'bar': 2.0})
+    dynamic_inputs = dynamic_inputs_lib.Persistence(
+        full_data={'data': delta.expand_dims(time=init_times)},
+        climatology=None,
+        update_freq=6 * one_h,
+    )
+    optional_field_in_query = lambda c: data_specs.OptionalSpec(
+        data_specs.FieldInQuerySpec(c)
+    )
+    output_query = {
+        'state': {
+            'foo': cx.Scalar(),
+            # Taken from query data if present, otherwise computed by the model.
+            'bar': optional_field_in_query(x),
+            # Never in query data, so it is requested from the model, which
+            # ignores it, since it is Auxiliary.
+            'buz': typing.Auxiliary(optional_field_in_query(loc)),
+        }
+    }
+    dynamic_query_inputs = None
+    if has_query_data:
+      query_times = init_times[0] + np.arange(0, 30, 6) * one_h
+      query_ds = xarray.Dataset(
+          {'bar': (('time', 'x'), np.full((query_times.size, 3), -1.0))},
+          coords={'time': query_times} | x.to_xarray(),
+      )
+      dynamic_query_inputs = dynamic_inputs_lib.Prescribed(
+          full_data={'state': query_ds},
+          climatology=None,
+          update_freq=6 * one_h,
+      )
+    output_path = self.create_tempdir().full_path
+    runner = runnerlib.InferenceRunner(
+        model=model,
+        inputs=inputs,
+        dynamic_inputs=dynamic_inputs,
+        dynamic_query_inputs=dynamic_query_inputs,
+        init_times=init_times,
+        ensemble_size=None,
+        output_path=output_path,
+        output_query=output_query,
+        output_freq=6 * one_h,
+        output_duration=24 * one_h,
+        zarr_chunks={'lead_time': 4, 'init_time': 1},
+        write_duration=24 * one_h,
+        unroll_duration=12 * one_h,
+        checkpoint_duration=24 * one_h,
+    )
+    runner.setup()
+    runner.run(0)
+
+    actual = xarray.open_datatree(output_path, engine='zarr')
+    state = actual['state'].to_dataset()
+    self.assertEqual(set(state.data_vars), {'foo', 'bar'})
+    if has_query_data:
+      expected_bar = np.full((1, 4, 3), -1.0)
+    else:
+      # 'bar' grows by 2 per hour, starting from [1, 2, 3].
+      h = np.arange(0, 24, 6)
+      expected_bar = np.stack([2 * h + 1, 2 * h + 2, 2 * h + 3], -1)[None]
+    actual_bar = state['bar'].to_numpy()
+    np.testing.assert_allclose(actual_bar, expected_bar, rtol=1e-5)
+
 
 def make_runner(**kwargs) -> runnerlib.InferenceRunner:
   """Builds a valid InferenceRunner, overriding defaults with `kwargs`."""
@@ -549,7 +631,9 @@ class OutputQueryTest(parameterized.TestCase):
     output_query = {
         'a': {'foo': cx.Scalar(), 'bar': data_specs.OptionalSpec(cx.Scalar())},
     }
-    with self.assertRaisesRegex(ValueError, 'not supported in queries') as cm:
+    with self.assertRaisesRegex(
+        ValueError, 'must wrap a FieldInQuerySpec'
+    ) as cm:
       make_runner(output_query=output_query)
     self.assertIn('a/bar', '\n'.join(cm.exception.__notes__))
 
@@ -569,6 +653,16 @@ class OutputQueryTest(parameterized.TestCase):
     }
     with self.assertRaisesRegex(ValueError, 'require dynamic_query_inputs'):
       make_runner(output_query=output_query)
+
+  def test_optional_field_in_query_without_dynamic_query_inputs(self):
+    loc = cx.LabeledAxis('loc', np.array([1, 2]))
+    optional_buz = data_specs.OptionalSpec(data_specs.FieldInQuerySpec(loc))
+    output_query = {
+        'a': {'foo': cx.Scalar()},
+        'b': {'foo': cx.Scalar(), 'buz': typing.Auxiliary(optional_buz)},
+    }
+    runner = make_runner(output_query=output_query)
+    self.assertEqual(runner.output_query, output_query)
 
   @parameterized.named_parameters(
       dict(testcase_name='static_queries', use_dynamic_query_inputs=False),

@@ -617,18 +617,23 @@ class TrainerTest(parameterized.TestCase):
   def test_auxiliary_field_in_query_does_not_change_loss(self):
     model, all_data = self.create_model_and_data(multiscale=False)
     base_queries = self._create_queries_specs(model)
+    k = cx.LabeledAxis('k', np.arange(8))
     field_in_query = data_specs.FieldInQuerySpec(cx.Scalar())
-    queries_specs = {
-        'base': base_queries,
-        'field_in_query': {
-            'slow': base_queries['slow'] | {'time': field_in_query}
-        },
-        'auxiliary_field_in_query': {
-            'slow': (
-                base_queries['slow']
-                | {'time': typing.Auxiliary(field_in_query)}
-            )
-        },
+    optional_time = data_specs.OptionalSpec(field_in_query)
+    optional_x_prior = data_specs.OptionalSpec(data_specs.FieldInQuerySpec(k))
+    extra_entries = {
+        'field_in_query': {'time': field_in_query},
+        'auxiliary_field_in_query': {'time': typing.Auxiliary(field_in_query)},
+        # 'time' is loaded, so it is taken from data.
+        'optional_present': {'time': optional_time},
+        # 'x_prior' is not loaded, so it is requested from the model, which
+        # ignores it, since it is Auxiliary after rewrapping.
+        'optional_missing': {'x_prior': optional_x_prior},
+        'auxiliary_coordinate': {'x_request': typing.Auxiliary(k)},
+    }
+    queries_specs = {'base': base_queries} | {
+        name: {'slow': base_queries['slow'] | entries}
+        for name, entries in extra_entries.items()
     }
     losses = {}
     for name, queries_spec in queries_specs.items():
@@ -643,7 +648,7 @@ class TrainerTest(parameterized.TestCase):
       _, loss = train_step_fn(experiment_state, 0, inputs, dynamic_data)
       losses[name] = float(loss)
 
-    for name in ['field_in_query', 'auxiliary_field_in_query']:
+    for name in extra_entries:
       with self.subTest(name):
         np.testing.assert_allclose(losses[name], losses['base'], rtol=1e-6)
 
@@ -653,24 +658,38 @@ class TrainerTest(parameterized.TestCase):
   )
   def test_standardize_queries_spec(self, wrap: bool):
     k = cx.LabeledAxis('k', np.arange(8))
+    td = coordinates.TimeDelta(np.arange(1, 3) * np.timedelta64(1, 'h'))
     field_in_query = data_specs.FieldInQuerySpec(cx.Scalar())
     auxiliary_field_in_query = typing.Auxiliary(data_specs.FieldInQuerySpec(k))
+    optional_field_in_query = data_specs.OptionalSpec(
+        data_specs.FieldInQuerySpec(k)
+    )
     queries_spec = {
         'slow': {
             'x': k,
             'time': field_in_query,
             'location': auxiliary_field_in_query,
+            'x_present': optional_field_in_query,
+            'x_missing': typing.Auxiliary(optional_field_in_query),
+            'x_request': typing.Auxiliary(k),
         }
     }
+    k_td = cx.coords.compose(td, k)
+    inputs_spec = {
+        'slow': {'x': k_td, 'time': td, 'location': k_td, 'x_present': k_td}
+    }
     actual = trainer._standardize_queries_spec(
-        queries_spec, wrap_field_in_query_as_auxiliary=wrap
+        queries_spec, inputs_spec, wrap_field_in_query_as_auxiliary=wrap
     )
-    expected_time = typing.Auxiliary(field_in_query) if wrap else field_in_query
+    maybe_auxiliary = typing.Auxiliary if wrap else lambda x: x
     expected = {
         'slow': {
             'x': k,
-            'time': expected_time,
+            'time': maybe_auxiliary(field_in_query),
             'location': auxiliary_field_in_query,
+            'x_present': maybe_auxiliary(data_specs.FieldInQuerySpec(k)),
+            'x_missing': typing.Auxiliary(k),
+            'x_request': typing.Auxiliary(k),
         }
     }
     self.assertEqual(actual, expected)
@@ -682,15 +701,30 @@ class TrainerTest(parameterized.TestCase):
           message='Concrete Field',
       ),
       dict(
-          testcase_name='auxiliary_coordinate',
-          entry=typing.Auxiliary(cx.LabeledAxis('k', np.arange(8))),
-          message='Auxiliary coordinate',
+          testcase_name='missing_target',
+          entry=cx.LabeledAxis('k', np.arange(8)),
+          message='not in inputs_spec',
+      ),
+      dict(
+          testcase_name='missing_field_in_query',
+          entry=typing.Auxiliary(data_specs.FieldInQuerySpec(cx.Scalar())),
+          message='not in inputs_spec',
+      ),
+      dict(
+          testcase_name='missing_optional_output',
+          entry=data_specs.OptionalSpec(
+              data_specs.FieldInQuerySpec(cx.Scalar())
+          ),
+          message='scored without data',
+          wrap=False,
       ),
   )
-  def test_standardize_queries_spec_raises(self, entry, message):
+  def test_standardize_queries_spec_raises(self, entry, message, wrap=True):
     with self.assertRaisesRegex(ValueError, message):
       trainer._standardize_queries_spec(
-          {'slow': {'v': entry}}, wrap_field_in_query_as_auxiliary=True
+          {'slow': {'v': entry}},
+          {'slow': {}},
+          wrap_field_in_query_as_auxiliary=wrap,
       )
 
   def test_construct_full_queries_spec(self):
@@ -715,6 +749,22 @@ class TrainerTest(parameterized.TestCase):
       }
       with self.assertRaisesRegex(ValueError, 'inconsistent coordinates'):
         trainer._construct_full_queries_spec(inputs_spec, bad_spec)
+
+    with self.subTest('auxiliary_coordinate_uses_timedelta_of_dataset'):
+      j = cx.LabeledAxis('j', np.arange(4))
+      request = typing.Auxiliary(data_specs.CoordSpec(j))
+      request_spec = {'slow': {'x': k, 'request': request}}
+      actual = trainer._construct_full_queries_spec(inputs_spec, request_spec)
+      self.assertEqual(
+          actual['slow']['request'],
+          typing.Auxiliary(cx.coords.compose(td, j)),
+      )
+
+    with self.subTest('auxiliary_coordinate_without_data_raises'):
+      request_only = {'fast': {'request': typing.Auxiliary(k)}}
+      with self.assertRaisesRegex(ValueError, 'dataset has none') as cm:
+        trainer._construct_full_queries_spec(inputs_spec, request_only)
+      self.assertIn('fast/request', ' '.join(cm.exception.__notes__))
 
   def test_create_initial_evaluators(self):
     k = cx.LabeledAxis('k', np.arange(8))

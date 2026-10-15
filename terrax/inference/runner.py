@@ -299,6 +299,7 @@ class InferenceRunner:
 
     # Validate output_query and pre-compute specs for reading dynamic queries.
     dynamic_queries_read_spec: _ReadSpec = {}
+    required_fields_in_query = []
     for ds_key, sub_query in self.output_query.items():
       parsed_entries = {}
       for var_name, spec in sub_query.items():
@@ -321,17 +322,25 @@ class InferenceRunner:
         assert not cx.is_field(var_spec), var_spec  # see parse_query_spec.
         # Set any timedelta to enable reading arbitrary lead times.
         if isinstance(var_spec, data_specs.CoordSpec):
-          ds_specs[var_name] = data_specs.CoordSpec.with_any_timedelta(
-              var_spec.coord, var_spec.dim_match_rules
+          read_spec = data_specs.CoordSpec.with_any_timedelta(
+              var_spec.coord, dict(var_spec.dim_match_rules)
           )
         else:
-          ds_specs[var_name] = data_specs.CoordSpec.with_any_timedelta(var_spec)
+          read_spec = data_specs.CoordSpec.with_any_timedelta(var_spec)
+        if parsed.optional:
+          # Optional entries that are missing from the data are skipped when
+          # reading, so that `construct_query` requests them from the model.
+          ds_specs[var_name] = data_specs.OptionalSpec(read_spec)
+        else:
+          ds_specs[var_name] = read_spec
+          required_fields_in_query.append(f'{ds_key}/{var_name}')
       if ds_specs:
         dynamic_queries_read_spec[ds_key] = ds_specs
-    if dynamic_queries_read_spec and self.dynamic_query_inputs is None:
+    if required_fields_in_query and self.dynamic_query_inputs is None:
       raise ValueError(
-          'FieldInQuerySpec entries in output_query for'
-          f' {sorted(dynamic_queries_read_spec)} require dynamic_query_inputs.'
+          f'FieldInQuerySpec entries {required_fields_in_query} in output_query'
+          ' require dynamic_query_inputs. Wrap them in OptionalSpec to request'
+          ' them from the model when data is not provided.'
       )
     self._dynamic_queries_read_spec = dynamic_queries_read_spec
 
@@ -430,6 +439,8 @@ class InferenceRunner:
           self._dynamic_queries_read_spec
       )
       coord_sources = xarray_utils.extract_xr_source_coords(q_data, c_types)
+    # Entries without data, e.g. missing optional entries, are finalized
+    # without a source, matching the requests constructed in `run`.
     sample_queries = data_specs.finalize_nested_queries_spec(
         self.output_query, coord_sources
     )
@@ -695,6 +706,9 @@ class InferenceRunner:
         query_fields = xarray_utils.read_from_xarray(
             queries_data, self._dynamic_queries_read_spec, strict_matches=False
         )
+      # Optional entries that are missing from the query data are requested
+      # from the model. We assume that the variables in dynamic_query_inputs
+      # are the same for all chunks, so the structure of queries is fixed.
       queries = data_specs.construct_query(query_fields, self.output_query)
       split_queries = split_queries_by_frequency(
           queries, self.output_freqs, self.unique_output_freqs

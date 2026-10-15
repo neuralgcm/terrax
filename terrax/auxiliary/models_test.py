@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from terrax.auxiliary import models
 from terrax.core import api
+from terrax.core import data_specs
 from terrax.core import diagnostics as diagnostics_lib
 from terrax.core import transforms
 from terrax.core import typing
@@ -327,6 +328,33 @@ class WithObservedStateTest(parameterized.TestCase):
     query_missing = {'state': {'delta': s_axis}}
     with self.assertRaisesRegex(ValueError, 'requires key'):
       wrapper.observe(query_missing)
+
+  @parameterized.named_parameters(
+      # Data for 'total' is forwarded and used by the base model as is.
+      dict(testcase_name='present', is_present=True, expected=[0.0, -0.02]),
+      # Missing data is requested, i.e. resolved by the observation model.
+      dict(testcase_name='missing', is_present=False, expected=[-0.1, 0.0]),
+  )
+  def test_optional_forwarded_entry_falls_back_to_observation_model(
+      self, is_present, expected
+  ):
+    wrapper, s_axis = self._make_wrapped_model()
+    x = cx.field(np.array([1.0, 0.0]), s_axis)
+    wrapper.assimilate({'state': {'total': x}})
+    optional_total = data_specs.OptionalSpec(
+        data_specs.FieldInQuerySpec(s_axis)
+    )
+    queries_spec = {
+        'state': {'delta': s_axis, 'total': typing.Auxiliary(optional_total)}
+    }
+    data = {'state': {'total': cx.field(np.array([0.0, 1.0]), s_axis)}}
+    queries = data_specs.construct_query(
+        data if is_present else {}, queries_spec
+    )
+    obs = wrapper.observe(queries)
+    self.assertEqual(set(obs['state']), {'delta'})
+    expected_delta = cx.field(np.array(expected), s_axis)
+    cx.testing.assert_fields_allclose(obs['state']['delta'], expected_delta)
 
   def test_dual_coupling_and_observation_query_forwarding(self):
     s_axis = cx.LabeledAxis('station', ['S1', 'S2'])

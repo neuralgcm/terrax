@@ -23,6 +23,7 @@ from flax import nnx
 from jax import config  # pylint: disable=g-importing-member
 import numpy as np
 from terrax.core import coordinates
+from terrax.core import data_specs
 from terrax.core import learned_transforms
 from terrax.core import observation_operators
 from terrax.core import pytree_utils
@@ -338,6 +339,42 @@ class TransformObservationOperatorTest(parameterized.TestCase):
       invalid = cx.LabeledAxis('station', np.array([4]))
       with self.assertRaisesRegex(ValueError, 'not a valid slice'):
         operator.observe(inputs={}, query={'elevation': invalid})
+
+  @parameterized.named_parameters(
+      dict(testcase_name='present', is_present=True, expected=[1.0, 2.0]),
+      dict(testcase_name='missing', is_present=False, expected=[10.0, 30.0]),
+  )
+  def test_optional_field_in_query_uses_fallback_when_missing(
+      self, is_present, expected
+  ):
+    stations = cx.LabeledAxis('station', np.array([1, 2, 3]))
+    requested = cx.LabeledAxis('station', np.array([1, 3]))
+    operator = observation_operators.TransformObservationOperator(
+        transform=transforms.Sequential([
+            transforms.SelectKeys('elevation'),
+            transforms.RenameKeys({'elevation': 'result'}),
+        ]),
+        requested_fields_from_query=('elevation',),
+        fallback_transform=transforms.PrescribedFields(
+            {'elevation': cx.field(np.array([10.0, 20.0, 30.0]), stations)}
+        ),
+    )
+    optional_elevation = data_specs.OptionalSpec(
+        data_specs.FieldInQuerySpec(requested)
+    )
+    queries_spec = {
+        'obs': {
+            'result': requested,
+            'elevation': terrax_typing.Auxiliary(optional_elevation),
+        }
+    }
+    data = {'elevation': cx.field(np.array([1.0, 2.0]), requested)}
+    inputs = {'obs': data} if is_present else {}
+    query = data_specs.construct_query(inputs, queries_spec)['obs']
+    actual = operator.observe(inputs={}, query=query)
+    self.assertSetEqual(set(actual), {'result'})
+    expected_result = cx.field(np.array(expected), requested)
+    cx.testing.assert_fields_allclose(actual['result'], expected_result)
 
 
 class MultiObservationOperatorTest(parameterized.TestCase):

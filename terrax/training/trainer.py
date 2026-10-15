@@ -535,10 +535,11 @@ def _merge_online_metrics(
 
 def _standardize_queries_spec(
     queries_spec: data_specs.QueriesSpec,
+    inputs_spec: DataSpec,
     *,
     wrap_field_in_query_as_auxiliary: bool,
 ) -> data_specs.QueriesSpec:
-  """Validates `queries_spec` for training and optionally rewraps fields.
+  """Validates `queries_spec` for training, rewrapping and resolving entries.
 
   Training scores the outputs of `observe` against data. Fields inserted into
   queries from data are supporting inputs, so by default they are rewrapped as
@@ -546,21 +547,29 @@ def _standardize_queries_spec(
   `observe` returns them and they are scored against themselves, which adds
   zero loss and can serve as a sanity check.
 
+  Optional entries are resolved once per stage: they are taken from data if
+  `inputs_spec` includes them and are requested from the model otherwise, see
+  `data_specs.ParsedQuerySpec.resolve_optional`. Such requests must be
+  `Auxiliary`, since there is no data to score them against.
+
   Args:
     queries_spec: Queries spec of a training or evaluation stage.
-    wrap_field_in_query_as_auxiliary: Whether to wrap `FieldInQuerySpec` entries
-      in `typing.Auxiliary`.
+    inputs_spec: Inputs spec of the same stage, i.e. the data that is loaded.
+    wrap_field_in_query_as_auxiliary: Whether to wrap `FieldInQuerySpec`
+      entries, including optional ones, in `typing.Auxiliary`.
 
   Returns:
-    The validated queries spec with fields in queries rewrapped if requested.
+    The validated queries spec with fields in queries rewrapped if requested
+    and without `OptionalSpec` wrappers.
 
   Raises:
-    ValueError: If `queries_spec` contains entries that are not supported in
-      training: concrete `cx.Field` entries and `Auxiliary` coordinates.
+    ValueError: If `queries_spec` contains concrete `cx.Field` entries, or
+      entries that are scored or taken from data but are not in `inputs_spec`.
   """
   standardized = {}
   for data_key, specs in queries_spec.items():
     standardized[data_key] = {}
+    loaded_vars = inputs_spec.get(data_key, {})
     for var_name, spec in specs.items():
       parsed = data_specs.parse_query_spec(spec)
       value = parsed.value
@@ -570,15 +579,69 @@ def _standardize_queries_spec(
             f' training, got one for {data_key}/{var_name}. Use'
             ' FieldInQuerySpec to take it from data instead.'
         )
-      if parsed.auxiliary and not parsed.from_data:
-        raise ValueError(
-            'Auxiliary coordinates in queries specs are not supported in'
-            f' training yet, got one for {data_key}/{var_name}.'
-        )
       if parsed.from_data and wrap_field_in_query_as_auxiliary:
-        spec = dataclasses.replace(parsed, auxiliary=True).rewrap(value)
-      standardized[data_key][var_name] = spec
+        parsed = dataclasses.replace(parsed, auxiliary=True)
+      is_loaded = var_name in loaded_vars
+      if parsed.optional and parsed.is_output and not is_loaded:
+        raise ValueError(
+            f'Optional queries spec entry {data_key}/{var_name} is not in'
+            ' inputs_spec, so it would be requested from the model and scored'
+            ' without data. Wrap it in Auxiliary to use it only within'
+            ' observe.'
+        )
+      parsed = parsed.resolve_optional(is_loaded)
+      if (parsed.is_output or parsed.from_data) and not is_loaded:
+        raise ValueError(
+            f'Queries spec entry {data_key}/{var_name} is scored or taken from'
+            ' data, but it is not in inputs_spec.'
+        )
+      standardized[data_key][var_name] = parsed.rewrap(value)
   return standardized
+
+
+def _with_dataset_timedelta(
+    coord: cx.Coordinate | data_specs.CoordSpec,
+    dataset_inputs_spec: dict[str, cx.Coordinate],
+) -> cx.Coordinate:
+  """Returns `coord` with the `timedelta` axis of the data in its dataset.
+
+  Nested scans observe each query entry at the lead times of its `timedelta`
+  axis, which comes from the loaded data. Requests, i.e.
+  `Auxiliary(Coordinate)` entries, are not loaded and have no such axis. This
+  gives a request the `timedelta` of the data-backed entries of its dataset, so
+  that it is observed in the same `observe` calls as them. For example,
+  `Auxiliary(stations)` in a dataset whose targets are loaded at 6h, 12h and
+  18h becomes `Auxiliary(compose(TimeDelta([6h, 12h, 18h]), stations))`.
+
+  Args:
+    coord: Coordinate or `CoordSpec` of the request.
+    dataset_inputs_spec: Coordinates of the data-backed entries of the dataset
+      of the request.
+
+  Returns:
+    The finalized `coord` with the `timedelta` axis of the dataset prepended.
+
+  Raises:
+    ValueError: If the dataset has no data-backed entries or if they do not
+      share a single `timedelta` axis.
+  """
+  timedeltas = {
+      cx.coords.extract(c, coordinates.TimeDelta)
+      for c in dataset_inputs_spec.values()
+  }
+  if not timedeltas:
+    raise ValueError(
+        'Requests are observed alongside the data-backed entries of their'
+        ' dataset, but the dataset has none.'
+    )
+  if len(timedeltas) > 1:
+    raise ValueError(
+        'Requests are observed at the lead times of the data-backed entries of'
+        ' their dataset, which must share a single timedelta, got'
+        f' {timedeltas}.'
+    )
+  timedelta = timedeltas.pop()
+  return cx.coords.compose(timedelta, data_specs.finalize_spec(coord, None))
 
 
 def _construct_full_queries_spec(
@@ -587,8 +650,11 @@ def _construct_full_queries_spec(
 ) -> data_specs.QueriesSpec:
   """Returns `queries_spec` with coordinates replaced by those of the inputs.
 
-  Input coordinates include dimensions, e.g. `timedelta`, that are used to set
-  up nested scans. Wrappers of query entries are preserved.
+  Input coordinates include the `timedelta` axis, which determines at which
+  level of nested scans each entry is observed. Wrappers of query entries are
+  preserved. Requests, i.e. `Auxiliary(Coordinate)` entries, have no input
+  coordinate and are observed alongside the data of their dataset, see
+  `_with_dataset_timedelta`.
 
   Args:
     inputs_spec: Coordinates of the data for each queried variable.
@@ -605,18 +671,31 @@ def _construct_full_queries_spec(
     if specs:
       full_queries_spec[source] = {}
     for var_name, q_spec in specs.items():
-      input_coord = inputs_spec[source][var_name]
       parsed = data_specs.parse_query_spec(q_spec)
       query_coord = parsed.value
+      if cx.is_field(query_coord):
+        raise ValueError(
+            'Concrete Field entries in queries specs are not supported in'
+            f' training, got one for {source}/{var_name}.'
+        )
+      if parsed.auxiliary and not parsed.from_data:
+        try:
+          full_coord = _with_dataset_timedelta(
+              query_coord, inputs_spec.get(source, {})
+          )
+        except ValueError as e:
+          e.add_note(f'Cannot place request {source}/{var_name} in scans.')
+          raise
+        full_queries_spec[source][var_name] = parsed.rewrap(full_coord)
+        continue
+      input_coord = inputs_spec[source][var_name]
       if isinstance(query_coord, data_specs.CoordSpec):
         try:
           query_coord.validate_compatible(_remove_timedelta(input_coord))
         except ValueError as e:
           e.add_note(f'Inconsistent query entry {source}/{var_name}.')
           raise
-      elif isinstance(query_coord, cx.Field) or not cx.contains_dims(
-          input_coord, query_coord
-      ):
+      elif not cx.contains_dims(input_coord, query_coord):
         raise ValueError(
             f'query entry {source}/{var_name} has inconsistent coordinates with'
             f' {input_coord=}.'
@@ -746,9 +825,10 @@ class RolloutTrainer:
   use_data_loading_callback: bool = False
   callback_pinned_host: bool = False
   callback_spatial_dims_layout: tuple[str, ...] = ()
-  # Whether `FieldInQuerySpec` entries in queries specs are treated as
-  # `Auxiliary(FieldInQuerySpec(...))`, i.e. excluded from outputs and targets.
-  # If False, they are returned by `observe` and scored against themselves.
+  # Whether `FieldInQuerySpec` entries in queries specs, including optional
+  # ones, are treated as `Auxiliary(...)`, i.e. excluded from outputs and
+  # targets. If False, they are returned by `observe` and scored against
+  # themselves.
   wrap_field_in_query_as_auxiliary: bool = True
 
   def __post_init__(self):
@@ -843,14 +923,18 @@ class RolloutTrainer:
     self.train_schedule = dataclasses.replace(
         self.train_schedule,
         stages=[
-            dataclasses.replace(s, queries_spec=standardize(s.queries_spec))
+            dataclasses.replace(
+                s, queries_spec=standardize(s.queries_spec, s.inputs_spec)
+            )
             for s in self.train_schedule.stages
         ],
     )
     self.eval_schedule = dataclasses.replace(
         self.eval_schedule,
         stages=[
-            dataclasses.replace(s, queries_spec=standardize(s.queries_spec))
+            dataclasses.replace(
+                s, queries_spec=standardize(s.queries_spec, s.inputs_spec)
+            )
             for s in self.eval_schedule.stages
         ],
     )

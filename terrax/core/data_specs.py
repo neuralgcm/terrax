@@ -282,6 +282,11 @@ class OptionalSpec(Generic[T]):
 
   In inputs specs, entries wrapped in `OptionalSpec` may be absent from the data
   and are skipped in that case.
+
+  In queries specs, `OptionalSpec` can only wrap a `FieldInQuerySpec`. Such an
+  entry is taken from data if it is present and is otherwise requested from the
+  model on the coordinate described by the spec, see
+  `ParsedQuerySpec.resolve_optional`.
   """
 
   spec: T
@@ -382,11 +387,15 @@ QuerySpecEntry: TypeAlias = (
     | CoordSpec
     | cx.Field
     | FieldInQuerySpec[cx.Coordinate | CoordSpec]
+    | OptionalSpec[FieldInQuerySpec[cx.Coordinate | CoordSpec]]
 )
 QuerySpec: TypeAlias = QuerySpecEntry | typing.Auxiliary[QuerySpecEntry]
 QueriesSpec: TypeAlias = dict[str, dict[str, QuerySpec]]
 FinalizedQuerySpecEntry: TypeAlias = (
-    cx.Coordinate | cx.Field | FieldInQuerySpec[cx.Coordinate]
+    cx.Coordinate
+    | cx.Field
+    | FieldInQuerySpec[cx.Coordinate]
+    | OptionalSpec[FieldInQuerySpec[cx.Coordinate]]
 )
 FinalizedQuerySpec: TypeAlias = (
     FinalizedQuerySpecEntry | typing.Auxiliary[FinalizedQuerySpecEntry]
@@ -398,19 +407,23 @@ FinalizedQueriesSpec: TypeAlias = dict[str, dict[str, FinalizedQuerySpec]]
 class ParsedQuerySpec:
   """A query spec entry split into its innermost value and its wrappers.
 
-  Wrappers nest in a fixed order: `typing.Auxiliary` around `FieldInQuerySpec`
-  around a coordinate or a `CoordSpec`. A concrete `cx.Field` can only be
+  Wrappers nest in a fixed order: `typing.Auxiliary` around `OptionalSpec`
+  around `FieldInQuerySpec` around a coordinate or a `CoordSpec`, where
+  `OptionalSpec` requires `FieldInQuerySpec`. A concrete `cx.Field` can only be
   wrapped in `typing.Auxiliary`.
 
   Attributes:
     value: The innermost entry: a coordinate, a `CoordSpec` or a `cx.Field`.
     auxiliary: Whether the entry is excluded from the outputs of `observe`.
+    optional: Whether the data for a `FieldInQuerySpec` entry may be missing,
+      see `resolve_optional`.
     from_data: Whether the entry is replaced by a `cx.Field` taken from data
       when queries are constructed, i.e. whether it is a `FieldInQuerySpec`.
   """
 
   value: cx.Coordinate | CoordSpec | cx.Field
   auxiliary: bool = False
+  optional: bool = False
   from_data: bool = False
 
   @property
@@ -420,8 +433,35 @@ class ParsedQuerySpec:
 
   def rewrap(self, value: cx.Coordinate | CoordSpec) -> QuerySpec:
     """Returns coordinate-like `value` wrapped like this entry."""
-    entry = FieldInQuerySpec(value) if self.from_data else value
+    entry: QuerySpecEntry
+    if self.optional:
+      entry = OptionalSpec(FieldInQuerySpec(value))
+    elif self.from_data:
+      entry = FieldInQuerySpec(value)
+    else:
+      entry = value
     return typing.Auxiliary(entry) if self.auxiliary else entry
+
+  def resolve_optional(self, is_present: bool) -> 'ParsedQuerySpec':
+    """Returns this entry with `OptionalSpec` resolved given data presence.
+
+    An optional entry is taken from data if the data is present. Otherwise the
+    model is requested to compute it on the coordinate of the spec, i.e. the
+    entry becomes a coordinate entry. `Auxiliary` is kept in both cases, so
+    the outputs of `observe` do not depend on the presence of data. The model
+    decides how to handle such a request, e.g. by computing the value with a
+    fallback, by forwarding it, by ignoring it, or by raising if it can not
+    support it. Entries that are not optional are returned unchanged.
+
+    Args:
+      is_present: Whether the data for this entry is present.
+
+    Returns:
+      This entry without the `OptionalSpec` wrapper.
+    """
+    if not self.optional:
+      return self
+    return dataclasses.replace(self, optional=False, from_data=is_present)
 
 
 def parse_query_spec(spec: QuerySpec | FinalizedQuerySpec) -> ParsedQuerySpec:
@@ -438,19 +478,25 @@ def parse_query_spec(spec: QuerySpec | FinalizedQuerySpec) -> ParsedQuerySpec:
       `spec` is of an unsupported type.
   """
   value, auxiliary = typing.unwrap_auxiliary(spec)
+  value, optional = unwrap_optional(value)
   from_data = isinstance(value, FieldInQuerySpec)
   if from_data:
     value = value.spec
-  if isinstance(value, OptionalSpec):
-    raise ValueError(f'OptionalSpec is not supported in queries, got {spec!r}')
+  if optional and not from_data:
+    raise ValueError(
+        f'OptionalSpec in queries must wrap a FieldInQuerySpec, got {spec!r}.'
+    )
   is_coord_like = cx.is_coord(value) or isinstance(value, CoordSpec)
   if not (is_coord_like or (cx.is_field(value) and not from_data)):
     raise ValueError(
         f'Unsupported query spec {spec!r}. Expected a coordinate, CoordSpec or'
-        ' Field, optionally wrapped as Auxiliary(FieldInQuerySpec(...)), where'
+        ' Field, optionally wrapped as'
+        ' Auxiliary(OptionalSpec(FieldInQuerySpec(...))), where'
         ' FieldInQuerySpec wraps a coordinate or a CoordSpec.'
     )
-  return ParsedQuerySpec(value, auxiliary=auxiliary, from_data=from_data)
+  return ParsedQuerySpec(
+      value, auxiliary=auxiliary, optional=optional, from_data=from_data
+  )
 
 
 def finalize_query_spec(
@@ -459,7 +505,8 @@ def finalize_query_spec(
 ) -> FinalizedQuerySpec:
   """Returns `query_spec` with its `CoordSpec` component finalized.
 
-  Concrete `cx.Field` entries are returned unchanged.
+  Concrete `cx.Field` entries are returned unchanged. Wrappers, including
+  `OptionalSpec`, are preserved.
 
   Args:
     query_spec: A query spec entry.
@@ -471,11 +518,17 @@ def finalize_query_spec(
   """
   parsed = parse_query_spec(query_spec)
   value = parsed.value
+  entry: FinalizedQuerySpecEntry
   if cx.is_field(value):
-    entry: FinalizedQuerySpecEntry = value
+    entry = value
   else:
     coord = finalize_spec(value, source_coord)
-    entry = FieldInQuerySpec(coord) if parsed.from_data else coord
+    if parsed.optional:
+      entry = OptionalSpec(FieldInQuerySpec(coord))
+    elif parsed.from_data:
+      entry = FieldInQuerySpec(coord)
+    else:
+      entry = coord
   return typing.Auxiliary(entry) if parsed.auxiliary else entry
 
 
@@ -685,6 +738,9 @@ def construct_query(
   * `CoordSpec` is finalized using the coordinate of the same-named field in
     `inputs`, if present, see `finalize_spec`.
   * `FieldInQuerySpec` is replaced by the same-named field from `inputs`.
+  * `OptionalSpec(FieldInQuerySpec(spec))` is converted like
+    `FieldInQuerySpec(spec)` if the same-named field is present in `inputs`,
+    and like `spec` otherwise, see `ParsedQuerySpec.resolve_optional`.
   * `cx.Field` is used as is and must not be present in `inputs`.
   * `typing.Auxiliary(spec)` is converted to `typing.Auxiliary(entry)`, where
     `entry` is constructed from `spec` as above.
@@ -706,6 +762,7 @@ def construct_query(
       except ValueError as e:
         e.add_note(f'Invalid query spec for {data_key}/{var_name}.')
         raise
+      parsed = parsed.resolve_optional(var_name in in_data)
       value = parsed.value
       if parsed.from_data:
         if var_name not in in_data:
@@ -724,7 +781,11 @@ def construct_query(
       elif isinstance(value, CoordSpec):
         x = in_data.get(var_name, None)
         coord = x.coordinate if (x is not None and cx.is_field(x)) else None
-        q_entry = finalize_spec(value, coord)
+        try:
+          q_entry = finalize_spec(value, coord)
+        except ValueError as e:
+          e.add_note(f'Cannot finalize query spec for {data_key}/{var_name}.')
+          raise
       else:
         q_entry = value
       queries[data_key][var_name] = (

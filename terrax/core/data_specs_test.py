@@ -388,6 +388,39 @@ class ConstructQueryTest(parameterized.TestCase):
       data_specs.construct_query(inputs, queries_spec)
     self.assertIn('data/u', ' '.join(cm.exception.__notes__))
 
+  @parameterized.named_parameters(
+      dict(testcase_name='present', auxiliary=False, is_present=True),
+      dict(testcase_name='missing', auxiliary=False, is_present=False),
+      dict(testcase_name='auxiliary_present', auxiliary=True, is_present=True),
+      dict(testcase_name='auxiliary_missing', auxiliary=True, is_present=False),
+  )
+  def test_construct_query_with_optional_field_in_query(
+      self, auxiliary, is_present
+  ):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    u = cx.field(np.arange(4.0), x)
+    maybe_auxiliary = typing.Auxiliary if auxiliary else lambda q: q
+    optional_u = data_specs.OptionalSpec(
+        data_specs.FieldInQuerySpec(data_specs.CoordSpec(x))
+    )
+    queries_spec = {'data': {'u': maybe_auxiliary(optional_u)}}
+    inputs = {'data': {'u': u}} if is_present else {}
+    queries = data_specs.construct_query(inputs, queries_spec)
+    # Present data is used as is, missing data is requested on its coordinate.
+    expected_entry = u if is_present else x
+    chex.assert_trees_all_equal(
+        queries, {'data': {'u': maybe_auxiliary(expected_entry)}}
+    )
+
+  def test_construct_query_with_missing_optional_coord_spec_raises(self):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    x_spec = data_specs.CoordSpec(x, {'x': data_specs.AxisMatchRules.SHAPE})
+    optional_u = data_specs.OptionalSpec(data_specs.FieldInQuerySpec(x_spec))
+    queries_spec = {'data': {'u': typing.Auxiliary(optional_u)}}
+    with self.assertRaisesRegex(ValueError, 'without reference coord') as cm:
+      data_specs.construct_query({}, queries_spec)
+    self.assertIn('data/u', ' '.join(cm.exception.__notes__))
+
 
 class ValidateObservationTest(parameterized.TestCase):
   """Tests that validate_observation checks outputs of observe."""
@@ -483,23 +516,99 @@ class ParseQuerySpecTest(parameterized.TestCase):
           auxiliary=True,
           from_data=True,
       ),
+      dict(
+          testcase_name='optional_field_in_query',
+          spec=data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X_SPEC)),
+          value=_X_SPEC,
+          optional=True,
+          from_data=True,
+      ),
+      dict(
+          testcase_name='auxiliary_optional_field_in_query',
+          spec=typing.Auxiliary(
+              data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X))
+          ),
+          value=_X,
+          auxiliary=True,
+          optional=True,
+          from_data=True,
+      ),
   )
   def test_parse_query_spec(
-      self, spec, value, auxiliary=False, from_data=False
+      self, spec, value, auxiliary=False, optional=False, from_data=False
   ):
     parsed = data_specs.parse_query_spec(spec)
     self.assertIs(parsed.value, value)
     self.assertEqual(parsed.auxiliary, auxiliary)
+    self.assertEqual(parsed.optional, optional)
     self.assertEqual(parsed.from_data, from_data)
     self.assertEqual(parsed.is_output, not auxiliary)
 
-  def test_rewrap_preserves_wrappers(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='auxiliary_field_in_query',
+          spec=typing.Auxiliary(data_specs.FieldInQuerySpec(_X)),
+          expected_fn=lambda c: typing.Auxiliary(
+              data_specs.FieldInQuerySpec(c)
+          ),
+      ),
+      dict(
+          testcase_name='auxiliary_optional_field_in_query',
+          spec=typing.Auxiliary(
+              data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X))
+          ),
+          expected_fn=lambda c: typing.Auxiliary(
+              data_specs.OptionalSpec(data_specs.FieldInQuerySpec(c))
+          ),
+      ),
+  )
+  def test_rewrap_preserves_wrappers(self, spec, expected_fn):
     y = cx.LabeledAxis('y', np.arange(2.0))
-    spec = typing.Auxiliary(data_specs.FieldInQuerySpec(_X))
     rewrapped = data_specs.parse_query_spec(spec).rewrap(y)
-    self.assertEqual(
-        rewrapped, typing.Auxiliary(data_specs.FieldInQuerySpec(y))
-    )
+    self.assertEqual(rewrapped, expected_fn(y))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='present',
+          spec=data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X)),
+          is_present=True,
+          expected=data_specs.FieldInQuerySpec(_X),
+      ),
+      dict(
+          testcase_name='missing',
+          spec=data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X)),
+          is_present=False,
+          expected=_X,
+      ),
+      dict(
+          testcase_name='auxiliary_present',
+          spec=typing.Auxiliary(
+              data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X))
+          ),
+          is_present=True,
+          expected=typing.Auxiliary(data_specs.FieldInQuerySpec(_X)),
+      ),
+      dict(
+          testcase_name='auxiliary_missing',
+          spec=typing.Auxiliary(
+              data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X))
+          ),
+          is_present=False,
+          expected=typing.Auxiliary(_X),
+      ),
+      dict(
+          testcase_name='not_optional',
+          spec=data_specs.FieldInQuerySpec(_X),
+          is_present=False,
+          expected=data_specs.FieldInQuerySpec(_X),
+      ),
+  )
+  def test_resolve_optional(self, spec, is_present, expected):
+    parsed = data_specs.parse_query_spec(spec)
+    resolved = parsed.resolve_optional(is_present)
+    self.assertFalse(resolved.optional)
+    self.assertEqual(resolved.is_output, parsed.is_output)
+    self.assertEqual(resolved.rewrap(_X), expected)
 
   @parameterized.named_parameters(
       dict(
@@ -518,6 +627,10 @@ class ParseQuerySpecTest(parameterized.TestCase):
           testcase_name='field_in_query_of_field',
           spec=data_specs.FieldInQuerySpec(_X_FIELD),
       ),
+      dict(
+          testcase_name='optional_inside_field_in_query',
+          spec=data_specs.FieldInQuerySpec(data_specs.OptionalSpec(_X)),
+      ),
       dict(testcase_name='unsupported_type', spec='not a spec'),
   )
   def test_parse_query_spec_raises_on_unsupported_specs(self, spec):
@@ -527,14 +640,26 @@ class ParseQuerySpecTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(testcase_name='optional', spec=data_specs.OptionalSpec(_X)),
       dict(
-          testcase_name='auxiliary_optional_field_in_query',
-          spec=typing.Auxiliary(
+          testcase_name='optional_field',
+          spec=data_specs.OptionalSpec(_X_FIELD),
+      ),
+      dict(
+          testcase_name='auxiliary_inside_optional',
+          spec=data_specs.OptionalSpec(
+              typing.Auxiliary(data_specs.FieldInQuerySpec(_X))
+          ),
+      ),
+      dict(
+          testcase_name='nested_optional',
+          spec=data_specs.OptionalSpec(
               data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X))
           ),
       ),
   )
-  def test_parse_query_spec_raises_on_optional_spec(self, spec):
-    with self.assertRaisesRegex(ValueError, 'OptionalSpec is not supported'):
+  def test_parse_query_spec_raises_on_optional_without_field_in_query(
+      self, spec
+  ):
+    with self.assertRaisesRegex(ValueError, 'must wrap a FieldInQuerySpec'):
       data_specs.parse_query_spec(spec)
 
 
@@ -716,6 +841,18 @@ class FinalizeSpecTest(parameterized.TestCase):
         query_spec_tree, source_tree
     )
     chex.assert_trees_all_equal(actual, expected)
+
+  def test_finalize_query_spec_preserves_optional(self):
+    z = cx.LabeledAxis('z', np.arange(3))
+    z_spec = data_specs.CoordSpec(z)
+    optional_spec = data_specs.OptionalSpec(data_specs.FieldInQuerySpec(z_spec))
+    actual = data_specs.finalize_query_spec(
+        typing.Auxiliary(optional_spec), None
+    )
+    expected = typing.Auxiliary(
+        data_specs.OptionalSpec(data_specs.FieldInQuerySpec(z))
+    )
+    self.assertEqual(actual, expected)
 
   def test_finalize_nested_queries_spec_returns_fields_unchanged(self):
     x = cx.LabeledAxis('x', np.arange(3))
