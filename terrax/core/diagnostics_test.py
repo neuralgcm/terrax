@@ -466,15 +466,87 @@ class DiagnosticsTest(parameterized.TestCase):
     cx.testing.assert_fields_allclose(
         diag_values['increasing_instant'], cx.field(expected_instant, y_coord)
     )
-    # steps 4 and 5 are within the same accumulation frequency, should feature
-    # the same instant values of 4 * 2 = 8.
-    expected_instant_4_and_5 = jnp.ones(5) * 8.0
+    # Instant values reflect the most recent `__call__` on every step, even
+    # between `accumulation_frequency` steps (4 * 2 = 8, 5 * 2 = 10).
     cx.testing.assert_fields_allclose(
-        instant_after_4, cx.field(expected_instant_4_and_5, y_coord)
+        instant_after_4, cx.field(jnp.ones(5) * 8.0, y_coord)
     )
     cx.testing.assert_fields_allclose(
-        instant_after_5, cx.field(expected_instant_4_and_5, y_coord)
+        instant_after_5, cx.field(jnp.ones(5) * 10.0, y_coord)
     )
+
+  def test_interval_diagnostic_with_accumulation_frequency_explicit_timedelta(
+      self,
+  ):
+    y_coord = cx.SizedAxis('y', 5)
+    extract = lambda x, *, prognostics: {
+        'increasing': prognostics['increasing']
+    }
+    d_coords = {'increasing': y_coord}
+    diagnostic = diagnostics.IntervalDiagnostic(
+        extract,
+        d_coords,
+        interval=np.timedelta64(6, 'h'),
+        resolution=np.timedelta64(6, 'h'),
+        accumulation_frequency=np.timedelta64(2, 'h'),
+        include_instant=True,
+    )
+    module = MockMethod()
+    dt = np.timedelta64(1, 'h')
+    clock_inputs = {'timedelta': jdt.to_timedelta(dt)}
+
+    with self.subTest('one_call_per_clock_advance'):
+      fields = {'increasing': cx.field(jnp.zeros(5), y_coord)}
+      for _ in range(6):
+        fields = module(fields)
+        diagnostic(fields, prognostics=fields)
+        diagnostic.advance_clock(clock_inputs)
+
+      diag_values = diagnostic.diagnostic_values()
+      cx.testing.assert_fields_allclose(
+          diag_values['increasing'], cx.field(jnp.ones(5) * 24.0, y_coord)
+      )
+      cx.testing.assert_fields_allclose(
+          diag_values['increasing_instant'],
+          cx.field(jnp.ones(5) * 12.0, y_coord),
+      )
+
+    with self.subTest('multiple_calls_per_clock_advance'):
+      diagnostic.reset_diagnostic_state()
+      fields = {'increasing': cx.field(jnp.zeros(5), y_coord)}
+      for _ in range(6):
+        fields = module(fields)
+        diagnostic(fields, prognostics=fields)
+        diagnostic(fields, prognostics=fields)
+        diagnostic.advance_clock(clock_inputs)
+
+      diag_values = diagnostic.diagnostic_values()
+      # Calling diagnostic twice per step doubles the accumulated sum at each
+      # matched `accumulation_frequency` step (2 * 24 = 48), while instant
+      # holds the value from the last call (12).
+      cx.testing.assert_fields_allclose(
+          diag_values['increasing'], cx.field(jnp.ones(5) * 48.0, y_coord)
+      )
+      cx.testing.assert_fields_allclose(
+          diag_values['increasing_instant'],
+          cx.field(jnp.ones(5) * 12.0, y_coord),
+      )
+
+    with self.subTest('advance_clock_without_call'):
+      # Advancing the clock through another 6h resolution period without
+      # calling `diagnostic` should accumulate 0 for the new period while
+      # preserving `increasing_instant`.
+      for _ in range(6):
+        diagnostic.advance_clock(clock_inputs)
+
+      diag_values = diagnostic.diagnostic_values()
+      cx.testing.assert_fields_allclose(
+          diag_values['increasing'], cx.field(jnp.zeros(5), y_coord)
+      )
+      cx.testing.assert_fields_allclose(
+          diag_values['increasing_instant'],
+          cx.field(jnp.ones(5) * 12.0, y_coord),
+      )
 
   def test_time_offset_diagnostic(self):
     x_coord, y_coord = cx.SizedAxis('x', 3), cx.SizedAxis('y', 5)
