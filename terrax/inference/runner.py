@@ -43,24 +43,29 @@ import xarray
 # pylint: disable=logging-fstring-interpolation
 
 NestedData = dict[str, xarray.Dataset]  # eventually, use xarray.DataTree
+# Specs for reading `NestedData`, see `xarray_utils.read_from_xarray`.
+_ReadSpec = dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]]
 
 
-def _queries_to_dummy_datatree(queries: typing.Queries) -> xarray.DataTree:
+def _queries_to_dummy_datatree(
+    queries: data_specs.FinalizedQueriesSpec,
+) -> xarray.DataTree:
   """Create a DataTree of dummy dask.array objects, matching the given queries."""
   outputs = {}
   for group, sub_query in queries.items():
     ds = xarray.Dataset()
-    for var, c in sub_query.items():
-      if isinstance(c, typing.Auxiliary):
+    for var, entry in sub_query.items():
+      parsed = data_specs.parse_query_spec(entry)
+      if parsed.auxiliary:
         continue
-      if isinstance(c, data_specs.FieldInQuerySpec):
-        c = c.spec
-      coords = c.coordinate.to_xarray() if cx.is_field(c) else c.to_xarray()
+      value = parsed.value
+      coord = value.coordinate if cx.is_field(value) else value
+      assert cx.is_coord(coord), entry  # query specs are finalized in `setup`.
       ds[var] = xarray.DataArray(
           # TODO(shoyer): include dtype as part of the query spec?
-          data=dask.array.zeros(c.shape, np.float32),
-          dims=c.dims,
-          coords=coords,
+          data=dask.array.zeros(coord.shape, np.float32),
+          dims=coord.dims,
+          coords=coord.to_xarray(),
       )
     outputs[group] = ds
   return xarray.DataTree.from_dict(outputs)
@@ -191,7 +196,7 @@ class InferenceRunner:
   ensemble_size: int | None  # ensemble_size=None for deterministic models
   ensemble_batch_size: int = dataclasses.field(default=1, kw_only=True)
   output_path: str
-  output_query: typing.Queries
+  output_query: data_specs.QueriesSpec
   dynamic_query_inputs: dynamic_inputs_lib.DynamicInputs | None = (
       dataclasses.field(default=None, kw_only=True)
   )
@@ -209,8 +214,8 @@ class InferenceRunner:
   max_nan_retries: int = 3  # only used when bad_state_strategy='retry'.
   check_dynamic_inputs_data: bool = False
   random_seed: int = 0
-  _dynamic_queries_read_spec: dict[str, dict[str, cx.Coordinate]] = (
-      dataclasses.field(default_factory=dict, init=False)
+  _dynamic_queries_read_spec: _ReadSpec = dataclasses.field(
+      default_factory=dict, init=False
   )
 
   def __post_init__(self):
@@ -292,30 +297,42 @@ class InferenceRunner:
             f'inputs={self.inputs}\ninit_times={self.init_times}'
         )
 
-    # Pre-compute specs for reading dynamic queries from the data.
-    dynamic_queries_read_spec = {}
+    # Validate output_query and pre-compute specs for reading dynamic queries.
+    dynamic_queries_read_spec: _ReadSpec = {}
     for ds_key, sub_query in self.output_query.items():
-      ds_specs = {}
+      parsed_entries = {}
       for var_name, spec in sub_query.items():
-        spec, _ = typing.unwrap_auxiliary(spec)
-        # we only need read specs for FieldInQuery.
-        if isinstance(spec, data_specs.FieldInQuerySpec):
-          var_spec = spec.spec
-          # Set any timedelta to enable reading arbitrary lead times.
-          if isinstance(var_spec, cx.Coordinate):
-            var_spec = data_specs.CoordSpec.with_any_timedelta(var_spec)
-          elif isinstance(var_spec, data_specs.CoordSpec):
-            var_spec = data_specs.CoordSpec.with_any_timedelta(
-                var_spec.coord, var_spec.dim_match_rules
-            )
-          else:
-            raise ValueError(
-                f'Unsupported spec type for dynamic query {ds_key} {var_name}:'
-                f' {type(var_spec)}'
-            )
-          ds_specs[var_name] = var_spec
+        try:
+          parsed_entries[var_name] = data_specs.parse_query_spec(spec)
+        except ValueError as e:
+          e.add_note(f'Invalid output_query entry for {ds_key}/{var_name}.')
+          raise
+      if not any(parsed.is_output for parsed in parsed_entries.values()):
+        raise ValueError(
+            f'output_query for {ds_key!r} has no entries that are returned by'
+            ' the model, i.e. that are not wrapped in Auxiliary.'
+        )
+      ds_specs: dict[str, cx.Coordinate | data_specs.CoordLikeSpec] = {}
+      for var_name, parsed in parsed_entries.items():
+        # we only need read specs for fields inserted into queries from data.
+        if not parsed.from_data:
+          continue
+        var_spec = parsed.value
+        assert not cx.is_field(var_spec), var_spec  # see parse_query_spec.
+        # Set any timedelta to enable reading arbitrary lead times.
+        if isinstance(var_spec, data_specs.CoordSpec):
+          ds_specs[var_name] = data_specs.CoordSpec.with_any_timedelta(
+              var_spec.coord, var_spec.dim_match_rules
+          )
+        else:
+          ds_specs[var_name] = data_specs.CoordSpec.with_any_timedelta(var_spec)
       if ds_specs:
         dynamic_queries_read_spec[ds_key] = ds_specs
+    if dynamic_queries_read_spec and self.dynamic_query_inputs is None:
+      raise ValueError(
+          'FieldInQuerySpec entries in output_query for'
+          f' {sorted(dynamic_queries_read_spec)} require dynamic_query_inputs.'
+      )
     self._dynamic_queries_read_spec = dynamic_queries_read_spec
 
   @property
@@ -402,9 +419,9 @@ class InferenceRunner:
 
     # Our strategy here is to create a DataTree where all variables are empty
     # dask.array objects, similar xarray_beam.make_template()
-    sample_queries = self.output_query
+    coord_sources = {}
     if self.dynamic_query_inputs is not None:
-      # If using streaming dynamic queries, we fetch metadata & finalize specs.
+      # If using streaming dynamic queries, we fetch metadata to finalize specs.
       first_time = self.init_times[0].astype('datetime64[ns]')
       q_stream = self.dynamic_query_inputs.get_forecast(first_time)
       q_data = q_stream.get_data(np.timedelta64(0), self.finest_output_freq)
@@ -413,9 +430,9 @@ class InferenceRunner:
           self._dynamic_queries_read_spec
       )
       coord_sources = xarray_utils.extract_xr_source_coords(q_data, c_types)
-      sample_queries = data_specs.finalize_nested_queries_spec(
-          self.output_query, coord_sources
-      )
+    sample_queries = data_specs.finalize_nested_queries_spec(
+        self.output_query, coord_sources
+    )
     template = _queries_to_dummy_datatree(sample_queries)
 
     # `lead_time` is attached to each group rather than to the root of the
@@ -676,7 +693,7 @@ class InferenceRunner:
         )
         queries_data = xarray_utils.ensure_timedelta_axis(queries_data)
         query_fields = xarray_utils.read_from_xarray(
-            queries_data, self._dynamic_queries_read_spec, strict_matches=False  # pyrefly: ignore[bad-argument-type]
+            queries_data, self._dynamic_queries_read_spec, strict_matches=False
         )
       queries = data_specs.construct_query(query_fields, self.output_query)
       split_queries = split_queries_by_frequency(

@@ -153,6 +153,22 @@ class RunnerTest(parameterized.TestCase):
           field_in_queries_coord=cx.LabeledAxis('loc', np.array([1, 2])),
           use_dynamic_query_inputs=True,
       ),
+      dict(
+          testcase_name='auxiliary_static_field_query',
+          ensemble_size=None,
+          ensemble_batch_size=1,
+          field_in_queries_coord=cx.LabeledAxis('loc', np.array([1, 2])),
+          use_dynamic_query_inputs=False,
+          auxiliary_field_query=True,
+      ),
+      dict(
+          testcase_name='auxiliary_dynamic_field_query',
+          ensemble_size=None,
+          ensemble_batch_size=1,
+          field_in_queries_coord=cx.LabeledAxis('loc', np.array([1, 2])),
+          use_dynamic_query_inputs=True,
+          auxiliary_field_query=True,
+      ),
   )
   def test_inference_runner(
       self,
@@ -160,6 +176,7 @@ class RunnerTest(parameterized.TestCase):
       ensemble_batch_size,
       field_in_queries_coord: cx.Coordinate | None = None,
       use_dynamic_query_inputs: bool = False,
+      auxiliary_field_query: bool = False,
   ):
     if ensemble_size is not None:
       assimilation_noise = random_processes.UniformUncorrelated.construct(
@@ -202,10 +219,12 @@ class RunnerTest(parameterized.TestCase):
     }
     query_ds = None  # make pytype happy.
     dynamic_query_inputs = None
+    # Auxiliary fields in queries are passed to the model, but not returned.
+    maybe_auxiliary = typing.Auxiliary if auxiliary_field_query else lambda x: x
     if field_in_queries_coord is not None:
       buz_spec = data_specs.FieldInQuerySpec(field_in_queries_coord)
       if use_dynamic_query_inputs:
-        output_query['state']['buz'] = buz_spec
+        output_query['state']['buz'] = maybe_auxiliary(buz_spec)
         lead_times = one_h * np.arange(
             0, out_duration_in_h + out_freq_in_h, out_freq_in_h
         )  # contains values for all lead times, including last (not written).
@@ -224,8 +243,8 @@ class RunnerTest(parameterized.TestCase):
             update_freq=output_freq,  # update for each output step.
         )
       else:
-        output_query['state']['buz'] = cx.field(
-            np.ones(buz_spec.spec.shape), buz_spec.spec
+        output_query['state']['buz'] = maybe_auxiliary(
+            cx.field(np.ones(buz_spec.spec.shape), buz_spec.spec)
         )
 
     zarr_chunks = {'lead_time': 4, 'init_time': 1}
@@ -278,7 +297,7 @@ class RunnerTest(parameterized.TestCase):
         'foo': (dims, nans(shape)),
         'bar': (dims + ('x',), nans(shape + (3,))),
     }
-    if field_in_queries_coord is not None:
+    if field_in_queries_coord is not None and not auxiliary_field_query:
       buz_dims = dims + field_in_queries_coord.dims
       buz_shape = shape + field_in_queries_coord.shape
       child_node_dict['buz'] = (buz_dims, nans(buz_shape))
@@ -306,7 +325,7 @@ class RunnerTest(parameterized.TestCase):
         'foo': (dims, expected_foo),
         'bar': (dims + ('x',), expected_bar),
     }
-    if field_in_queries_coord is not None:
+    if field_in_queries_coord is not None and not auxiliary_field_query:
       buz_dims = dims + field_in_queries_coord.dims
       buz_shape = shape + field_in_queries_coord.shape
       if use_dynamic_query_inputs:
@@ -522,6 +541,80 @@ class OutputFreqTest(parameterized.TestCase):
   def test_empty_output_query_raises(self):
     with self.assertRaisesRegex(ValueError, 'output_query must not be empty'):
       make_runner(output_query={})
+
+
+class OutputQueryTest(parameterized.TestCase):
+
+  def test_invalid_entry_raises_with_location(self):
+    output_query = {
+        'a': {'foo': cx.Scalar(), 'bar': data_specs.OptionalSpec(cx.Scalar())},
+    }
+    with self.assertRaisesRegex(ValueError, 'not supported in queries') as cm:
+      make_runner(output_query=output_query)
+    self.assertIn('a/bar', '\n'.join(cm.exception.__notes__))
+
+  def test_dataset_key_without_returned_entries_raises(self):
+    output_query = {
+        'a': {'foo': cx.Scalar()},
+        'b': {'foo': typing.Auxiliary(cx.Scalar())},
+    }
+    with self.assertRaisesRegex(ValueError, "'b' has no entries that are"):
+      make_runner(output_query=output_query)
+
+  def test_field_in_query_requires_dynamic_query_inputs(self):
+    loc = cx.LabeledAxis('loc', np.array([1, 2]))
+    output_query = {
+        'a': {'foo': cx.Scalar()},
+        'b': {'foo': cx.Scalar(), 'buz': data_specs.FieldInQuerySpec(loc)},
+    }
+    with self.assertRaisesRegex(ValueError, 'require dynamic_query_inputs'):
+      make_runner(output_query=output_query)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='static_queries', use_dynamic_query_inputs=False),
+      dict(testcase_name='dynamic_queries', use_dynamic_query_inputs=True),
+  )
+  def test_setup_writes_returned_entries(self, use_dynamic_query_inputs):
+    loc = cx.LabeledAxis('loc', np.array([1, 2]))
+    output_query: data_specs.QueriesSpec = {
+        'a': {
+            'foo': data_specs.CoordSpec(cx.Scalar()),
+            'buz': cx.field(np.ones(2), loc),
+            'hidden_buz': typing.Auxiliary(cx.field(np.ones(2), loc)),
+        },
+        'b': {'foo': cx.Scalar()},
+    }
+    dynamic_query_inputs = None
+    expected_b_vars = {'foo'}
+    if use_dynamic_query_inputs:
+      output_query['b'] |= {
+          'buz': data_specs.FieldInQuerySpec(loc),
+          'hidden_buz': typing.Auxiliary(data_specs.FieldInQuerySpec(loc)),
+      }
+      expected_b_vars.add('buz')
+      init_times = np.array([np.datetime64('2025-01-01')])
+      query_ds = xarray.Dataset(
+          {
+              'buz': (('time', 'loc'), np.zeros((1, 2))),
+              'hidden_buz': (('time', 'loc'), np.zeros((1, 2))),
+          },
+          coords={'time': init_times} | loc.to_xarray(),
+      )
+      dynamic_query_inputs = dynamic_inputs_lib.Prescribed(
+          full_data={'b': query_ds},
+          climatology=None,
+          update_freq=np.timedelta64(6, 'h'),
+      )
+    output_path = self.create_tempdir().full_path
+    runner = make_runner(
+        output_path=output_path,
+        output_query=output_query,
+        dynamic_query_inputs=dynamic_query_inputs,
+    )
+    runner.setup()
+    actual = xarray.open_datatree(output_path, engine='zarr')
+    self.assertEqual(set(actual['a'].data_vars), {'foo', 'buz'})
+    self.assertEqual(set(actual['b'].data_vars), expected_b_vars)
 
 
 class SplitQueriesByFrequencyTest(absltest.TestCase):

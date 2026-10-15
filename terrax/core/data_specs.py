@@ -424,7 +424,7 @@ class ParsedQuerySpec:
     return typing.Auxiliary(entry) if self.auxiliary else entry
 
 
-def parse_query_spec(spec: QuerySpec) -> ParsedQuerySpec:
+def parse_query_spec(spec: QuerySpec | FinalizedQuerySpec) -> ParsedQuerySpec:
   """Returns `spec` split into its innermost value and its wrappers.
 
   Args:
