@@ -378,6 +378,114 @@ class ConstructQueryTest(parameterized.TestCase):
     }
     chex.assert_trees_all_equal(queries, expected)
 
+  def test_construct_query_rejects_auxiliary_inside_field_in_query(self):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    inputs = {'data': {'u': cx.field(np.zeros(x.shape), x)}}
+    queries_spec = {
+        'data': {'u': data_specs.FieldInQuerySpec(typing.Auxiliary(x))}
+    }
+    with self.assertRaisesRegex(ValueError, 'Unsupported query spec') as cm:
+      data_specs.construct_query(inputs, queries_spec)
+    self.assertIn('data/u', ' '.join(cm.exception.__notes__))
+
+
+_X = cx.LabeledAxis('x', np.arange(3.0))
+_X_SPEC = data_specs.CoordSpec(_X)
+_X_FIELD = cx.field(np.zeros(3), _X)
+
+
+class ParseQuerySpecTest(parameterized.TestCase):
+  """Tests that parse_query_spec splits and validates query specs."""
+
+  @parameterized.named_parameters(
+      dict(testcase_name='coordinate', spec=_X, value=_X),
+      dict(testcase_name='coord_spec', spec=_X_SPEC, value=_X_SPEC),
+      dict(testcase_name='field', spec=_X_FIELD, value=_X_FIELD),
+      dict(
+          testcase_name='field_in_query',
+          spec=data_specs.FieldInQuerySpec(_X),
+          value=_X,
+          from_data=True,
+      ),
+      dict(
+          testcase_name='field_in_query_with_coord_spec',
+          spec=data_specs.FieldInQuerySpec(_X_SPEC),
+          value=_X_SPEC,
+          from_data=True,
+      ),
+      dict(
+          testcase_name='auxiliary_coordinate',
+          spec=typing.Auxiliary(_X),
+          value=_X,
+          auxiliary=True,
+      ),
+      dict(
+          testcase_name='auxiliary_field',
+          spec=typing.Auxiliary(_X_FIELD),
+          value=_X_FIELD,
+          auxiliary=True,
+      ),
+      dict(
+          testcase_name='auxiliary_field_in_query',
+          spec=typing.Auxiliary(data_specs.FieldInQuerySpec(_X)),
+          value=_X,
+          auxiliary=True,
+          from_data=True,
+      ),
+  )
+  def test_parse_query_spec(
+      self, spec, value, auxiliary=False, from_data=False
+  ):
+    parsed = data_specs.parse_query_spec(spec)
+    self.assertIs(parsed.value, value)
+    self.assertEqual(parsed.auxiliary, auxiliary)
+    self.assertEqual(parsed.from_data, from_data)
+    self.assertEqual(parsed.is_output, not auxiliary)
+
+  def test_rewrap_preserves_wrappers(self):
+    y = cx.LabeledAxis('y', np.arange(2.0))
+    spec = typing.Auxiliary(data_specs.FieldInQuerySpec(_X))
+    rewrapped = data_specs.parse_query_spec(spec).rewrap(y)
+    self.assertEqual(
+        rewrapped, typing.Auxiliary(data_specs.FieldInQuerySpec(y))
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='auxiliary_inside_field_in_query',
+          spec=data_specs.FieldInQuerySpec(typing.Auxiliary(_X)),
+      ),
+      dict(
+          testcase_name='nested_auxiliary',
+          spec=typing.Auxiliary(typing.Auxiliary(_X)),
+      ),
+      dict(
+          testcase_name='nested_field_in_query',
+          spec=data_specs.FieldInQuerySpec(data_specs.FieldInQuerySpec(_X)),
+      ),
+      dict(
+          testcase_name='field_in_query_of_field',
+          spec=data_specs.FieldInQuerySpec(_X_FIELD),
+      ),
+      dict(testcase_name='unsupported_type', spec='not a spec'),
+  )
+  def test_parse_query_spec_raises_on_unsupported_specs(self, spec):
+    with self.assertRaisesRegex(ValueError, 'Unsupported query spec'):
+      data_specs.parse_query_spec(spec)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='optional', spec=data_specs.OptionalSpec(_X)),
+      dict(
+          testcase_name='auxiliary_optional_field_in_query',
+          spec=typing.Auxiliary(
+              data_specs.OptionalSpec(data_specs.FieldInQuerySpec(_X))
+          ),
+      ),
+  )
+  def test_parse_query_spec_raises_on_optional_spec(self, spec):
+    with self.assertRaisesRegex(ValueError, 'OptionalSpec is not supported'):
+      data_specs.parse_query_spec(spec)
+
 
 class CoordSpecTest(parameterized.TestCase):
   """Tests CoordSpec custom constructors and post-init behavior."""
@@ -557,6 +665,25 @@ class FinalizeSpecTest(parameterized.TestCase):
         query_spec_tree, source_tree
     )
     chex.assert_trees_all_equal(actual, expected)
+
+  def test_finalize_nested_queries_spec_returns_fields_unchanged(self):
+    x = cx.LabeledAxis('x', np.arange(3))
+    field = cx.field(np.arange(3.0), x)
+    auxiliary_field = typing.Auxiliary(field)
+    query_spec_tree = {
+        'group': {'field': field, 'auxiliary_field': auxiliary_field}
+    }
+    actual = data_specs.finalize_nested_queries_spec(query_spec_tree)
+    self.assertIs(actual['group']['field'], field)
+    self.assertIsInstance(actual['group']['auxiliary_field'], typing.Auxiliary)
+    self.assertIs(actual['group']['auxiliary_field'].spec, field)
+
+  def test_get_coord_types_of_auxiliary_field(self):
+    td = coordinates.TimeDelta(np.array([np.timedelta64(1, 'h')]))
+    x = cx.LabeledAxis('x', np.arange(5))
+    field = cx.field(np.zeros((1, 5)), td, x)
+    actual = data_specs.get_coord_types(typing.Auxiliary(field))
+    self.assertEqual(actual, (coordinates.TimeDelta, cx.LabeledAxis))
 
   def test_get_nested_coord_types(self):
     x = cx.LabeledAxis('x', np.arange(5))

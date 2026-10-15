@@ -25,9 +25,14 @@ from terrax.core import data_specs
 from terrax.core import pytree_utils
 from terrax.core import typing
 
-CoordOrFinalizedQuery: TypeAlias = data_specs.FinalizedQuerySpec
-# Concrete spec excludes `OptionalSpec` and `CoordSpec` types, leaving only
-# `cx.Coordinate` and concrete `FieldInQuerySpec`, aka FinalizedQuerySpec.
+_ScanSpecEntry: TypeAlias = (
+    cx.Coordinate | data_specs.FieldInQuerySpec[cx.Coordinate]
+)
+# Specs used to set up nested scans: coordinates or `FieldInQuerySpec` with
+# concrete coordinates, optionally wrapped in `typing.Auxiliary`.
+CoordOrFinalizedQuery: TypeAlias = (
+    _ScanSpecEntry | typing.Auxiliary[_ScanSpecEntry]
+)
 ConcreteSpecs: TypeAlias = (
     dict[str, dict[str, CoordOrFinalizedQuery]]
     | dict[str, CoordOrFinalizedQuery]

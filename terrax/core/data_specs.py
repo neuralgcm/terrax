@@ -14,7 +14,7 @@
 
 """Defines DataSpec objects that parameterize inputs/queries in experiments."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import dataclasses
 import enum
 from typing import Any, Generic, TypeAlias, TypeVar
@@ -278,14 +278,22 @@ T = TypeVar('T')
 
 @dataclasses.dataclass
 class OptionalSpec(Generic[T]):
-  """Wrapper that indicates that a spec is optional."""
+  """Wrapper that indicates that a spec is optional.
+
+  In inputs specs, entries wrapped in `OptionalSpec` may be absent from the data
+  and are skipped in that case.
+  """
 
   spec: T
 
 
 @dataclasses.dataclass
 class FieldInQuerySpec(Generic[T]):
-  """Wrapper that indicates that the entry should be of type `cx.Field`."""
+  """Wrapper indicating that a query entry is a `cx.Field` taken from data.
+
+  `construct_query` replaces such entries with the same-named field from the
+  data. `spec` describes the coordinate of that field.
+  """
 
   spec: T
 
@@ -368,52 +376,115 @@ def finalize_spec(
 
 # Type alias for extended Spec objects that are used as InputsSpec.
 CoordLikeSpec: TypeAlias = CoordSpec | OptionalSpec[cx.Coordinate | CoordSpec]
-QuerySpec: TypeAlias = CoordSpec | FieldInQuerySpec[cx.Coordinate | CoordSpec]
-QueriesSpec: TypeAlias = dict[str, dict[str, cx.Coordinate | QuerySpec]]
-FinalizedQuerySpec: TypeAlias = cx.Coordinate | FieldInQuerySpec[cx.Coordinate]
+# Type aliases for query specs, see `parse_query_spec` for valid nesting.
+QuerySpecEntry: TypeAlias = (
+    cx.Coordinate
+    | CoordSpec
+    | cx.Field
+    | FieldInQuerySpec[cx.Coordinate | CoordSpec]
+)
+QuerySpec: TypeAlias = QuerySpecEntry | typing.Auxiliary[QuerySpecEntry]
+QueriesSpec: TypeAlias = dict[str, dict[str, QuerySpec]]
+FinalizedQuerySpecEntry: TypeAlias = (
+    cx.Coordinate | cx.Field | FieldInQuerySpec[cx.Coordinate]
+)
+FinalizedQuerySpec: TypeAlias = (
+    FinalizedQuerySpecEntry | typing.Auxiliary[FinalizedQuerySpecEntry]
+)
 FinalizedQueriesSpec: TypeAlias = dict[str, dict[str, FinalizedQuerySpec]]
 
 
+@dataclasses.dataclass(frozen=True)
+class ParsedQuerySpec:
+  """A query spec entry split into its innermost value and its wrappers.
+
+  Wrappers nest in a fixed order: `typing.Auxiliary` around `FieldInQuerySpec`
+  around a coordinate or a `CoordSpec`. A concrete `cx.Field` can only be
+  wrapped in `typing.Auxiliary`.
+
+  Attributes:
+    value: The innermost entry: a coordinate, a `CoordSpec` or a `cx.Field`.
+    auxiliary: Whether the entry is excluded from the outputs of `observe`.
+    from_data: Whether the entry is replaced by a `cx.Field` taken from data
+      when queries are constructed, i.e. whether it is a `FieldInQuerySpec`.
+  """
+
+  value: cx.Coordinate | CoordSpec | cx.Field
+  auxiliary: bool = False
+  from_data: bool = False
+
+  @property
+  def is_output(self) -> bool:
+    """Whether `observe` returns this entry."""
+    return not self.auxiliary
+
+  def rewrap(self, value: cx.Coordinate | CoordSpec) -> QuerySpec:
+    """Returns coordinate-like `value` wrapped like this entry."""
+    entry = FieldInQuerySpec(value) if self.from_data else value
+    return typing.Auxiliary(entry) if self.auxiliary else entry
+
+
+def parse_query_spec(spec: QuerySpec) -> ParsedQuerySpec:
+  """Returns `spec` split into its innermost value and its wrappers.
+
+  Args:
+    spec: A query spec entry.
+
+  Returns:
+    The innermost value of `spec` and flags indicating its wrappers.
+
+  Raises:
+    ValueError: If wrappers in `spec` are nested in an unsupported order or if
+      `spec` is of an unsupported type.
+  """
+  value, auxiliary = typing.unwrap_auxiliary(spec)
+  from_data = isinstance(value, FieldInQuerySpec)
+  if from_data:
+    value = value.spec
+  if isinstance(value, OptionalSpec):
+    raise ValueError(f'OptionalSpec is not supported in queries, got {spec!r}')
+  is_coord_like = cx.is_coord(value) or isinstance(value, CoordSpec)
+  if not (is_coord_like or (cx.is_field(value) and not from_data)):
+    raise ValueError(
+        f'Unsupported query spec {spec!r}. Expected a coordinate, CoordSpec or'
+        ' Field, optionally wrapped as Auxiliary(FieldInQuerySpec(...)), where'
+        ' FieldInQuerySpec wraps a coordinate or a CoordSpec.'
+    )
+  return ParsedQuerySpec(value, auxiliary=auxiliary, from_data=from_data)
+
+
 def finalize_query_spec(
-    query_spec: cx.Coordinate | QuerySpec | typing.Auxiliary,
+    query_spec: QuerySpec,
     source_coord: cx.Coordinate | None,
-) -> cx.Coordinate | FieldInQuerySpec[cx.Coordinate] | typing.Auxiliary:
-  """Returns a `query_spec` with CoordSpec components being finalized."""
-  query_spec, is_aux = typing.unwrap_auxiliary(query_spec)
-  if isinstance(query_spec, FieldInQuerySpec):
-    result = FieldInQuerySpec(finalize_spec(query_spec.spec, source_coord))
+) -> FinalizedQuerySpec:
+  """Returns `query_spec` with its `CoordSpec` component finalized.
+
+  Concrete `cx.Field` entries are returned unchanged.
+
+  Args:
+    query_spec: A query spec entry.
+    source_coord: A coordinate used to finalize the `CoordSpec` component, see
+      `finalize_spec`.
+
+  Returns:
+    `query_spec` with the same wrappers and a concrete coordinate.
+  """
+  parsed = parse_query_spec(query_spec)
+  value = parsed.value
+  if cx.is_field(value):
+    entry: FinalizedQuerySpecEntry = value
   else:
-    result = finalize_spec(query_spec, source_coord)
-  return typing.Auxiliary(result) if is_aux else result
+    coord = finalize_spec(value, source_coord)
+    entry = FieldInQuerySpec(coord) if parsed.from_data else coord
+  return typing.Auxiliary(entry) if parsed.auxiliary else entry
 
 
-def finalize_nested_queries_spec(
-    queries_spec: dict[str, Any],
-    sources: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-  """Returns finalized dictionary of queries spec with optional source subsets."""
-  if sources is None:
-    sources = {}
-
-  finalized = {}
-  for key, spec_item in queries_spec.items():
-    source_item = sources.get(key, None)
-    if isinstance(spec_item, dict):
-      finalized[key] = finalize_nested_queries_spec(spec_item, source_item)
-    else:
-      if source_item is not None and cx.is_field(source_item):
-        coord_source = source_item.coordinate
-      else:
-        coord_source = source_item
-      finalized[key] = finalize_query_spec(spec_item, coord_source)
-  return finalized
-
-
-def finalize_nested_spec(
+def _finalize_nested(
     specs: dict[str, Any],
-    sources: dict[str, Any] | None = None,
+    sources: dict[str, Any] | None,
+    finalize_fn: Callable[[Any, cx.Coordinate | None], Any],
 ) -> dict[str, Any]:
-  """Returns finalized dictionary of specs with optional source subsets."""
+  """Returns `specs` with leaves finalized by `finalize_fn` using `sources`."""
   if sources is None:
     sources = {}
 
@@ -421,30 +492,45 @@ def finalize_nested_spec(
   for key, spec_item in specs.items():
     source_item = sources.get(key, None)
     if isinstance(spec_item, dict):
-      finalized[key] = finalize_nested_spec(spec_item, source_item)
+      finalized[key] = _finalize_nested(spec_item, source_item, finalize_fn)
     else:
       if source_item is not None and cx.is_field(source_item):
         coord_source = source_item.coordinate
       else:
         coord_source = source_item
-      finalized[key] = finalize_spec(spec_item, coord_source)
+      finalized[key] = finalize_fn(spec_item, coord_source)
   return finalized
 
 
+def finalize_nested_queries_spec(
+    queries_spec: dict[str, Any],
+    sources: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Returns finalized dictionary of queries spec with optional source subsets."""
+  return _finalize_nested(queries_spec, sources, finalize_query_spec)
+
+
+def finalize_nested_spec(
+    specs: dict[str, Any],
+    sources: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Returns finalized dictionary of specs with optional source subsets."""
+  return _finalize_nested(specs, sources, finalize_spec)
+
+
 def get_coord_types(
-    coordinate: cx.Coordinate
-    | CoordSpec
-    | OptionalSpec
-    | FieldInQuerySpec
-    | typing.Auxiliary,
+    spec: cx.Coordinate | CoordLikeSpec | QuerySpec,
 ) -> tuple[type[cx.Coordinate], ...]:
-  """Returns tuple of coordinate types present in `coordinate`."""
-  while isinstance(
-      coordinate, (OptionalSpec, FieldInQuerySpec, typing.Auxiliary)
-  ):
-    coordinate = coordinate.spec  # in case of double wrapping Aux[FieldInQ].
-  if isinstance(coordinate, CoordSpec):
-    coordinate = coordinate.coord
+  """Returns tuple of coordinate types present in an inputs or query `spec`."""
+  if isinstance(spec, OptionalSpec):
+    spec = spec.spec
+  value = parse_query_spec(spec).value
+  if cx.is_field(value):
+    coordinate = value.coordinate
+  elif isinstance(value, CoordSpec):
+    coordinate = value.coord
+  else:
+    coordinate = value
 
   if isinstance(coordinate, cx.CartesianProduct):
     # using dict.fromkeys to preserve order of appearance.
@@ -495,13 +581,6 @@ def unwrap_optional(spec: T | OptionalSpec[T]) -> tuple[T, bool]:
   return inner_spec, is_optional
 
 
-def _maybe_unwrap_field_spec(spec: T | FieldInQuerySpec[T]) -> tuple[T, bool]:
-  """Returns underlying spec and a bool indicating field in query request."""
-  is_field_spec = isinstance(spec, FieldInQuerySpec)
-  inner_spec = spec.spec if is_field_spec else spec
-  return inner_spec, is_field_spec
-
-
 def validate_inputs(
     inputs: dict[str, dict[str, cx.Coordinate]] | typing.NestedFields,
     in_spec: dict[str, dict[str, cx.Coordinate | CoordLikeSpec]],
@@ -539,53 +618,59 @@ def validate_inputs(
 
 def construct_query(
     inputs: typing.NestedFields,
-    queries_spec: Mapping[
-        str,
-        Mapping[
-            str,
-            cx.Coordinate
-            | cx.Field
-            | QuerySpec
-            | typing.Auxiliary[cx.Coordinate | cx.Field | QuerySpec],
-        ],
-    ],
+    queries_spec: Mapping[str, Mapping[str, QuerySpec]],
 ) -> typing.Queries:
-  """Constructs query from data and OutputDataSpecs."""
+  """Constructs queries from `queries_spec`, taking fields from `inputs`.
+
+  Entries of `queries_spec` are converted to query entries as follows:
+
+  * `cx.Coordinate` is used as is.
+  * `CoordSpec` is finalized using the coordinate of the same-named field in
+    `inputs`, if present, see `finalize_spec`.
+  * `FieldInQuerySpec` is replaced by the same-named field from `inputs`.
+  * `cx.Field` is used as is and must not be present in `inputs`.
+  * `typing.Auxiliary(spec)` is converted to `typing.Auxiliary(entry)`, where
+    `entry` is constructed from `spec` as above.
+
+  Args:
+    inputs: Nested fields from which `FieldInQuerySpec` entries are taken.
+    queries_spec: Query specs keyed by dataset key and variable name.
+
+  Returns:
+    Queries that can be passed to `Model.observe`.
+  """
   queries = {}
   for data_key, query_spec in queries_spec.items():
     queries[data_key] = {}
     in_data = inputs.get(data_key, {})
     for var_name, spec in query_spec.items():
-      spec, is_aux = typing.unwrap_auxiliary(spec)
-      spec, is_field_in_query = _maybe_unwrap_field_spec(spec)
-
-      if is_field_in_query or cx.is_field(spec):
-        if cx.is_field(spec):
-          if var_name in in_data:
-            raise ValueError(
-                f'Field in query for {data_key}/{var_name} is specified in'
-                ' queries and in the data, which is bug-prone'
-            )
-          q_entry = spec
-        else:
-          if var_name not in in_data:
-            raise ValueError(
-                f'Required data for {data_key}/{var_name} is missing in'
-                f' {in_data.keys()=}'
-            )
-          q_entry = in_data[var_name]
-      elif isinstance(spec, CoordSpec):
+      try:
+        parsed = parse_query_spec(spec)
+      except ValueError as e:
+        e.add_note(f'Invalid query spec for {data_key}/{var_name}.')
+        raise
+      value = parsed.value
+      if parsed.from_data:
+        if var_name not in in_data:
+          raise ValueError(
+              f'Required data for {data_key}/{var_name} is missing in'
+              f' {in_data.keys()=}'
+          )
+        q_entry = in_data[var_name]
+      elif cx.is_field(value):
+        if var_name in in_data:
+          raise ValueError(
+              f'Field in query for {data_key}/{var_name} is specified in'
+              ' queries and in the data, which is bug-prone'
+          )
+        q_entry = value
+      elif isinstance(value, CoordSpec):
         x = in_data.get(var_name, None)
         coord = x.coordinate if (x is not None and cx.is_field(x)) else None
-        q_entry = finalize_spec(spec, coord)
-      elif isinstance(spec, cx.Coordinate):
-        q_entry = spec
+        q_entry = finalize_spec(value, coord)
       else:
-        raise ValueError(
-            f'Unsupported query spec type for {data_key}/{var_name}:'
-            f' {type(spec)}'
-        )
+        q_entry = value
       queries[data_key][var_name] = (
-          typing.Auxiliary(q_entry) if is_aux else q_entry
+          typing.Auxiliary(q_entry) if parsed.auxiliary else q_entry
       )
   return queries
