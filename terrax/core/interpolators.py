@@ -14,13 +14,16 @@
 
 """Modules that interpolate data from one coordinate system to another."""
 
+import abc
 import dataclasses
+import functools
 from typing import Protocol, overload
 
 import coordax as cx
 from dinosaur import horizontal_interpolation
 import jax
 import jax.numpy as jnp
+import numpy as np
 from terrax.core import coordinates
 from terrax.core import typing
 
@@ -107,35 +110,38 @@ class SpectralRegridder:
     )
 
 
-@dataclasses.dataclass
-class ConservativeRegridder:
-  """Regrids fields between two LonLatGrids using conservative interpolation."""
+@dataclasses.dataclass(frozen=True)
+class LonLatRegridder(abc.ABC):
+  """Base class for regridders between two LonLatGrids.
+
+  Regridded values are weighted averages of source values along longitude and
+  latitude, with weights of shape (target, source) provided by subclasses. The
+  weights must only depend on the source and target grids, since they are
+  computed once per grid pair and reused across calls.
+  """
 
   target_grid: coordinates.LonLatGrid
   skipna: bool = False
 
-  def lat_weights(self, source_grid: coordinates.LonLatGrid):
-    """Conservative regridding weights for the latitude dimension."""
-    s_lat = jnp.deg2rad(source_grid.fields['latitude'].data)
-    t_lat = jnp.deg2rad(self.target_grid.fields['latitude'].data)
-    return horizontal_interpolation.conservative_latitude_weights(s_lat, t_lat)
+  @abc.abstractmethod
+  def lat_weights(self, source_grid: coordinates.LonLatGrid) -> typing.Array:
+    """Regridding weights for the latitude dimension."""
 
-  def lon_weights(self, source_grid: coordinates.LonLatGrid):
-    """Conservative regridding weights for the longitude dimension."""
-    s_lon = jnp.deg2rad(source_grid.fields['longitude'].data)
-    t_lon = jnp.deg2rad(self.target_grid.fields['longitude'].data)
-    return horizontal_interpolation.conservative_longitude_weights(s_lon, t_lon)
+  @abc.abstractmethod
+  def lon_weights(self, source_grid: coordinates.LonLatGrid) -> typing.Array:
+    """Regridding weights for the longitude dimension."""
 
   def _regrid_2d(
       self, array: jax.Array, source_grid: coordinates.LonLatGrid
   ) -> jax.Array:
-    """Applies conservative regridding to a 2D array."""
+    """Applies horizontal regridding to a 2D (lon, lat) array."""
+    lon_w, lat_w = _cached_weights(self, source_grid)
 
     def _mean(data: jax.Array) -> jax.Array:
       return jnp.einsum(
           'ab,cd,bd->ac',
-          self.lon_weights(source_grid),
-          self.lat_weights(source_grid),
+          lon_w,
+          lat_w,
           data,
           precision='float32',
       )
@@ -143,20 +149,14 @@ class ConservativeRegridder:
     not_nulls = jnp.logical_not(jnp.isnan(array))
     mean = _mean(jnp.where(not_nulls, array, 0))
     not_null_fraction = _mean(not_nulls)
-
-    safe_fraction = jnp.where(not_null_fraction == 0.0, 1.0, not_null_fraction)
-
     if self.skipna:
-      all_nans = not_null_fraction == 0.0
-      return jnp.where(all_nans, jnp.nan, mean / safe_fraction)
+      is_valid = not_null_fraction > 0.0
     else:
-      # If not_null_fraction is not close to 1, it means some source cells
-      # were NaN. In this case, the target cell becomes NaN.
-      return jnp.where(
-          jnp.isclose(not_null_fraction, 1.0, rtol=1e-3),
-          mean / safe_fraction,
-          jnp.nan,
-      )
+      # The tolerance absorbs float32 round-off in weights of grids with
+      # coinciding cell edges, which would otherwise spread NaNs to neighbors.
+      is_valid = jnp.isclose(not_null_fraction, 1.0, rtol=1e-3)
+    safe_fraction = jnp.where(is_valid, not_null_fraction, 1.0)
+    return jnp.where(is_valid, mean / safe_fraction, jnp.nan)
 
   @overload
   def __call__(self, inputs: cx.Field) -> cx.Field:
@@ -169,16 +169,111 @@ class ConservativeRegridder:
   def __call__(
       self, inputs: cx.Field | dict[str, cx.Field]
   ) -> cx.Field | dict[str, cx.Field]:
-    """Regrids a dictionary of fields to the target grid."""
+    """Regrids a Field or dictionary of fields to the target grid."""
     if isinstance(inputs, dict):
-      return {k: self.__call__(v) for k, v in inputs.items()}
+      return {k: self(v) for k, v in inputs.items()}
 
-    x = inputs
-    lon_lat_dims = ('longitude', 'latitude')
-    source_grid = cx.coords.compose(
-        *[x.axes[d] for d in lon_lat_dims if d in x.axes]
-    )
+    source_grid = cx.coords.extract(inputs.coordinate, coordinates.LonLatGrid)
+    if (
+        source_grid.lon_lat_padding != (0, 0)
+        or self.target_grid.lon_lat_padding != (0, 0)
+    ):
+      raise ValueError(
+          'LonLatRegridder requires unpadded source and target grids, got '
+          f'{source_grid.lon_lat_padding=} and '
+          f'{self.target_grid.lon_lat_padding=}.'
+      )
     x = inputs.untag(source_grid)
     regrid_fn = cx.cpmap(self._regrid_2d)
     x = regrid_fn(x, source_grid)
     return x.tag(self.target_grid)
+
+
+@functools.cache
+def _cached_weights(
+    regridder: LonLatRegridder, source_grid: coordinates.LonLatGrid
+) -> tuple[jax.Array, jax.Array]:
+  """Returns (lon, lat) weights of `regridder`, computed once per grid pair.
+
+  Reusing the same weight arrays avoids recomputing them whenever a regridder is
+  traced and lets JAX keep a single copy of the weights in programs that regrid
+  multiple fields, which reduces compilation time for large grids.
+
+  Args:
+    regridder: Regridder that computes the weights.
+    source_grid: Grid of the regridded inputs.
+  """
+  with jax.ensure_compile_time_eval():
+    lon_weights = jnp.asarray(regridder.lon_weights(source_grid), jnp.float32)
+    lat_weights = jnp.asarray(regridder.lat_weights(source_grid), jnp.float32)
+  return lon_weights, lat_weights
+
+
+def _linear_interp_weights(
+    target: np.ndarray, source: np.ndarray, period: float | None = None
+) -> np.ndarray:
+  """Returns weights `w` such that `w @ f == np.interp(target, source, f)`.
+
+  Weights are computed with NumPy, which avoids compiling interpolation code
+  for accelerators when weights are evaluated at trace time.
+
+  Args:
+    target: Points at which to interpolate.
+    source: Increasing points at which values `f` are given; `np.interp`
+      silently returns incorrect values otherwise.
+    period: Optional period of a periodic coordinate.
+
+  Returns:
+    Weights with shape `(target.size, source.size)`.
+  """
+  # np.interp is linear in `f`, so interpolating unit vectors yields `w`.
+  unit_vectors = np.eye(source.size)
+  return np.stack(
+      [np.interp(target, source, f, period=period) for f in unit_vectors],
+      axis=1,
+  )
+
+
+@dataclasses.dataclass(frozen=True)
+class ConservativeRegridder(LonLatRegridder):
+  """Regrids fields between two LonLatGrids using conservative interpolation."""
+
+  def lat_weights(self, source_grid: coordinates.LonLatGrid) -> jax.Array:
+    """Conservative regridding weights for the latitude dimension."""
+    s_lat = jnp.deg2rad(source_grid.fields['latitude'].data)
+    t_lat = jnp.deg2rad(self.target_grid.fields['latitude'].data)
+    return horizontal_interpolation.conservative_latitude_weights(s_lat, t_lat)
+
+  def lon_weights(self, source_grid: coordinates.LonLatGrid) -> jax.Array:
+    """Conservative regridding weights for the longitude dimension."""
+    s_lon = jnp.deg2rad(source_grid.fields['longitude'].data)
+    t_lon = jnp.deg2rad(self.target_grid.fields['longitude'].data)
+    return horizontal_interpolation.conservative_longitude_weights(s_lon, t_lon)
+
+
+@dataclasses.dataclass(frozen=True)
+class BilinearRegridder(LonLatRegridder):
+  """Regrids fields between two LonLatGrids using bilinear interpolation.
+
+  Interpolates periodically in longitude (period 360 degrees) and linearly in
+  latitude, clamping values at the northernmost and southernmost source
+  latitudes for target latitudes outside the source range (e.g. at the poles
+  when regridding from a Gaussian grid to an equiangular grid with poles).
+
+  Weights are applied as dense matrix products, which is efficient on TPUs.
+  """
+
+  def lat_weights(self, source_grid: coordinates.LonLatGrid) -> np.ndarray:
+    """Bilinear regridding weights for the latitude dimension."""
+    return _linear_interp_weights(
+        self.target_grid.fields['latitude'].data,
+        source_grid.fields['latitude'].data,
+    )
+
+  def lon_weights(self, source_grid: coordinates.LonLatGrid) -> np.ndarray:
+    """Bilinear regridding weights for the longitude dimension."""
+    return _linear_interp_weights(
+        self.target_grid.fields['longitude'].data,
+        source_grid.fields['longitude'].data,
+        period=360.0,
+    )
