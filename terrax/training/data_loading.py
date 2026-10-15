@@ -281,29 +281,58 @@ def _get_sample_origins(
   return np.concatenate(sample_origins)
 
 
-def filter_inputs_by_queries(
-    inputs: typing.NestedFields,
-    queries_spec: data_specs.QueriesSpec | None,
-    include_field_in_query: bool = False,
-) -> typing.NestedFields:
-  """Selects targets matching queries from inputs."""
-  # TODO(dkochkov) This is a temporary simpler solution for the case where no
-  # queries include dynamic fields. Eventually those should be excluded here and
-  # from the outputs of obseravation operators.
-  if queries_spec is None:
-    return inputs  # by default we assume that all fields are targets.
-  if not isinstance(queries_spec, dict):
-    raise ValueError('queries must be a dictionary.')
-  is_field_in_query = lambda x: isinstance(x, data_specs.FieldInQuerySpec)
-  targets = {}
-  for source, specs in queries_spec.items():
-    if specs:
-      targets[source] = {}
-    for var_name, var_spec in specs.items():
-      if is_field_in_query(var_spec) and not include_field_in_query:
-        continue
-      targets[source][var_name] = inputs[source][var_name]
-  return targets
+def _select_like(inputs: PyTree, template: dict[str, dict[str, Any]]) -> PyTree:
+  """Returns entries of `inputs` at the dataset keys and variables of `template`."""
+  return {
+      data_key: {var_name: inputs[data_key][var_name] for var_name in variables}
+      for data_key, variables in template.items()
+  }
+
+
+def _is_target(parsed: data_specs.ParsedQuerySpec) -> bool:
+  """Returns whether a query entry is returned by `observe` and backed by data."""
+  return parsed.is_output and not cx.is_field(parsed.value)
+
+
+def select_targets(
+    inputs: PyTree, queries_spec: data_specs.QueriesSpec
+) -> PyTree:
+  """Returns entries of `inputs` that outputs of `observe` are compared to.
+
+  Targets are query entries that `observe` returns and that are backed by data,
+  i.e. coordinate, `CoordSpec` and `FieldInQuerySpec` entries that are not
+  wrapped in `typing.Auxiliary`.
+
+  Args:
+    inputs: Nested fields or coordinates keyed by dataset key and variable name.
+    queries_spec: Query specs keyed by dataset key and variable name.
+
+  Returns:
+    Entries of `inputs` that correspond to targets in `queries_spec`.
+  """
+  targets_spec = data_specs.filter_queries_spec(queries_spec, _is_target)
+  return _select_like(inputs, targets_spec)
+
+
+def select_query_data(
+    inputs: PyTree, queries_spec: data_specs.QueriesSpec
+) -> PyTree:
+  """Returns entries of `inputs` that are used together with `queries_spec`.
+
+  These are the targets, see `select_targets`, and the fields that are inserted
+  into queries from data, i.e. all `FieldInQuerySpec` entries including those
+  wrapped in `typing.Auxiliary`.
+
+  Args:
+    inputs: Nested fields or coordinates keyed by dataset key and variable name.
+    queries_spec: Query specs keyed by dataset key and variable name.
+
+  Returns:
+    Entries of `inputs` that are used as targets or inserted into queries.
+  """
+  uses_data = lambda parsed: _is_target(parsed) or parsed.from_data
+  data_spec = data_specs.filter_queries_spec(queries_spec, uses_data)
+  return _select_like(inputs, data_spec)
 
 
 def sel_timedelta_fields(
@@ -563,7 +592,7 @@ class HostDataBuffer:
       f = f.untag('timedelta')
       return f
 
-    to_set = filter_inputs_by_queries(batch, self.data_slice_struct)
+    to_set = _select_like(batch, self.data_slice_struct)
     self.current_batch = jax.tree.map(
         _optimize_field_for_slice, to_set, is_leaf=cx.is_field
     )

@@ -31,6 +31,7 @@ from terrax.core import coordinates
 from terrax.core import data_specs
 from terrax.core import observation_operators
 from terrax.core import transforms
+from terrax.core import typing
 from terrax.core import xarray_utils
 from terrax.metrics import aggregation
 from terrax.metrics import deterministic_metrics
@@ -563,37 +564,157 @@ class TrainerTest(parameterized.TestCase):
     self.assertTrue(metrics_saver.metrics)
     self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'checkpoints')))
 
-  def test_drop_field_in_queries_outputs(self):
-    """Tests _drop_field_in_queries_outputs."""
-    predictions = {
-        'slow': {
-            'x': cx.field(jnp.zeros((8,)), cx.SizedAxis('k', 8)),
-            'time': cx.field(jnp.zeros(())),
+  def _create_single_stage_trainer(self, model, all_data, queries_spec, name):
+    """Returns a trainer with a single short train stage and no evaluation."""
+    _, loss = self._create_evaluators(dims_to_reduce=('ensemble', 'batch', 'k'))
+    dt_slow = model.timestep * 4
+    timedelta = coordinates.TimeDelta(np.arange(2) * dt_slow)
+    stage_kwargs = dict(
+        inputs_spec=_construct_spec(model.inputs_spec, timedelta),
+        dynamic_inputs_spec=_construct_spec(
+            model.dynamic_inputs_spec, timedelta
+        ),
+        queries_spec=queries_spec,
+        time_sample_offset=dt_slow,
+        batch_size_per_device=1,
+        train_time_slice=None,
+        eval_time_slice=None,
+    )
+    train_stage = trainer.TrainStage(
+        duration=1, loss=evaluators.FlattenedEvaluator(loss), **stage_kwargs
+    )
+    eval_schema = trainer.EvalSchema(
+        cadence=1,
+        metrics_evaluator=None,
+        num_batches=0,
+        name='eval',
+        **stage_kwargs,
+    )
+    return trainer.RolloutTrainer(
+        experiment_dir=os.path.join(self.test_dir, name),
+        model=model,
+        data_loader=self._create_data_loader(all_data),
+        process_observations=transforms.Identity(),
+        calibration_modules=None,
+        train_schedule=trainer.TrainSchedule(stages=[train_stage]),
+        eval_schedule=trainer.EvalSchedule(stages=[eval_schema]),
+        optimization_config=trainer.OptimizationConfig(
+            optax.adam(1e-3), ema_num_steps=10
+        ),
+        initial_checkpoint=None,
+        checkpoint_config=trainer.CheckpointConfig(
+            save_interval_steps=2,
+            keep_every_n_steps=10,
+            model_config_str='{}',
+            metadata={},
+        ),
+        auto_restart_config=trainer.AutoRestartConfig(),
+        remat_config=trainer.RematConfig(),
+        ensemble_axis=cx.SizedAxis('ensemble', 2),
+        online_metrics_saver=InMemorySaver(),
+    )
+
+  def test_auxiliary_field_in_query_does_not_change_loss(self):
+    model, all_data = self.create_model_and_data(multiscale=False)
+    base_queries = self._create_queries_specs(model)
+    field_in_query = data_specs.FieldInQuerySpec(cx.Scalar())
+    queries_specs = {
+        'base': base_queries,
+        'field_in_query': {
+            'slow': base_queries['slow'] | {'time': field_in_query}
         },
-        'fast': {
-            'y': cx.field(
-                jnp.zeros((8, 4)), cx.SizedAxis('k', 8), cx.SizedAxis('j', 4)
-            ),
+        'auxiliary_field_in_query': {
+            'slow': (
+                base_queries['slow']
+                | {'time': typing.Auxiliary(field_in_query)}
+            )
         },
     }
-    queries = {
+    losses = {}
+    for name, queries_spec in queries_specs.items():
+      rollout_trainer = self._create_single_stage_trainer(
+          model, all_data, queries_spec, name
+      )
+      _, _, experiment_state = rollout_trainer.initialize_experiment()
+      train_iter, train_step_fn, _ = (
+          rollout_trainer.build_train_and_eval_iterators(0)
+      )
+      inputs, dynamic_data = next(train_iter)
+      _, loss = train_step_fn(experiment_state, 0, inputs, dynamic_data)
+      losses[name] = float(loss)
+
+    for name in ['field_in_query', 'auxiliary_field_in_query']:
+      with self.subTest(name):
+        np.testing.assert_allclose(losses[name], losses['base'], rtol=1e-6)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='wrap', wrap=True),
+      dict(testcase_name='no_wrap', wrap=False),
+  )
+  def test_standardize_queries_spec(self, wrap: bool):
+    k = cx.LabeledAxis('k', np.arange(8))
+    field_in_query = data_specs.FieldInQuerySpec(cx.Scalar())
+    auxiliary_field_in_query = typing.Auxiliary(data_specs.FieldInQuerySpec(k))
+    queries_spec = {
         'slow': {
-            'x': cx.SizedAxis('k', 8),
-            'time': cx.Scalar(),
-        },
-        'fast': {
-            'y': cx.field(
-                jnp.zeros((8, 4)), cx.SizedAxis('k', 8), cx.SizedAxis('j', 4)
-            ),
-        },
+            'x': k,
+            'time': field_in_query,
+            'location': auxiliary_field_in_query,
+        }
     }
+    actual = trainer._standardize_queries_spec(
+        queries_spec, wrap_field_in_query_as_auxiliary=wrap
+    )
+    expected_time = typing.Auxiliary(field_in_query) if wrap else field_in_query
+    expected = {
+        'slow': {
+            'x': k,
+            'time': expected_time,
+            'location': auxiliary_field_in_query,
+        }
+    }
+    self.assertEqual(actual, expected)
 
-    filtered = trainer._drop_field_in_queries_outputs(predictions, queries)
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='field',
+          entry=cx.field(np.zeros(8), cx.LabeledAxis('k', np.arange(8))),
+          message='Concrete Field',
+      ),
+      dict(
+          testcase_name='auxiliary_coordinate',
+          entry=typing.Auxiliary(cx.LabeledAxis('k', np.arange(8))),
+          message='Auxiliary coordinate',
+      ),
+  )
+  def test_standardize_queries_spec_raises(self, entry, message):
+    with self.assertRaisesRegex(ValueError, message):
+      trainer._standardize_queries_spec(
+          {'slow': {'v': entry}}, wrap_field_in_query_as_auxiliary=True
+      )
 
-    self.assertIn('slow', filtered)
-    self.assertIn('x', filtered['slow'])
-    self.assertIn('time', filtered['slow'])
-    self.assertNotIn('fast', filtered)
+  def test_construct_full_queries_spec(self):
+    k = cx.LabeledAxis('k', np.arange(8))
+    td = coordinates.TimeDelta(np.arange(1, 3) * np.timedelta64(1, 'h'))
+    inputs_spec = {'slow': {'x': cx.coords.compose(td, k), 'time': td}}
+    auxiliary_time = typing.Auxiliary(data_specs.FieldInQuerySpec(cx.Scalar()))
+    queries_spec = {'slow': {'x': k, 'time': auxiliary_time}}
+    actual = trainer._construct_full_queries_spec(inputs_spec, queries_spec)
+    expected = {
+        'slow': {
+            'x': cx.coords.compose(td, k),
+            'time': typing.Auxiliary(data_specs.FieldInQuerySpec(td)),
+        }
+    }
+    self.assertEqual(actual, expected)
+
+    with self.subTest('inconsistent_auxiliary_entry_raises'):
+      j = cx.LabeledAxis('j', np.arange(4))
+      bad_spec = {
+          'slow': {'x': typing.Auxiliary(data_specs.FieldInQuerySpec(j))}
+      }
+      with self.assertRaisesRegex(ValueError, 'inconsistent coordinates'):
+        trainer._construct_full_queries_spec(inputs_spec, bad_spec)
 
   def test_create_initial_evaluators(self):
     k = cx.LabeledAxis('k', np.arange(8))

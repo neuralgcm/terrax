@@ -22,8 +22,33 @@ from terrax.core import coordinates
 from terrax.core import data_specs
 from terrax.core import parallelism
 from terrax.core import scan_utils
+from terrax.core import typing
 from terrax.training import data_loading
 import xarray
+
+
+class SelectByQueriesSpecTest(absltest.TestCase):
+
+  def test_select_targets_and_query_data(self):
+    x = cx.LabeledAxis('x', np.arange(3))
+    f = cx.field(np.zeros(3), x)
+    inputs = {'ds': {'u': f, 'v': f, 'loc': f, 'aux_loc': f, 'w': f}}
+    queries_spec = {
+        'ds': {
+            'u': x,
+            'v': data_specs.CoordSpec(x),
+            'loc': data_specs.FieldInQuerySpec(x),
+            'aux_loc': typing.Auxiliary(data_specs.FieldInQuerySpec(x)),
+            'w': typing.Auxiliary(x),
+            'static': typing.Auxiliary(f),
+        }
+    }
+    with self.subTest('targets'):
+      targets = data_loading.select_targets(inputs, queries_spec)
+      self.assertEqual(set(targets['ds']), {'u', 'v', 'loc'})
+    with self.subTest('query_data'):
+      query_data = data_loading.select_query_data(inputs, queries_spec)
+      self.assertEqual(set(query_data['ds']), {'u', 'v', 'loc', 'aux_loc'})
 
 
 class GetDatetimeForecastStartsTest(absltest.TestCase):

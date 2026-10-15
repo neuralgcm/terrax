@@ -23,7 +23,7 @@ import logging
 import math
 import operator
 import os.path
-from typing import Any, NamedTuple, TypeAlias, overload
+from typing import Any, NamedTuple, TypeAlias
 
 import coordax as cx
 from etils import epath
@@ -183,42 +183,14 @@ def _is_coord(x: Any) -> bool:
   return isinstance(x, cx.Coordinate)
 
 
-@overload
-def _remove_timedelta(c: cx.Coordinate) -> cx.Coordinate:
-  ...
-
-
-@overload
-def _remove_timedelta(
-    c: data_specs.FieldInQuerySpec[cx.Coordinate],
-) -> data_specs.FieldInQuerySpec[cx.Coordinate]:
-  ...
-
-
-def _remove_timedelta(
-    c: cx.Coordinate | data_specs.FieldInQuerySpec[cx.Coordinate],
-) -> cx.Coordinate | data_specs.FieldInQuerySpec[cx.Coordinate]:
-  """Removes TimeDelta axes from a coordinate."""
-  if isinstance(c, data_specs.FieldInQuerySpec):
-    return data_specs.FieldInQuerySpec(_remove_timedelta(c.spec))
+def _remove_timedelta(c: cx.Coordinate | data_specs.CoordSpec) -> cx.Coordinate:
+  """Removes TimeDelta axes from a concrete coordinate."""
+  # Coordinates in training queries are concrete after
+  # `_construct_full_queries_spec` replaces them with those of the inputs.
+  assert cx.is_coord(c), c
   return cx.coords.compose(
       *[ax for ax in c.axes if not isinstance(ax, coordinates.TimeDelta)]
   )
-
-
-def _drop_field_in_queries_outputs(
-    predictions: PyTree, queries: PyTree
-) -> PyTree:
-  """Removes outputs from predictions that correspond to fields in queries."""
-  flat_preds, empty_keys = pytree_utils.flatten_dict(predictions)
-  flat_queries, _ = pytree_utils.flatten_dict(queries)
-
-  filtered_flat_preds = {
-      k: v for k, v in flat_preds.items()
-      if not cx.is_field(flat_queries.get(k))
-  }
-
-  return pytree_utils.unflatten_dict(filtered_flat_preds, empty_keys)
 
 
 def _drop_empty_agg_state(
@@ -260,10 +232,8 @@ def _prepare_inputs_and_targets(
     # Select targets starting from t > 0
     rollout_inputs = data_loading.sel_target_fields(inputs)
     # rollout inputs might contain fields that are only used for initialization,
-    # so we filter them out by using the queries spec.
-    rollout_data = data_loading.filter_inputs_by_queries(
-        rollout_inputs, queries_spec, True
-    )
+    # so we keep only targets and fields inserted into queries.
+    rollout_data = data_loading.select_query_data(rollout_inputs, queries_spec)
     # We use already computed scan_steps and specs here since loaded targets
     # might contain a single timedelta value which is not sufficient to
     # resolve the number of steps.
@@ -326,9 +296,7 @@ def _compute_aggregation(
     targets_slice = cx.tag(loaded_targets_slice, batch_axis)
 
   queries = data_specs.construct_query(targets_slice, query_spec)
-  targets_only_slice = data_loading.filter_inputs_by_queries(
-      targets_slice, query_spec
-  )
+  targets_only_slice = data_loading.select_targets(targets_slice, query_spec)
   prediction = process_fn(process_obs, observe_fn(model, queries))
   prediction = training_mesh.with_sharding_constraint(prediction, 'physics')
   target = process_fn(process_obs, targets_only_slice)
@@ -565,34 +533,96 @@ def _merge_online_metrics(
   )
 
 
+def _standardize_queries_spec(
+    queries_spec: data_specs.QueriesSpec,
+    *,
+    wrap_field_in_query_as_auxiliary: bool,
+) -> data_specs.QueriesSpec:
+  """Validates `queries_spec` for training and optionally rewraps fields.
+
+  Training scores the outputs of `observe` against data. Fields inserted into
+  queries from data are supporting inputs, so by default they are rewrapped as
+  `Auxiliary(FieldInQuerySpec(...))` and excluded from outputs. Otherwise
+  `observe` returns them and they are scored against themselves, which adds
+  zero loss and can serve as a sanity check.
+
+  Args:
+    queries_spec: Queries spec of a training or evaluation stage.
+    wrap_field_in_query_as_auxiliary: Whether to wrap `FieldInQuerySpec` entries
+      in `typing.Auxiliary`.
+
+  Returns:
+    The validated queries spec with fields in queries rewrapped if requested.
+
+  Raises:
+    ValueError: If `queries_spec` contains entries that are not supported in
+      training: concrete `cx.Field` entries and `Auxiliary` coordinates.
+  """
+  standardized = {}
+  for data_key, specs in queries_spec.items():
+    standardized[data_key] = {}
+    for var_name, spec in specs.items():
+      parsed = data_specs.parse_query_spec(spec)
+      value = parsed.value
+      if cx.is_field(value):
+        raise ValueError(
+            'Concrete Field entries in queries specs are not supported in'
+            f' training, got one for {data_key}/{var_name}. Use'
+            ' FieldInQuerySpec to take it from data instead.'
+        )
+      if parsed.auxiliary and not parsed.from_data:
+        raise ValueError(
+            'Auxiliary coordinates in queries specs are not supported in'
+            f' training yet, got one for {data_key}/{var_name}.'
+        )
+      if parsed.from_data and wrap_field_in_query_as_auxiliary:
+        spec = dataclasses.replace(parsed, auxiliary=True).rewrap(value)
+      standardized[data_key][var_name] = spec
+  return standardized
+
+
 def _construct_full_queries_spec(
     inputs_spec: DataSpec,
     queries_spec: data_specs.QueriesSpec,
 ) -> data_specs.QueriesSpec:
-  """Constructs a queries with extra dimensions present in the inputs spec."""
+  """Returns `queries_spec` with coordinates replaced by those of the inputs.
+
+  Input coordinates include dimensions, e.g. `timedelta`, that are used to set
+  up nested scans. Wrappers of query entries are preserved.
+
+  Args:
+    inputs_spec: Coordinates of the data for each queried variable.
+    queries_spec: Queries spec whose entries are validated against and replaced
+      by coordinates in `inputs_spec`.
+
+  Returns:
+    Queries spec with the coordinates of `inputs_spec`.
+  """
   if not isinstance(queries_spec, dict):
     raise ValueError('queries must be a dictionary.')
-  targets = {}
+  full_queries_spec = {}
   for source, specs in queries_spec.items():
     if specs:
-      targets[source] = {}
+      full_queries_spec[source] = {}
     for var_name, q_spec in specs.items():
       input_coord = inputs_spec[source][var_name]
-      q_spec_coord = (
-          q_spec.spec
-          if isinstance(q_spec, data_specs.FieldInQuerySpec)
-          else q_spec
-      )
-      if not cx.contains_dims(input_coord, q_spec_coord):  # pyrefly: ignore[bad-argument-type]
+      parsed = data_specs.parse_query_spec(q_spec)
+      query_coord = parsed.value
+      if isinstance(query_coord, data_specs.CoordSpec):
+        try:
+          query_coord.validate_compatible(_remove_timedelta(input_coord))
+        except ValueError as e:
+          e.add_note(f'Inconsistent query entry {source}/{var_name}.')
+          raise
+      elif isinstance(query_coord, cx.Field) or not cx.contains_dims(
+          input_coord, query_coord
+      ):
         raise ValueError(
             f'query entry {source}/{var_name} has inconsistent coordinates with'
             f' {input_coord=}.'
         )
-      if isinstance(q_spec, data_specs.FieldInQuerySpec):
-        targets[source][var_name] = data_specs.FieldInQuerySpec(input_coord)
-      else:
-        targets[source][var_name] = input_coord
-  return targets
+      full_queries_spec[source][var_name] = parsed.rewrap(input_coord)
+  return full_queries_spec
 
 
 @dataclasses.dataclass(frozen=True)
@@ -716,6 +746,10 @@ class RolloutTrainer:
   use_data_loading_callback: bool = False
   callback_pinned_host: bool = False
   callback_spatial_dims_layout: tuple[str, ...] = ()
+  # Whether `FieldInQuerySpec` entries in queries specs are treated as
+  # `Auxiliary(FieldInQuerySpec(...))`, i.e. excluded from outputs and targets.
+  # If False, they are returned by `observe` and scored against themselves.
+  wrap_field_in_query_as_auxiliary: bool = True
 
   def __post_init__(self):
     if self.data_loader.parallelism_mesh is None:
@@ -728,6 +762,7 @@ class RolloutTrainer:
           'include_initial_loss is not yet supported with'
           ' use_data_loading_callback=True.'
       )
+    self._standardize_queries_specs()
     self.run_evaluator = _maybe_on_host(
         _run_evaluator, self.compute_loss_on_host
     )
@@ -799,6 +834,27 @@ class RolloutTrainer:
     self._ema_update = jax.jit(update_ema)
     self._eval_components_cache = {}
 
+  def _standardize_queries_specs(self) -> None:
+    """Validates and standardizes queries specs of all stages."""
+    standardize = functools.partial(
+        _standardize_queries_spec,
+        wrap_field_in_query_as_auxiliary=self.wrap_field_in_query_as_auxiliary,
+    )
+    self.train_schedule = dataclasses.replace(
+        self.train_schedule,
+        stages=[
+            dataclasses.replace(s, queries_spec=standardize(s.queries_spec))
+            for s in self.train_schedule.stages
+        ],
+    )
+    self.eval_schedule = dataclasses.replace(
+        self.eval_schedule,
+        stages=[
+            dataclasses.replace(s, queries_spec=standardize(s.queries_spec))
+            for s in self.eval_schedule.stages
+        ],
+    )
+
   @property
   def training_mesh(self) -> parallelism.Mesh:
     assert isinstance(self.data_loader.parallelism_mesh, parallelism.Mesh)
@@ -835,8 +891,8 @@ class RolloutTrainer:
       self, stage: EvalSchema | TrainStage
   ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     """Returns tuples of retrieve_fns and buffers for a given stage."""
-    data_spec = data_loading.filter_inputs_by_queries(
-        stage.inputs_spec, stage.queries_spec, include_field_in_query=True  # pyrefly: ignore[bad-argument-type]
+    data_spec = data_loading.select_query_data(
+        stage.inputs_spec, stage.queries_spec
     )
     nested_steps, nested_data_specs = self._get_nested_steps_and_specs(
         data_spec  # pyrefly: ignore[bad-argument-type]
@@ -1005,15 +1061,13 @@ class RolloutTrainer:
       queries_spec: data_specs.QueriesSpec,
   ) -> tuple[PyTree, PyTree]:
     """Returns shape structs for predictions and targets for aggregators."""
-    target_slice_struct = data_loading.filter_inputs_by_queries(
+    target_slice_struct = data_loading.select_targets(
         data_slice_struct, queries_spec
     )
     process_fn = lambda proc_module, target_slice: proc_module(target_slice)
     target_struct = nnx.eval_shape(process_fn, process_obs, target_slice_struct)
     queries_struct = data_specs.construct_query(data_slice_struct, queries_spec)
-    dummy_observe = lambda model, proc_module, q: proc_module(
-        _drop_field_in_queries_outputs(model.observe(q), q)
-    )
+    dummy_observe = lambda model, proc_module, q: proc_module(model.observe(q))
     prediction_struct = nnx.eval_shape(
         dummy_observe, eb_model, process_obs, queries_struct
     )
@@ -1054,7 +1108,6 @@ class RolloutTrainer:
 
     def observe_fn(model: api.Model, queries: typing.Queries):
       predictions = model.observe(queries)
-      predictions = _drop_field_in_queries_outputs(predictions, queries)
       predictions = self.training_mesh.with_sharding_constraint(
           predictions, 'physics'
       )
@@ -1189,9 +1242,7 @@ class RolloutTrainer:
     updated_agg_states_seq = [list(states) for states in init_agg_states_seq]
     for level, query_spec in enumerate(nested_queries_specs):
       # Filter init_slice to this level's variables and squeeze timedelta.
-      t0_targets = data_loading.filter_inputs_by_queries(
-          init_slice, query_spec, include_field_in_query=True
-      )
+      t0_targets = data_loading.select_query_data(init_slice, query_spec)
       if not jax.tree.leaves(t0_targets):
         continue
       t0_targets = jax.tree.map(
@@ -1200,9 +1251,7 @@ class RolloutTrainer:
 
       # Construct queries and compute predictions for this level.
       queries = data_specs.construct_query(t0_targets, query_spec)
-      targets_only = data_loading.filter_inputs_by_queries(
-          t0_targets, query_spec
-      )
+      targets_only = data_loading.select_targets(t0_targets, query_spec)
       prediction = process_fn(process_obs, observe_fn(model, queries))
       prediction = self.training_mesh.with_sharding_constraint(
           prediction, 'physics'
@@ -1379,15 +1428,13 @@ class RolloutTrainer:
     inputs_spec = train_stage.inputs_spec
     rollout_spec = data_loading.sel_target_timedeltas(inputs_spec)
     # rollout inputs might contain fields that are only used for initialization,
-    # so we filter them out by using the queries spec.
-    rollout_spec = data_loading.filter_inputs_by_queries(
-        rollout_spec, train_stage.queries_spec, include_field_in_query=True
+    # so we keep only targets and fields inserted into queries.
+    rollout_spec = data_loading.select_query_data(
+        rollout_spec, train_stage.queries_spec
     )
     _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)  # pyrefly: ignore[bad-argument-type]
-    # include_field_in_query is False for targets as field-in-query is not
-    # included in model predictions (only contains dynamic query details).
-    targets_spec = data_loading.filter_inputs_by_queries(
-        inputs_spec, train_stage.queries_spec, include_field_in_query=False  # pyrefly: ignore[bad-argument-type]
+    targets_spec = data_loading.select_targets(
+        inputs_spec, train_stage.queries_spec
     )
     _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)  # pyrefly: ignore[bad-argument-type]
     full_queries_spec = _construct_full_queries_spec(  # include timedelta now.
@@ -1396,8 +1443,9 @@ class RolloutTrainer:
     nested_steps, nested_timed_queries_specs = self._get_nested_steps_and_specs(
         full_queries_spec  # pyrefly: ignore[bad-argument-type]
     )
-    nested_queries_specs = jax.tree.map(
-        _remove_timedelta, nested_timed_queries_specs, is_leaf=_is_coord
+    nested_queries_specs = tuple(
+        data_specs.map_queries_spec(_remove_timedelta, spec)
+        for spec in nested_timed_queries_specs
     )
 
     # Setting up model components and helper functions.
@@ -1566,13 +1614,13 @@ class RolloutTrainer:
     inputs_spec = eval_schema.inputs_spec
     rollout_spec = data_loading.sel_target_timedeltas(inputs_spec)
     # rollout inputs might contain fields that are only used for initialization,
-    # so we filter them out by using the queries spec.
-    rollout_spec = data_loading.filter_inputs_by_queries(
-        rollout_spec, eval_schema.queries_spec, include_field_in_query=True
+    # so we keep only targets and fields inserted into queries.
+    rollout_spec = data_loading.select_query_data(
+        rollout_spec, eval_schema.queries_spec
     )
     _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)  # pyrefly: ignore[bad-argument-type]
-    targets_spec = data_loading.filter_inputs_by_queries(
-        inputs_spec, eval_schema.queries_spec  # pyrefly: ignore[bad-argument-type]
+    targets_spec = data_loading.select_targets(
+        inputs_spec, eval_schema.queries_spec
     )
     _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)  # pyrefly: ignore[bad-argument-type]
     full_queries_spec = _construct_full_queries_spec(  # include timedelta now.
@@ -1581,8 +1629,9 @@ class RolloutTrainer:
     nested_steps, nested_timed_queries_specs = self._get_nested_steps_and_specs(
         full_queries_spec  # pyrefly: ignore[bad-argument-type]
     )
-    nested_queries_specs = jax.tree.map(
-        _remove_timedelta, nested_timed_queries_specs, is_leaf=_is_coord
+    nested_queries_specs = tuple(
+        data_specs.map_queries_spec(_remove_timedelta, spec)
+        for spec in nested_timed_queries_specs
     )
 
     # Setting up model components and helper functions.

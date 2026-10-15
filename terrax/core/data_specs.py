@@ -518,6 +518,63 @@ def finalize_nested_spec(
   return _finalize_nested(specs, sources, finalize_spec)
 
 
+def filter_queries_spec(
+    queries_spec: Mapping[str, Mapping[str, QuerySpec]],
+    to_keep: Callable[[ParsedQuerySpec], bool],
+) -> QueriesSpec:
+  """Returns entries of `queries_spec` for which `to_keep` returns True.
+
+  All dataset keys are kept, matching the structure of observations returned by
+  `observe`.
+
+  Args:
+    queries_spec: Query specs keyed by dataset key and variable name.
+    to_keep: Predicate on parsed entries that indicates which entries to keep.
+
+  Returns:
+    Queries spec with the same dataset keys and a subset of the entries.
+  """
+  return {
+      data_key: {
+          var_name: spec
+          for var_name, spec in specs.items()
+          if to_keep(parse_query_spec(spec))
+      }
+      for data_key, specs in queries_spec.items()
+  }
+
+
+def map_queries_spec(
+    fn: Callable[[cx.Coordinate | CoordSpec], cx.Coordinate | CoordSpec],
+    queries_spec: Mapping[str, Mapping[str, QuerySpec]],
+) -> QueriesSpec:
+  """Returns `queries_spec` with `fn` applied to the coordinates of entries.
+
+  `fn` receives the innermost coordinate or `CoordSpec` of each entry and its
+  result is wrapped like the original entry. Concrete `cx.Field` entries are
+  kept unchanged.
+
+  Args:
+    fn: Function that maps a coordinate or `CoordSpec` to a new one.
+    queries_spec: Query specs keyed by dataset key and variable name.
+
+  Returns:
+    Queries spec with updated coordinates and the same wrappers.
+  """
+
+  def map_entry(spec: QuerySpec) -> QuerySpec:
+    parsed = parse_query_spec(spec)
+    value = parsed.value
+    if cx.is_field(value):
+      return spec
+    return parsed.rewrap(fn(value))
+
+  return {
+      data_key: {var_name: map_entry(spec) for var_name, spec in specs.items()}
+      for data_key, specs in queries_spec.items()
+  }
+
+
 def get_coord_types(
     spec: cx.Coordinate | CoordLikeSpec | QuerySpec,
 ) -> tuple[type[cx.Coordinate], ...]:
