@@ -32,6 +32,7 @@ import jax
 from jax import checkpoint_policies as cp  # pylint: disable=g-importing-member
 from jax.ad_checkpoint import checkpoint_name  # pylint: disable=g-importing-member
 from jax.experimental import compute_on
+from jax.experimental import multihost_utils
 import jax.sharding
 import numpy as np
 import optax
@@ -1114,6 +1115,10 @@ class RolloutTrainer:
     train_step_fn = self.get_train_step_fn(
         train_stage=train_stage, retrieve_fns=train_retrieve_fns
     )
+    if jax.process_count() > 1:
+      multihost_utils.sync_global_devices(
+          f'build_train_and_eval_iterators_{schedule_idx}'
+      )
 
     return training_data, train_step_fn, evaluation_fns
 
@@ -2030,12 +2035,18 @@ class RolloutTrainer:
         # go/xprof-instrument-jax
         with jax.profiler.StepTraceAnnotation('train', step_num=step):
           inputs, dynamic_data = next(train_iter)
+          if schedule_idx != old_schedule_idx and jax.process_count() > 1:
+            multihost_utils.sync_global_devices(
+                f'first_train_batch_{schedule_idx}'
+            )
           prev_loss = loss
           experiment_state, loss = train_step_fn(
               experiment_state, step, inputs, dynamic_data
           )
           logging_stream.wait()  # don't allow training to run ahead of logging.
           logging_stream.submit(step, schedule_idx, loss, auto_restart)
+          if schedule_idx != old_schedule_idx:
+            logging_stream.wait()
       step += 1
       if pbar is not None:
         pbar.update(1)
@@ -2069,6 +2080,7 @@ class RolloutTrainer:
   @functools.cached_property
   def checkpoint_manager(self) -> ocp.CheckpointManager:
     """Orbax CheckpointManager."""
+    ocp.multihost._DEFAULT_BARRIER_TIMEOUT = self.checkpoint_config.timeout_secs  # pylint: disable=protected-access  # pyrefly: ignore[bad-assignment]
     options = ocp.CheckpointManagerOptions(
         file_options=ocp.checkpoint_manager.FileOptions(
             path_permission_mode=0o775,  # world-readable
