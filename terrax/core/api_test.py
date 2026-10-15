@@ -100,6 +100,14 @@ class MockModel(api.Model):
     return np.timedelta64(1, 'h')
 
 
+class AuxiliaryLeakingOperator(observation_operators.ObservationOperatorABC):
+  """Operator that violates the `observe` contract by returning all entries."""
+
+  def observe(self, inputs, query):
+    del inputs  # unused.
+    return {k: cx.field(0.0) for k in query}
+
+
 @auto_config.auto_config
 def construct_mock_model() -> MockModel:
   """Constructs a mock model for testing purposes."""
@@ -212,6 +220,14 @@ class ModelApiTest(parameterized.TestCase):
           model_population,
       )
       self.assertEqual(obs['prognostics']['population'].coordinate, self.x)
+
+  def test_inference_model_observe_rejects_returned_auxiliary_entries(self):
+    model = MockModel(x=self.x, operators={'leaky': AuxiliaryLeakingOperator()})
+    inference_model = api.InferenceModel.from_model_api(model)
+    state = inference_model.assimilate(self.inputs)
+    queries = {'leaky': {'a': cx.Scalar(), 'b': typing.Auxiliary(cx.Scalar())}}
+    with self.assertRaisesRegex(ValueError, 'must not be returned'):
+      inference_model.observe(state, queries)
 
   def test_batch_vectorized_api_methods(self):
     """Tests vectorized assimilate, advance, and observe methods."""

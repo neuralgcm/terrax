@@ -1108,6 +1108,7 @@ class RolloutTrainer:
 
     def observe_fn(model: api.Model, queries: typing.Queries):
       predictions = model.observe(queries)
+      data_specs.validate_observation(queries, predictions)
       predictions = self.training_mesh.with_sharding_constraint(
           predictions, 'physics'
       )

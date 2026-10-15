@@ -41,6 +41,21 @@ class ObservationOperatorABC(nnx.Module, abc.ABC):
     super().__init_subclass__(pytree=False, **kwargs)
 
 
+def _select_on_coordinate(
+    field: cx.Field, coord: cx.Coordinate, key: str
+) -> cx.Field:
+  """Returns `field` on `coord`, selecting a slice of `field` if needed."""
+  if field.coordinate == coord:
+    return field
+  try:
+    return field.sel({field.coordinate: coord})
+  except (KeyError, IndexError) as e:  # IndexError for out-of-range ticks.
+    raise ValueError(
+        f'query coordinate for {key!r} is not a valid slice of field:\n'
+        f'{coord}\nvs\n{field.coordinate}'
+    ) from e
+
+
 @dataclasses.dataclass
 class DataObservationOperator(ObservationOperatorABC):
   """Operator that returns pre-computed fields for matching queries.
@@ -75,18 +90,7 @@ class DataObservationOperator(ObservationOperatorABC):
       elif cx.is_coord(entry):
         if k not in valid_keys:
           raise ValueError(f'query contains {k=} not in {valid_keys}')
-        field = self.fields[k]
-        if field.coordinate == entry:
-          result = field
-        else:
-          try:
-            result = field.sel({field.coordinate: entry})
-          except KeyError as e:
-            raise ValueError(
-                f'query coordinate for {k!r} is not a valid slice of field:\n'
-                f'{entry}\nvs\n{field.coordinate}'
-            ) from e
-        observations[k] = result
+        observations[k] = _select_on_coordinate(self.fields[k], entry, k)
       else:
         raise ValueError(
             f'Unsupported query entry type for {k!r}: {type(entry)}'
@@ -102,7 +106,8 @@ class TransformObservationOperator(ObservationOperatorABC):
 
   1. Collect ``Field`` entries from the query as direct values.
   2. For ``requested_fields_from_query`` keys missing from query fields,
-     run ``fallback_transform`` to produce them.
+     run ``fallback_transform`` to produce them. Fields requested with a
+     (possibly ``Auxiliary``) ``Coordinate`` entry are selected on it.
   3. Run ``transform`` on ``inputs`` augmented with the resolved fields.
   4. Build an effective query where fallback-produced fields replace their
      original coordinate entries (preserving ``Auxiliary`` status), and keys
@@ -152,7 +157,13 @@ class TransformObservationOperator(ObservationOperatorABC):
             f'Missing: {missing_in_fallback}. '
             f'All available: {list(fallback_outputs.keys())}'
         )
-      fallback_fields = {k: fallback_outputs[k] for k in missing}
+      fallback_fields = {}
+      for k in missing:
+        field = fallback_outputs[k]
+        entry = unwrapped_query.get(k)
+        if cx.is_coord(entry):  # requested on a coordinate, maybe Auxiliary.
+          field = _select_on_coordinate(field, entry, k)
+        fallback_fields[k] = field
 
     all_fields = q_fields | fallback_fields
     observations = self.transform(inputs | all_fields)

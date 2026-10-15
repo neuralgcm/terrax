@@ -731,3 +731,49 @@ def construct_query(
           typing.Auxiliary(q_entry) if parsed.auxiliary else q_entry
       )
   return queries
+
+
+def validate_observation(
+    queries: typing.Queries,
+    observation: typing.Observation,
+) -> None:
+  """Raises if `observation` does not match the outputs requested by `queries`.
+
+  For each dataset key, `observe` must return exactly the query entries that are
+  not wrapped in `typing.Auxiliary`. Coordinate entries must be returned on that
+  coordinate and field entries on the coordinate of the field. Returned fields
+  may have additional dimensions, e.g. from vectorization.
+
+  Args:
+    queries: Queries passed to `observe`.
+    observation: Observation returned by `observe`.
+
+  Raises:
+    ValueError: If `observation` does not match `queries`.
+  """
+  if set(observation) != set(queries):
+    raise ValueError(
+        f'Observation has dataset keys {sorted(observation)}, but queries have'
+        f' {sorted(queries)}.'
+    )
+  for data_key, query in queries.items():
+    outputs = observation[data_key]
+    requested = {
+        var_name: entry
+        for var_name, entry in query.items()
+        if not isinstance(entry, typing.Auxiliary)
+    }
+    if set(outputs) != set(requested):
+      raise ValueError(
+          f'Observation for {data_key!r} has entries {sorted(outputs)}, but'
+          f' queries request {sorted(requested)}. Auxiliary query entries must'
+          ' not be returned.'
+      )
+    for var_name, entry in requested.items():
+      requested_coord = entry.coordinate if cx.is_field(entry) else entry
+      output_coord = outputs[var_name].coordinate
+      if not cx.contains_dims(output_coord, requested_coord):
+        raise ValueError(
+            f'Observation for {data_key}/{var_name} is on {output_coord},'
+            f' which does not contain the requested {requested_coord}.'
+        )

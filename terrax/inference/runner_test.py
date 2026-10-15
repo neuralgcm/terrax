@@ -26,6 +26,7 @@ import numpy as np
 from terrax.core import api
 from terrax.core import data_specs
 from terrax.core import dynamic_io
+from terrax.core import observation_operators
 from terrax.core import random_processes
 from terrax.core import typing
 from terrax.inference import dynamic_inputs as dynamic_inputs_lib
@@ -91,14 +92,10 @@ class MockModel(api.Model):
     self.prognostics.set_value(next_prognostics)
 
   def observe(self, queries: typing.Queries) -> typing.Observation:
-    prognostics = self.prognostics.get_value()
-    return {
-        ds_key: {
-            k: v if cx.is_field(v) else prognostics[k]
-            for k, v in sub_query.items()
-        }
-        for ds_key, sub_query in queries.items()
-    }
+    data_operator = observation_operators.DataObservationOperator(
+        self.prognostics.get_value()
+    )
+    return {k: data_operator.observe({}, q) for k, q in queries.items()}
 
 
 def construct_model(

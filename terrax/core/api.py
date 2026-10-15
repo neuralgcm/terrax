@@ -84,7 +84,19 @@ class Model(nnx.Module, abc.ABC):
 
   @abc.abstractmethod
   def observe(self, queries: typing.Queries) -> typing.Observation:
-    """Computes observations specified in `queries` from the model state."""
+    """Computes observations specified in `queries` from the model state.
+
+    For each dataset key in `queries`, the result contains exactly the entries
+    that are not wrapped in `typing.Auxiliary`: coordinate entries are computed
+    on that coordinate and field entries are returned unchanged. See
+    `typing.Query` for the meaning of query entries.
+
+    Args:
+      queries: Query entries keyed by dataset key and variable name.
+
+    Returns:
+      Observations keyed by dataset key and variable name.
+    """
     raise NotImplementedError()
 
   @property
@@ -574,7 +586,9 @@ class InferenceModel:
   ) -> dict[str, dict[str, cx.Field]]:
     """Returns model observations given the simulation state and queries."""
     model = self._prepare_model(simulation_state, dynamic_inputs)
-    return model.observe(queries)
+    observation = model.observe(queries)
+    data_specs.validate_observation(queries, observation)
+    return observation
 
   @classmethod
   def from_model_api(

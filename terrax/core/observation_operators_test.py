@@ -291,6 +291,54 @@ class TransformObservationOperatorTest(parameterized.TestCase):
     actual = operator.observe(inputs=inputs, query=query)
     self.assertSetEqual(set(actual.keys()), {'result'})
 
+  def test_fallback_field_is_selected_on_requested_coordinate(self):
+    stations = cx.LabeledAxis('station', np.array([1, 2, 3]))
+    requested = cx.LabeledAxis('station', np.array([1, 3]))
+    fallback_transform = transforms.PrescribedFields(
+        {'elevation': cx.field(np.array([10.0, 20.0, 30.0]), stations)}
+    )
+
+    with self.subTest('coordinate'):
+      operator = observation_operators.TransformObservationOperator(
+          transform=transforms.Identity(),
+          requested_fields_from_query=('elevation',),
+          fallback_transform=fallback_transform,
+      )
+      actual = operator.observe(inputs={}, query={'elevation': requested})
+      expected = cx.field(np.array([10.0, 30.0]), requested)
+      self.assertSetEqual(set(actual), {'elevation'})
+      cx.testing.assert_fields_equal(actual['elevation'], expected)
+
+    with self.subTest('auxiliary_coordinate'):
+      # The transform returns the second station of the elevation it receives.
+      second_station = transforms.Sequential([
+          transforms.SelectKeys('elevation'),
+          transforms.RenameKeys({'elevation': 'second'}),
+          transforms.Isel({'station': 1}),
+      ])
+      operator = observation_operators.TransformObservationOperator(
+          transform=second_station,
+          requested_fields_from_query=('elevation',),
+          fallback_transform=fallback_transform,
+      )
+      query = {
+          'second': cx.Scalar(),
+          'elevation': terrax_typing.Auxiliary(requested),
+      }
+      actual = operator.observe(inputs={}, query=query)
+      self.assertSetEqual(set(actual), {'second'})
+      cx.testing.assert_fields_allclose(actual['second'], cx.field(30.0))
+
+    with self.subTest('invalid_coordinate_raises'):
+      operator = observation_operators.TransformObservationOperator(
+          transform=transforms.Identity(),
+          requested_fields_from_query=('elevation',),
+          fallback_transform=fallback_transform,
+      )
+      invalid = cx.LabeledAxis('station', np.array([4]))
+      with self.assertRaisesRegex(ValueError, 'not a valid slice'):
+        operator.observe(inputs={}, query={'elevation': invalid})
+
 
 class MultiObservationOperatorTest(parameterized.TestCase):
   """Tests MultiObservationOperator implementation."""

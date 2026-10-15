@@ -389,6 +389,57 @@ class ConstructQueryTest(parameterized.TestCase):
     self.assertIn('data/u', ' '.join(cm.exception.__notes__))
 
 
+class ValidateObservationTest(parameterized.TestCase):
+  """Tests that validate_observation checks outputs of observe."""
+
+  def setUp(self):
+    super().setUp()
+    self.x = cx.LabeledAxis('x', np.arange(3.0))
+    self.location = cx.field(np.ones(4), cx.LabeledAxis('s', np.arange(4.0)))
+    self.queries = {
+        'data': {
+            'u': self.x,
+            'location': self.location,
+            'auxiliary': typing.Auxiliary(self.location),
+        }
+    }
+
+  def test_valid_observation_with_extra_dims(self):
+    batch = cx.SizedAxis('batch', 2)
+    observation = {
+        'data': {
+            'u': cx.field(np.zeros((2, 3)), batch, self.x),
+            'location': self.location,
+        }
+    }
+    data_specs.validate_observation(self.queries, observation)
+
+  def test_invalid_observations_raise(self):
+    u = cx.field(np.zeros(3), self.x)
+    with self.subTest('missing_dataset_key'):
+      with self.assertRaisesRegex(ValueError, 'dataset keys'):
+        data_specs.validate_observation(self.queries, {})
+
+    with self.subTest('returned_auxiliary_entry'):
+      observation = {
+          'data': {'u': u, 'location': self.location, 'auxiliary': u}
+      }
+      with self.assertRaisesRegex(ValueError, 'must not be returned'):
+        data_specs.validate_observation(self.queries, observation)
+
+    with self.subTest('missing_entry'):
+      with self.assertRaisesRegex(ValueError, 'queries request'):
+        data_specs.validate_observation(self.queries, {'data': {'u': u}})
+
+    with self.subTest('wrong_coordinate'):
+      y = cx.LabeledAxis('y', np.arange(3.0))
+      observation = {
+          'data': {'u': cx.field(np.zeros(3), y), 'location': self.location}
+      }
+      with self.assertRaisesRegex(ValueError, 'does not contain'):
+        data_specs.validate_observation(self.queries, observation)
+
+
 _X = cx.LabeledAxis('x', np.arange(3.0))
 _X_SPEC = data_specs.CoordSpec(_X)
 _X_FIELD = cx.field(np.zeros(3), _X)

@@ -50,15 +50,15 @@ T_co = TypeVar('T_co', covariant=True)
 @jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass
 class Auxiliary(Generic[T_co]):
-  """Wrapper indicating a supporting field/coord excluded from final output.
+  """Wrapper marking a query entry that `observe` uses but does not return.
 
-  Use this to mark query entries that are needed for internal computation
-  (e.g., conditioning inputs for observation operators) but should not appear
-  in the returned observations. This enables a clean three-stage pipeline:
+  See `Query` for how `Auxiliary` combines with coordinate and field entries.
 
-  1. **Unwrap:** Use ``unwrap_auxiliary`` to extract the underlying spec.
-  2. **Compute:** Perform transforms using the unwrapped value.
-  3. **Filter:** Exclude keys whose original query entry was ``Auxiliary``.
+  `Auxiliary` is a pytree node, so it is preserved by JAX transformations and
+  `jax.tree.map(fn, queries, is_leaf=cx.is_field)` applies `fn` to wrapped
+  fields and re-wraps the results. Include `Auxiliary` in `is_leaf` to treat
+  wrapped entries as single leaves. Use `unwrap_auxiliary` to access the
+  wrapped entry.
   """
 
   spec: T_co
@@ -85,6 +85,18 @@ def unwrap_auxiliary(spec: T | Auxiliary[T]) -> tuple[T, bool]:
 Fields = dict[str, cx.Field]
 NestedFields = dict[str, Fields]
 Observation = dict[str, dict[str, cx.Field]]
+# A query maps variable names to entries that are either computed by the model
+# (a coordinate) or supplied by the caller (a field). `Auxiliary` only controls
+# whether an entry is returned by `observe`:
+#
+# * `Coordinate`: computed on the coordinate and returned.
+# * `Auxiliary(Coordinate)`: requests an intermediate on the coordinate that is
+#   consumed within `observe`, e.g. by an operator's fallback transform or by
+#   query forwarding, and is not returned.
+# * `Field`: supporting data, e.g. query locations, that is returned unchanged
+#   so that outputs are self-descriptive.
+# * `Auxiliary(Field)`: supporting data, e.g. conditioning inputs of
+#   observation operators, that is not returned.
 Query = Mapping[
     str,
     cx.Coordinate | cx.Field | Auxiliary[cx.Coordinate] | Auxiliary[cx.Field],
@@ -202,7 +214,15 @@ class ObservationOperator(Protocol):
       inputs: dict[str, cx.Field],
       query: Query,
   ) -> dict[str, cx.Field]:
-    """Returns observations for `query`."""
+    """Returns observations for `query`.
+
+    The result contains exactly the entries of `query` that are not wrapped in
+    `Auxiliary`, see `Query` for the meaning of query entries.
+
+    Args:
+      inputs: Fields from which observations are computed.
+      query: Entries to observe, keyed by variable name.
+    """
     ...
 
 
