@@ -27,11 +27,14 @@ Main entry points:
 * `model_inputs_from_xarray` / `model_dynamic_inputs_from_xarray`: read the
   inputs supported by a model and the dynamic inputs it requires, using the
   schemas `model.inputs_spec` and `model.dynamic_inputs_spec` respectively.
-* `ensure_timedelta_axis`: index datasets by `timedelta` rather than `time`.
+* `ensure_timedelta_axis` / `ensure_time_axis`: index datasets by relative
+  `timedelta`, as expected by Terrax models, or by absolute `time`.
 """
 
 import collections
 from collections.abc import Mapping, Sequence
+import datetime
+import functools
 from typing import Any, TypeAlias, TypeVar, cast, overload
 
 import coordax as cx
@@ -226,6 +229,49 @@ def ensure_timedelta_axis(
   return ds
 
 
+def ensure_time_axis(
+    ds: _DatasetOrNestedDataset,
+    reference_time: np.datetime64 | datetime.datetime | None = None,
+) -> _DatasetOrNestedDataset:
+  """Returns `ds` indexed by absolute `time` rather than `timedelta`.
+
+  Inverse of `ensure_timedelta_axis`, e.g. for comparing model outputs from
+  `to_xarray` with data indexed by `time`. The `time` variable along
+  `timedelta` becomes the dimension coordinate and `timedelta` is kept as a
+  non-dimension coordinate. Datasets without a `timedelta` dimension are
+  returned as is.
+
+  Args:
+    ds: dataset or dictionary of datasets.
+    reference_time: if provided, absolute times are computed as
+      ``reference_time + timedelta``, replacing any `time` variable in `ds`.
+
+  Returns:
+    `ds` indexed by `time`.
+
+  Raises:
+    ValueError: if `ds` has a `timedelta` dimension, but neither a `time`
+      variable nor `reference_time` is provided.
+  """
+  if not isinstance(ds, xarray.Dataset):
+    return jax.tree.map(
+        functools.partial(ensure_time_axis, reference_time=reference_time),
+        ds,
+        is_leaf=lambda x: isinstance(x, xarray.Dataset),
+    )
+  if 'timedelta' not in ds.dims:
+    return ds
+  if reference_time is not None:
+    ds = ds.drop_vars('time', errors='ignore')
+    ds = ds.assign_coords(time=ds['timedelta'] + np.datetime64(reference_time))
+  elif 'time' not in ds:
+    raise ValueError(
+        'Cannot index dataset by `time` because it has no `time` variable, '
+        f'consider passing `reference_time`. Got dataset: {ds}'
+    )
+  return ds.swap_dims({'timedelta': 'time'})
+
+
 def read_from_xarray(
     nested_data: dict[str, xarray.Dataset],
     in_spec: dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]],
@@ -236,7 +282,8 @@ def read_from_xarray(
   Unlike `from_xarray`, which converts all variables, this function only reads
   the variables listed in `in_spec`, checks that their dimensions match the
   spec and returns them tagged with coordinates finalized from the spec, see
-  `data_specs.finalize_spec`.
+  `data_specs.finalize_spec`. Datasets indexed by absolute `time` are first
+  converted using `ensure_timedelta_axis`.
 
   Args:
     nested_data: datasets keyed by data key, e.g. ``{'era5': dataset}``.
@@ -266,6 +313,7 @@ def read_from_xarray(
       coord_types += (cx.LabeledAxis,)
     return from_xarray(da, coord_types)
 
+  nested_data = ensure_timedelta_axis(nested_data)
   result = {}
   for data_key, data_spec in in_spec.items():
     dataset = nested_data.get(data_key, {})
@@ -366,7 +414,6 @@ def model_inputs_from_xarray(
     model: api.InferenceModel | api.Model,
 ) -> typing.NestedFields:
   """Returns subset of `nested_data` supported by the model for assimilation."""
-  nested_data = ensure_timedelta_axis(nested_data)
   return read_from_xarray(
       nested_data=nested_data,
       in_spec=model.inputs_spec,
@@ -379,7 +426,6 @@ def model_dynamic_inputs_from_xarray(
     model: api.InferenceModel | api.Model,
 ) -> typing.NestedFields:
   """Returns subset of `nested_data` required by the model."""
-  nested_data = ensure_timedelta_axis(nested_data)
   return read_from_xarray(
       nested_data=nested_data,
       in_spec=model.dynamic_inputs_spec,

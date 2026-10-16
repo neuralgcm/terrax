@@ -195,14 +195,11 @@ class TrainerTest(parameterized.TestCase):
       )
       trajectories.update(trajectory_fast)
 
-    ds = xarray_utils.to_xarray(trajectories)
-    # Post-process to match expected dataset structure (timedelta -> time).
-    start_time = pd.Timestamp('2000-01-01')
-    all_data = {}
-    for key in ds:
-      ds[key] = ds[key].swap_dims({'timedelta': 'time'}).set_coords('time')
-      ds[key].coords['time'] = start_time + ds[key].coords['timedelta']
-      all_data[key] = ds[key]
+    # Data loaders expect datasets indexed by `time` rather than `timedelta`.
+    all_data = xarray_utils.ensure_time_axis(
+        xarray_utils.to_xarray(trajectories),
+        reference_time=pd.Timestamp('2000-01-01'),
+    )
     return model, all_data
 
   def _create_data_loader(self, all_data):

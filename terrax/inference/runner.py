@@ -705,7 +705,6 @@ class InferenceRunner:
         queries_data = dynamic_queries_stream.get_data(
             lead_start, lead_stop + self.finest_output_freq
         )
-        queries_data = xarray_utils.ensure_timedelta_axis(queries_data)
         query_fields = xarray_utils.read_from_xarray(
             queries_data, self._dynamic_queries_read_spec, strict_matches=False
         )

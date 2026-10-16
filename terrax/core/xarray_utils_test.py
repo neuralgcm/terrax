@@ -176,6 +176,27 @@ class ReadFromXarrayTest(parameterized.TestCase):
           cx.coords.compose(self.levels, self.grid),
       )
 
+  def test_read_from_xarray_with_time_indexed_data(self):
+    inputs_spec = {
+        'era5': {
+            'temperature': cx.coords.compose(self.levels, self.grid),
+            'time': cx.Scalar(),
+        }
+    }
+    inputs_spec = jax.tree.map(
+        data_specs.CoordSpec.with_any_timedelta,
+        inputs_spec,
+        is_leaf=lambda x: not isinstance(x, dict),
+    )
+    time_indexed_data = xarray_utils.ensure_time_axis(self.mock_data)
+    self.assertIn('time', time_indexed_data['era5'].dims)
+
+    actual = xarray_utils.read_from_xarray(time_indexed_data, inputs_spec)
+    expected = xarray_utils.read_from_xarray(self.mock_data, inputs_spec)
+    self.assertSameElements(actual['era5'], expected['era5'])
+    for k, v in expected['era5'].items():
+      cx.testing.assert_fields_equal(actual['era5'][k], v)
+
   def test_read_from_xarray_with_missing_non_optional_variable_raises(self):
     x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
     y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
@@ -407,6 +428,70 @@ class ToFromXarrayTest(parameterized.TestCase):
       xarray_utils.to_xarray({'u': np.ones(3)})
     with self.assertRaisesRegex(TypeError, 'Expected an xarray.DataArray'):
       xarray_utils.from_xarray({'u': np.ones(3)})
+
+
+def _time_indexed_dataset() -> xarray.Dataset:
+  start = np.datetime64('2024-01-01T00', 'ns')
+  times = start + np.arange(3) * np.timedelta64(6, 'h')
+  rng = np.random.RandomState(0)
+  return xarray.Dataset(
+      {'u': (('time', 'x'), rng.randn(3, 4))},
+      coords={'time': times, 'x': np.linspace(0, 1, 4)},
+  )
+
+
+class TimeAxisTest(parameterized.TestCase):
+
+  def test_ensure_timedelta_axis(self):
+    ds = _time_indexed_dataset()
+    origin = np.timedelta64(-6, 'h')
+    actual = xarray_utils.ensure_timedelta_axis(ds, timedelta_origin=origin)
+    self.assertEqual(actual['u'].dims, ('timedelta', 'x'))
+    np.testing.assert_array_equal(
+        actual['timedelta'].values, np.arange(-1, 2) * np.timedelta64(6, 'h')
+    )
+    # Absolute times are kept as a data variable along `timedelta`.
+    self.assertIn('time', actual.data_vars)
+    np.testing.assert_array_equal(actual['time'].values, ds['time'].values)
+
+  def test_ensure_timedelta_axis_is_idempotent(self):
+    ds = xarray_utils.ensure_timedelta_axis(_time_indexed_dataset())
+    xarray.testing.assert_identical(xarray_utils.ensure_timedelta_axis(ds), ds)
+
+  def test_ensure_timedelta_axis_with_nested_origins(self):
+    ds = _time_indexed_dataset()
+    origins = {'a': np.timedelta64(0, 'h'), 'b': np.timedelta64(6, 'h')}
+    actual = xarray_utils.ensure_timedelta_axis({'a': ds, 'b': ds}, origins)
+    self.assertEqual(actual['a']['timedelta'].values[0], origins['a'])
+    self.assertEqual(actual['b']['timedelta'].values[0], origins['b'])
+
+  def test_ensure_time_axis_inverts_ensure_timedelta_axis(self):
+    ds = _time_indexed_dataset()
+    with_timedelta = xarray_utils.ensure_timedelta_axis(ds)
+    actual = xarray_utils.ensure_time_axis(with_timedelta)
+    # `timedelta` is kept as a non-dimension coordinate.
+    xarray.testing.assert_identical(actual.drop_vars('timedelta'), ds)
+
+  def test_ensure_time_axis_with_reference_time(self):
+    ds = xarray_utils.ensure_timedelta_axis(_time_indexed_dataset())
+    ds = ds.drop_vars('time')
+    reference_time = np.datetime64('2000-01-01T00', 'ns')
+    actual = xarray_utils.ensure_time_axis(
+        {'data': ds}, reference_time=reference_time
+    )
+    self.assertEqual(actual['data']['u'].dims, ('time', 'x'))
+    np.testing.assert_array_equal(
+        actual['data']['time'].values, reference_time + ds['timedelta'].values
+    )
+
+  def test_ensure_time_axis_without_timedelta_returns_input(self):
+    ds = _time_indexed_dataset()
+    xarray.testing.assert_identical(xarray_utils.ensure_time_axis(ds), ds)
+
+  def test_ensure_time_axis_without_time_variable_raises(self):
+    ds = xarray_utils.ensure_timedelta_axis(_time_indexed_dataset())
+    with self.assertRaisesRegex(ValueError, 'no `time` variable'):
+      xarray_utils.ensure_time_axis(ds.drop_vars('time'))
 
 
 if __name__ == '__main__':
