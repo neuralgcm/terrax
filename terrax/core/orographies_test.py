@@ -13,10 +13,14 @@
 # limitations under the License.
 """Tests for modules that hold orographic data."""
 
+import dataclasses
+
 from absl.testing import absltest
+from absl.testing import parameterized
 import coordax as cx
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import numpy as np
 from terrax.core import coordinates
 from terrax.core import orographies
@@ -34,6 +38,19 @@ def _dataset_on_grid(
 ) -> xarray.Dataset:
   data_array = cx.field(values, grid).to_xarray().assign_attrs(attrs)
   return xarray.Dataset({name: data_array})
+
+
+def _make_ylm_map(
+    wavenumber_padding: tuple[int, int] = (0, 0),
+) -> spherical_harmonics.FixedYlmMapping:
+  ylm_grid = dataclasses.replace(
+      coordinates.SphericalHarmonicGrid.T21(),
+      wavenumber_padding=wavenumber_padding,
+  )
+  return spherical_harmonics.FixedYlmMapping(
+      lon_lat_grid=coordinates.LonLatGrid.T21(),
+      ylm_grid=ylm_grid,
+  )
 
 
 class OrographyTest(absltest.TestCase):
@@ -80,7 +97,7 @@ class OrographyTest(absltest.TestCase):
       orography.update_from_xarray(dataset, sim_units=units.DEFAULT_UNITS)
 
 
-class ModalOrographyTest(absltest.TestCase):
+class ModalOrographyTest(parameterized.TestCase):
 
   def test_update_from_xarray(self):
     ylm_map = spherical_harmonics.FixedYlmMapping(
@@ -119,6 +136,127 @@ class ModalOrographyTest(absltest.TestCase):
       orography.update_from_xarray(
           dataset, data_ylm_map=ylm_map, sim_units=units.DEFAULT_UNITS
       )
+
+  def test_mem_layout_shapes_and_padding_invariance(self):
+    unpadded_map = _make_ylm_map((0, 0))
+    padded_map = _make_ylm_map((3, 2))
+    unpadded_grid = unpadded_map.modal_grid
+    padded_grid = padded_map.modal_grid
+    num_modes = int(unpadded_grid.fields['mask'].data.sum())
+
+    orography_modes = orographies.ModalOrographyWithCorrection(
+        ylm_map=padded_map,
+        correction_scale=0.1,
+        mem_layout='modes',
+        rngs=nnx.Rngs(0),
+    )
+    orography_2d = orographies.ModalOrographyWithCorrection(
+        ylm_map=padded_map,
+        correction_scale=0.1,
+        mem_layout='2d',
+        rngs=nnx.Rngs(0),
+    )
+
+    self.assertEqual(orography_modes.orography.shape, (num_modes,))
+    self.assertEqual(orography_modes.correction.shape, (num_modes,))
+    self.assertEqual(orography_2d.orography.shape, unpadded_grid.shape)
+    self.assertEqual(orography_2d.correction.shape, unpadded_grid.shape)
+    cx.testing.assert_field_properties(
+        orography_2d.modal_orography,
+        dims=padded_grid.dims,
+        shape=padded_grid.shape,
+    )
+    self.assertEqual(orography_2d.modal_orography.coordinate, padded_grid)
+
+  @parameterized.parameters(((0, 0),), ((3, 2),))
+  def test_modes_and_2d_equivalence_and_gradients(self, wavenumber_padding):
+    ylm_map = _make_ylm_map(wavenumber_padding)
+    orography_modes = orographies.ModalOrographyWithCorrection(
+        ylm_map=ylm_map,
+        correction_scale=0.25,
+        mem_layout='modes',
+        rngs=nnx.Rngs(0),
+    )
+    orography_2d = orographies.ModalOrographyWithCorrection(
+        ylm_map=ylm_map,
+        correction_scale=0.25,
+        mem_layout='2d',
+        rngs=nnx.Rngs(0),
+    )
+
+    unpadded_grid = _make_ylm_map((0, 0)).modal_grid
+    unpadded_mask = unpadded_grid.fields['mask'].unwrap(unpadded_grid)
+    rng = np.random.default_rng(42)
+    base_2d = rng.normal(size=unpadded_grid.shape).astype(np.float32)
+    corr_2d = rng.normal(size=unpadded_grid.shape).astype(np.float32)
+
+    orography_2d.orography.set_value(jnp.asarray(base_2d))
+    orography_2d.correction.set_value(jnp.asarray(corr_2d))
+    orography_modes.orography.set_value(jnp.asarray(base_2d[unpadded_mask]))
+    orography_modes.correction.set_value(jnp.asarray(corr_2d[unpadded_mask]))
+
+    cx.testing.assert_fields_allclose(
+        orography_2d.modal_orography,
+        orography_modes.modal_orography,
+        rtol=1e-6,
+    )
+    cx.testing.assert_fields_allclose(
+        orography_2d.nodal_orography,
+        orography_modes.nodal_orography,
+        rtol=1e-6,
+    )
+
+    def loss_fn(module):
+      modal = cx.cmap(jnp.sin)(module.modal_orography)
+      return cx.cmap(jnp.sum)(modal.untag(ylm_map.modal_grid)).unwrap()
+
+    loss_modes, grads_modes = nnx.jit(nnx.value_and_grad(loss_fn))(
+        orography_modes
+    )
+    loss_2d, grads_2d = nnx.jit(nnx.value_and_grad(loss_fn))(orography_2d)
+
+    np.testing.assert_allclose(loss_2d, loss_modes, rtol=1e-6)
+    np.testing.assert_allclose(
+        grads_2d.correction.get_value()[unpadded_mask],
+        grads_modes.correction.get_value(),
+        rtol=1e-6,
+    )
+    np.testing.assert_array_equal(
+        grads_2d.correction.get_value()[~unpadded_mask], 0.0
+    )
+
+  @parameterized.parameters(((0, 0),), ((3, 2),))
+  def test_update_from_xarray_matches_across_layouts(self, wavenumber_padding):
+    ylm_map = _make_ylm_map(wavenumber_padding)
+    data_ylm_map = _make_ylm_map((0, 0))
+    grid = data_ylm_map.nodal_grid
+    rng = np.random.default_rng(7)
+    geopotential = rng.uniform(0.0, 1000.0, size=grid.shape).astype(np.float32)
+    ds = _dataset_on_grid('geopotential_at_surface', geopotential, grid)
+
+    orography_modes = orographies.ModalOrography(
+        ylm_map=ylm_map, mem_layout='modes', rngs=nnx.Rngs(0)
+    )
+    orography_2d = orographies.ModalOrography(
+        ylm_map=ylm_map, mem_layout='2d', rngs=nnx.Rngs(0)
+    )
+    kwargs = {
+        'data_ylm_map': data_ylm_map,
+        'sim_units': units.DEFAULT_UNITS,
+    }
+    orography_modes.update_from_xarray(ds, **kwargs)
+    orography_2d.update_from_xarray(ds, **kwargs)
+
+    cx.testing.assert_fields_allclose(
+        orography_2d.modal_orography,
+        orography_modes.modal_orography,
+        rtol=1e-6,
+    )
+    cx.testing.assert_fields_allclose(
+        orography_2d.nodal_orography,
+        orography_modes.nodal_orography,
+        rtol=1e-6,
+    )
 
 
 if __name__ == '__main__':
