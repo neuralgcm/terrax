@@ -438,7 +438,10 @@ class InferenceRunner:
       c_types = data_specs.get_nested_coord_types(
           self._dynamic_queries_read_spec
       )
-      coord_sources = xarray_utils.extract_xr_source_coords(q_data, c_types)
+      coord_sources = {
+          ds_key: {k: cx.coords.from_xarray(v, c_types) for k, v in ds.items()}
+          for ds_key, ds in q_data.items()
+      }
     # Entries without data, e.g. missing optional entries, are finalized
     # without a source, matching the requests constructed in `run`.
     sample_queries = data_specs.finalize_nested_queries_spec(
@@ -805,10 +808,7 @@ class InferenceRunner:
         )
         trajectory_slice = cx.tag(trajectory_slice, r_axis)
 
-      outputs = {
-          k: xarray_utils.fields_to_xarray(ds)
-          for k, ds in trajectory_slice.items()
-      }
+      outputs = xarray_utils.to_xarray(trajectory_slice)
       outputs_tree = xarray.DataTree.from_dict(outputs)
 
       outputs_tree = _datatree_rename(outputs_tree, {'timedelta': 'lead_time'})

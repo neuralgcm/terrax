@@ -119,7 +119,7 @@ class ReadFromXarrayTest(parameterized.TestCase):
     tx = cx.coords.compose(t, x)
     rng = np.random.RandomState(42)
     fields = {'u': cx.field(rng.randn(*tx.shape), tx)}
-    nested_data = xarray_utils.nested_fields_to_xarray({'data': fields})
+    nested_data = xarray_utils.to_xarray({'data': fields})
     inputs_spec = {'data': {'u': tx}}
 
     read_data = xarray_utils.read_from_xarray(nested_data, inputs_spec)
@@ -130,7 +130,7 @@ class ReadFromXarrayTest(parameterized.TestCase):
     y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
     rng = np.random.RandomState(42)
     fields = {'u': cx.field(rng.randn(*x.shape), x)}
-    nested_data = xarray_utils.nested_fields_to_xarray({'data': fields})
+    nested_data = xarray_utils.to_xarray({'data': fields})
     inputs_spec = {
         'data': {
             'u': x,
@@ -146,7 +146,7 @@ class ReadFromXarrayTest(parameterized.TestCase):
     y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
     rng = np.random.RandomState(42)
     fields = {'u': cx.field(rng.randn(*x.shape), x)}
-    nested_data = xarray_utils.nested_fields_to_xarray({'data': fields})
+    nested_data = xarray_utils.to_xarray({'data': fields})
     inputs_spec = {
         'data': {'u': x},
         'missing_data': {'v': data_specs.OptionalSpec(spec=y)},
@@ -181,7 +181,7 @@ class ReadFromXarrayTest(parameterized.TestCase):
     y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
     rng = np.random.RandomState(42)
     fields = {'u': cx.field(rng.randn(*x.shape), x)}
-    nested_data = xarray_utils.nested_fields_to_xarray({'data': fields})
+    nested_data = xarray_utils.to_xarray({'data': fields})
     inputs_spec = {'data': {'u': x, 'v': y}}
     with self.assertRaisesRegex(
         ValueError, "Specs for 'data' contains missing_vars=\\['v'\\]"
@@ -193,7 +193,7 @@ class ReadFromXarrayTest(parameterized.TestCase):
     y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
     rng = np.random.RandomState(42)
     fields = {'u': cx.field(rng.randn(*x.shape), x)}
-    nested_data = xarray_utils.nested_fields_to_xarray({'data': fields})
+    nested_data = xarray_utils.to_xarray({'data': fields})
     inputs_spec = {'data': {'u': y}}
     with self.assertRaisesRegex(ValueError, '.* have different dims'):
       xarray_utils.read_from_xarray(nested_data, inputs_spec)
@@ -329,43 +329,84 @@ class ReadFromXarrayTest(parameterized.TestCase):
       self.assertEqual(actual_coord.shape, (3, 37, 64 // 4, 32))
 
 
-class ValidateXarrayInputsTest(parameterized.TestCase):
+class ToFromXarrayTest(parameterized.TestCase):
 
-  def test_validate_xarray_inputs_with_coordinate(self):
-    t = coordinates.TimeDelta(np.arange(3) * np.timedelta64(1, 'h'))
-    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
-    y = cx.LabeledAxis('y', np.linspace(0, np.e, num=5))
-    tx = cx.coords.compose(t, x)
-    ty = cx.coords.compose(t, y)
-    rng = np.random.RandomState(42)
+  def test_field_round_trip(self):
+    timedelta = coordinates.TimeDelta(np.arange(3) * np.timedelta64(1, 'h'))
+    coord = cx.coords.compose(timedelta, coordinates.LonLatGrid.T21())
+    field = cx.field(np.random.RandomState(0).randn(*coord.shape), coord)
+
+    data_array = xarray_utils.to_xarray(field)
+    self.assertIsInstance(data_array, xarray.DataArray)
+    cx.testing.assert_fields_equal(xarray_utils.from_xarray(data_array), field)
+
+  def test_fields_round_trip(self):
+    timedelta_values = np.arange(3, dtype='timedelta64[D]')
+    timedelta = coordinates.TimeDelta(timedelta_values)
+    levels = coordinates.PressureLevels.with_era5_levels()
+    grid = coordinates.LonLatGrid.T21()
+    volume_coord = cx.coords.compose(timedelta, levels, grid)
+    surface_coord = cx.coords.compose(timedelta, grid)
+    rng = np.random.RandomState(0)
+    t0 = np.datetime64('2024-01-01')
     fields = {
-        'u': cx.field(rng.randn(*tx.shape), tx),
-        'v': cx.field(rng.randn(*ty.shape), ty),
+        'temperature': cx.field(rng.randn(*volume_coord.shape), volume_coord),
+        'sst': cx.field(rng.randn(*surface_coord.shape), surface_coord),
+        'time': cx.field(jdt.to_datetime(t0 + timedelta_values), timedelta),
     }
-    inputs = xarray_utils.nested_fields_to_xarray({'data_key': fields})
 
-    inputs_spec = {'data_key': {'u': tx, 'v': ty}}
-    xarray_utils.validate_xarray_inputs(inputs, inputs_spec)
+    ds = xarray_utils.to_xarray(fields)
+    self.assertIsInstance(ds, xarray.Dataset)
+    self.assertEqual(list(ds.data_vars), list(fields))
+    restored = xarray_utils.from_xarray(ds)
+    self.assertEqual(list(restored), list(fields))
+    for k, v in fields.items():
+      cx.testing.assert_fields_equal(restored[k], v)
 
-  def test_validate_xarray_inputs_with_incompatible_coordinate_raises(self):
+  def test_nested_fields_round_trip(self):
+    grid = coordinates.LonLatGrid.T21()
     x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
-    wrong_x = cx.LabeledAxis('x', np.linspace(0, np.e, num=4))
-    rng = np.random.RandomState(42)
-    fields = {'u': cx.field(rng.randn(*x.shape), x)}
-    inputs = xarray_utils.nested_fields_to_xarray({'data_key': fields})
+    rng = np.random.RandomState(0)
+    nested_fields = {
+        'surface': {'sst': cx.field(rng.randn(*grid.shape), grid)},
+        'profile': {
+            'u': cx.field(rng.randn(*x.shape), x),
+            'v': cx.field(rng.randn(*x.shape), x),
+        },
+    }
 
-    inputs_spec = {'data_key': {'u': wrong_x}}
-    with self.assertRaisesRegex(
-        ValueError, 'Coordinate axis .* for dimension x does not match'
-    ):
-      xarray_utils.validate_xarray_inputs(inputs, inputs_spec)
+    nested_data = xarray_utils.to_xarray(nested_fields)
+    self.assertEqual(list(nested_data), ['surface', 'profile'])
+    self.assertIsInstance(nested_data['surface'], xarray.Dataset)
+    self.assertIsInstance(nested_data['profile'], xarray.Dataset)
+    # LabeledAxis is not in CORE_COORD_TYPES, so it must be passed explicitly.
+    restored = xarray_utils.from_xarray(nested_data, (cx.LabeledAxis,))
+    self.assertEqual(list(restored), list(nested_fields))
+    for data_key, fields in nested_fields.items():
+      self.assertEqual(list(restored[data_key]), list(fields))
+      for k, v in fields.items():
+        cx.testing.assert_fields_equal(restored[data_key][k], v)
 
-  def test_validate_xarray_inputs_with_missing_dataset_raises(self):
+  def test_to_xarray_mixed_nesting(self):
     x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
-    inputs = {}  # Empty inputs.
-    inputs_spec = {'data_key': {'u': x}}
-    with self.assertRaisesRegex(ValueError, 'Data key data_key is missing'):
-      xarray_utils.validate_xarray_inputs(inputs, inputs_spec)
+    fields = {
+        'u': cx.field(np.ones(x.shape), x),
+        'nested': {'v': cx.field(np.zeros(x.shape), x)},
+    }
+    actual = xarray_utils.to_xarray(fields)
+    self.assertIsInstance(actual['u'], xarray.DataArray)
+    self.assertIsInstance(actual['nested'], xarray.Dataset)
+
+  def test_to_xarray_empty_dict_returns_empty_dataset(self):
+    xarray.testing.assert_identical(
+        xarray_utils.to_xarray({}), xarray.Dataset()
+    )
+
+  def test_unsupported_types_raise(self):
+    with self.assertRaisesRegex(TypeError, 'Expected a cx.Field'):
+      xarray_utils.to_xarray({'u': np.ones(3)})
+    with self.assertRaisesRegex(TypeError, 'Expected an xarray.DataArray'):
+      xarray_utils.from_xarray({'u': np.ones(3)})
 
 
 if __name__ == '__main__':

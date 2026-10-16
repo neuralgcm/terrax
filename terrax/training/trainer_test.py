@@ -195,7 +195,7 @@ class TrainerTest(parameterized.TestCase):
       )
       trajectories.update(trajectory_fast)
 
-    ds = xarray_utils.nested_fields_to_xarray(trajectories)
+    ds = xarray_utils.to_xarray(trajectories)
     # Post-process to match expected dataset structure (timedelta -> time).
     start_time = pd.Timestamp('2000-01-01')
     all_data = {}

@@ -279,7 +279,7 @@ class ParamFeatures(transforms.PytreeTransformABC):
         da = dataset[key]
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da)
+        candidate = xarray_utils.from_xarray(da)
         feature.set_value(candidate.order_as(self.coords[key]).data)
 
 
@@ -346,6 +346,6 @@ class ClimatologyFeatures(transforms.PytreeTransformABC):
             raise ValueError(f'Unsupported {reduce_hour_method=}')
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da, (cx.LabeledAxis,))
+        candidate = xarray_utils.from_xarray(da, (cx.LabeledAxis,))
         full_coord = cx.coords.compose(day_axis, self.coords[key])
         feature.set_value(candidate.order_as(full_coord).data)

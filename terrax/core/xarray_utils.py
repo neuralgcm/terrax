@@ -12,15 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities for converting between xarray and DataObservation objects."""
+"""Utilities for converting between xarray objects and coordax Fields.
+
+Main entry points:
+
+* `to_xarray` / `from_xarray`: convert `cx.Field` objects and (nested) dicts of
+  them to xarray objects and back. `from_xarray` infers Terrax coordinates
+  (e.g. `LonLatGrid`, `PressureLevels`, `TimeDelta`) from the data.
+* `read_from_xarray`: read data according to a schema defined using
+  `data_specs`, which maps data keys and variable names to expected coordinates
+  (`cx.Coordinate`, `data_specs.CoordSpec` or `data_specs.OptionalSpec`).
+  `read_sharded_from_xarray` does the same for shards of data in distributed
+  data loading.
+* `model_inputs_from_xarray` / `model_dynamic_inputs_from_xarray`: read the
+  inputs supported by a model and the dynamic inputs it requires, using the
+  schemas `model.inputs_spec` and `model.dynamic_inputs_spec` respectively.
+* `ensure_timedelta_axis`: index datasets by `timedelta` rather than `time`.
+"""
 
 import collections
-from typing import Sequence, TypeAlias, TypeVar, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, TypeAlias, TypeVar, cast, overload
 
 import coordax as cx
 from dinosaur import xarray_utils as dino_xarray_utils
 import jax
-import jax_datetime as jdt
 import numpy as np
 from terrax.core import api
 from terrax.core import coordinates
@@ -30,11 +46,6 @@ from terrax.core import scales
 from terrax.core import typing
 from terrax.core import units
 import xarray
-
-CoordSpec: TypeAlias = data_specs.CoordSpec
-OptionalSpec: TypeAlias = data_specs.OptionalSpec
-
-verify_grid_consistency = dino_xarray_utils.verify_grid_consistency
 
 
 CORE_COORD_TYPES = (
@@ -98,27 +109,157 @@ def nodal_orography_from_ds(ds: xarray.Dataset) -> xarray.DataArray:
   return orography.transpose(*lon_lat_order)
 
 
-def swap_time_to_timedelta(
-    ds: xarray.Dataset,
-    timedelta_origin: np.timedelta64 = np.timedelta64(0),
-) -> xarray.Dataset:
-  """Converts an xarray dataset with a time axis to a timedelta axis."""
-  ds = ds.assign_coords(timedelta=ds.time - ds.time[0] + timedelta_origin)
-  ds = ds.swap_dims({'time': 'timedelta'})
-  return ds
+@overload
+def to_xarray(fields: cx.Field) -> xarray.DataArray:
+  ...
 
 
-DatasetOrNestedDataset = TypeVar(
-    'DatasetOrNestedDataset', xarray.Dataset, dict[str, xarray.Dataset]
+@overload
+def to_xarray(fields: Mapping[str, cx.Field]) -> xarray.Dataset:
+  ...
+
+
+@overload
+def to_xarray(
+    fields: Mapping[str, Mapping[str, cx.Field]],
+) -> dict[str, xarray.Dataset]:
+  ...
+
+
+@overload
+def to_xarray(fields: Mapping[str, Any]) -> dict[str, Any]:
+  ...
+
+
+def to_xarray(
+    fields: cx.Field | Mapping[str, Any],
+) -> xarray.DataArray | xarray.Dataset | dict[str, Any]:
+  """Converts `fields` to xarray objects, preserving their nesting structure.
+
+  Conversion rules, applied recursively:
+
+  * ``cx.Field`` -> ``xarray.DataArray``
+  * ``dict[str, cx.Field]`` -> ``xarray.Dataset``
+  * any other ``dict`` -> ``dict`` with the same keys and converted values.
+
+  For example, ``to_xarray({'era5': {'u': u}, 'ocean': {'sst': sst}})`` returns
+  a dictionary that maps ``'era5'`` and ``'ocean'`` to ``xarray.Dataset``s.
+
+  Args:
+    fields: field, dictionary of fields or nested dictionary of fields.
+
+  Returns:
+    xarray objects with the same nesting structure as `fields`.
+  """
+  if cx.is_field(fields):
+    return fields.to_xarray()
+  if not isinstance(fields, Mapping):
+    raise TypeError(
+        f'Expected a cx.Field or a dictionary of them, got {type(fields)}'
+    )
+  if all(cx.is_field(v) for v in fields.values()):
+    return xarray.Dataset({k: v.to_xarray() for k, v in fields.items()})
+  return {k: to_xarray(v) for k, v in fields.items()}
+
+
+@overload
+def from_xarray(
+    data: xarray.DataArray,
+    additional_coord_types: Sequence[type[cx.Coordinate]] = ...,
+) -> cx.Field:
+  ...
+
+
+@overload
+def from_xarray(
+    data: xarray.Dataset,
+    additional_coord_types: Sequence[type[cx.Coordinate]] = ...,
+) -> dict[str, cx.Field]:
+  ...
+
+
+@overload
+def from_xarray(
+    data: Mapping[str, xarray.Dataset],
+    additional_coord_types: Sequence[type[cx.Coordinate]] = ...,
+) -> dict[str, dict[str, cx.Field]]:
+  ...
+
+
+@overload
+def from_xarray(
+    data: Mapping[str, Any],
+    additional_coord_types: Sequence[type[cx.Coordinate]] = ...,
+) -> dict[str, Any]:
+  ...
+
+
+def from_xarray(
+    data: xarray.DataArray | xarray.Dataset | Mapping[str, Any],
+    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
+) -> cx.Field | dict[str, Any]:
+  """Converts xarray objects to fields, inverse of `to_xarray`.
+
+  Conversion rules, applied recursively:
+
+  * ``xarray.DataArray`` -> ``cx.Field``
+  * ``xarray.Dataset`` -> ``dict[str, cx.Field]`` with an entry for each data
+    variable.
+  * ``dict`` -> ``dict`` with the same keys and converted values.
+
+  Unlike `cx.from_xarray`, coordinates are inferred using Terrax coordinate
+  types (see `CORE_COORD_TYPES`). Datasets indexed by absolute ``time`` should
+  be converted with `ensure_timedelta_axis` first. To read data that should
+  match an inputs spec, use `read_from_xarray` instead.
+
+  Args:
+    data: data array, dataset or (nested) dictionary of datasets to convert.
+    additional_coord_types: coordinate types to try in addition to
+      `CORE_COORD_TYPES` when inferring coordinates from the data.
+
+  Returns:
+    Fields with the same nesting structure as `data`.
+  """
+  coord_types = CORE_COORD_TYPES + tuple(additional_coord_types)
+  if isinstance(data, xarray.DataArray):
+    return cx.from_xarray(data, coord_types)
+  if isinstance(data, xarray.Dataset):
+    data_arrays = cast(dict[str, xarray.DataArray], dict(data))
+    return {k: cx.from_xarray(v, coord_types) for k, v in data_arrays.items()}
+  if isinstance(data, Mapping):
+    return {k: from_xarray(v, additional_coord_types) for k, v in data.items()}
+  raise TypeError(
+      'Expected an xarray.DataArray, xarray.Dataset or a dictionary of them, '
+      f'got {type(data)}'
+  )
+
+
+_DatasetOrNestedDataset = TypeVar(
+    '_DatasetOrNestedDataset', xarray.Dataset, dict[str, xarray.Dataset]
 )
-TimedeltaOrNested: TypeAlias = np.timedelta64 | dict[str, np.timedelta64]
+_TimedeltaOrNested: TypeAlias = np.timedelta64 | dict[str, np.timedelta64]
 
 
 def ensure_timedelta_axis(
-    ds: DatasetOrNestedDataset,
-    timedelta_origin: TimedeltaOrNested = np.timedelta64(0),
-) -> DatasetOrNestedDataset:
-  """Ensures an xarray dataset has a timedelta axis."""
+    ds: _DatasetOrNestedDataset,
+    timedelta_origin: _TimedeltaOrNested = np.timedelta64(0),
+) -> _DatasetOrNestedDataset:
+  """Returns `ds` indexed by `timedelta` rather than absolute `time`.
+
+  Terrax models expect data with a `timedelta` dimension and absolute times
+  stored in a `time` variable along it. If `ds` has a `time` dimension, it is
+  replaced by ``timedelta = time - time[0] + timedelta_origin``. A `time`
+  coordinate is converted to a data variable, so that it can be read as a
+  field. Datasets that are already indexed by `timedelta` are returned as is.
+
+  Args:
+    ds: dataset or dictionary of datasets.
+    timedelta_origin: value of `timedelta` at the first time step. If `ds` is a
+      dictionary, can be a dictionary with the same keys.
+
+  Returns:
+    `ds` indexed by `timedelta`.
+  """
   if not isinstance(ds, xarray.Dataset):
     if not isinstance(timedelta_origin, dict):
       timedelta_origin = {k: timedelta_origin for k in ds.keys()}
@@ -129,108 +270,11 @@ def ensure_timedelta_axis(
         is_leaf=lambda x: isinstance(x, xarray.Dataset),
     )
   if 'time' in ds.dims:
-    ds = swap_time_to_timedelta(ds, timedelta_origin)  # pyrefly: ignore[bad-argument-type, bad-assignment]
-  if 'time' in ds.coords:  # pyrefly: ignore[missing-attribute]
-    ds = ds.reset_coords('time')  # pyrefly: ignore[missing-attribute]
+    ds = ds.assign_coords(timedelta=ds.time - ds.time[0] + timedelta_origin)
+    ds = ds.swap_dims({'time': 'timedelta'})
+  if 'time' in ds.coords:
+    ds = ds.reset_coords('time')
   return ds
-
-
-def time_field_from_xarray_coords(
-    coords: xarray.Coordinates,
-) -> cx.Field:
-  """Returns a coordax.Field object for the time coordinate in `coords`."""
-  if 'time' not in coords:
-    raise ValueError(f'No `time` in {coords.keys()=}')
-  timedelta = coordinates.TimeDelta.from_xarray(('timedelta',), coords)
-  time = coords['time']
-  return cx.field(jdt.to_datetime(time.data), timedelta)  # pyrefly: ignore[bad-argument-type]
-
-
-def xarray_to_fields(
-    ds: xarray.Dataset,
-    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
-) -> dict[str, cx.Field]:
-  """Converts an xarray dataset to a dictionary of coordax.Field objects.
-
-  Args:
-    ds: dataset to convert.
-    additional_coord_types: additional coordinate types to use when inferring
-      coordinates from the dataset.
-
-  Returns:
-    A dictionary mapping variable names to coordax fields.
-  """
-  variables = cast(dict[str, xarray.DataArray], dict(ds))
-  return {
-      k: field_from_xarray(v, additional_coord_types)
-      for k, v in variables.items()
-  }
-
-
-def xarray_to_fields_with_time(
-    ds: xarray.Dataset,
-    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
-) -> dict[str, cx.Field]:
-  """Same as xarray_to_fields, but with required time in `ds` or `ds.coords`."""
-  fields = xarray_to_fields(ds, additional_coord_types)
-  if 'time' not in fields:
-    time = time_field_from_xarray_coords(ds.coords)
-    fields['time'] = time
-  return fields
-
-
-def field_from_xarray(
-    data_array: xarray.DataArray,
-    additional_coord_types: Sequence[type[cx.Coordinate]] = (),
-) -> cx.Field:
-  """Converts an xarray.DataArray to a Field using Terrax coordinates."""
-  return cx.from_xarray(
-      data_array, CORE_COORD_TYPES + tuple(additional_coord_types)
-  )
-
-
-def validate_xarray_inputs(
-    inputs: dict[str, xarray.Dataset],
-    in_spec: dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]],
-):
-  """Validates that `inputs` from xarray satisfy expectations of `in_spec`."""
-  coords = {}
-  for data_key, dataset in inputs.items():
-    if data_key not in in_spec:
-      continue
-    coords[data_key] = {}
-    dataset_spec = in_spec[data_key]
-    for k, var_spec in dataset_spec.items():
-      if k in dataset:
-        spec, _ = data_specs.unwrap_optional(var_spec)
-        c_types = data_specs.get_coord_types(spec)
-        coords[data_key][k] = cx.coords.from_xarray(dataset[k], c_types)
-  data_specs.validate_inputs(coords, in_spec)
-
-
-def extract_xr_source_coords(
-    xr_data: typing.Pytree,
-    coord_types: Sequence[type[cx.Coordinate]] | None = None,
-):
-  """Extracts coordinates tree from xarray data."""
-  if coord_types is None:
-    coord_types = CORE_COORD_TYPES
-
-  is_dataset = lambda x: isinstance(x, xarray.Dataset)
-  is_dataarray = lambda x: isinstance(x, xarray.DataArray)
-  is_xarray_data = lambda x: is_dataset(x) or is_dataarray(x)
-
-  def _extract_coords(x):
-    if is_dataarray(x):
-      return cx.coords.from_xarray(x, coord_types)
-    if is_dataset(x):
-      return {
-          k: cx.coords.from_xarray(v, coord_types)
-          for k, v in x.items()
-      }
-    raise ValueError(f'Unsupported type: {type(x)}')
-
-  return jax.tree.map(_extract_coords, xr_data, is_leaf=is_xarray_data)
 
 
 def read_from_xarray(
@@ -238,13 +282,40 @@ def read_from_xarray(
     in_spec: dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]],
     strict_matches: bool = True,
 ) -> typing.NestedFields:
-  """Reads `nested_data` from xarray according to `in_spec`."""
+  """Reads fields specified by `in_spec` from `nested_data`.
 
-  def _get_field(da: xarray.DataArray, spec: cx.Coordinate | CoordSpec):
+  Unlike `from_xarray`, which converts all variables, this function only reads
+  the variables listed in `in_spec`, checks that their dimensions match the
+  spec and returns them tagged with coordinates finalized from the spec, see
+  `data_specs.finalize_spec`.
+
+  Args:
+    nested_data: datasets keyed by data key, e.g. ``{'era5': dataset}``.
+    in_spec: coordinates or coordinate specs keyed by data key and variable
+      name, e.g. `model.inputs_spec`. Variables wrapped in
+      `data_specs.OptionalSpec` are only read if present in `nested_data`.
+    strict_matches: if True, all coordinates must be inferred from the data
+      using coordinate types from `in_spec` and `CORE_COORD_TYPES`, and axes
+      with `AxisMatchRules.REPLACED` match rules must already match `in_spec`.
+      If False, dimensions that cannot be inferred fall back to
+      `cx.LabeledAxis` and `REPLACED` axes are replaced by those from `in_spec`.
+
+  Returns:
+    Fields keyed by data key and variable name. Data keys for which no
+    variables are present are omitted.
+
+  Raises:
+    ValueError: if a variable that is not optional is missing from the data or
+      if the dimensions of the data do not match `in_spec`.
+  """
+
+  def _get_field(
+      da: xarray.DataArray, spec: cx.Coordinate | data_specs.CoordSpec
+  ) -> cx.Field:
     coord_types = data_specs.get_coord_types(spec)
     if not strict_matches:
       coord_types += (cx.LabeledAxis,)
-    return field_from_xarray(da, coord_types)
+    return from_xarray(da, coord_types)
 
   result = {}
   for data_key, data_spec in in_spec.items():
@@ -253,7 +324,10 @@ def read_from_xarray(
     for k, v in data_spec.items():
       spec, is_optional = data_specs.unwrap_optional(v)
       if k in dataset:
-        specs[k] = spec if isinstance(spec, CoordSpec) else CoordSpec(spec)
+        if isinstance(spec, data_specs.CoordSpec):
+          specs[k] = spec
+        else:
+          specs[k] = data_specs.CoordSpec(spec)
         fields[k] = _get_field(dataset[k], spec)
       elif not is_optional:
         missing_vars.append(k)
@@ -283,7 +357,7 @@ def read_sharded_from_xarray(
     in_spec: dict[str, dict[str, cx.Coordinate | data_specs.CoordLikeSpec]],
     mesh_shape: collections.OrderedDict[str, int],
     dim_partitions: parallelism.DimPartitions,
-) -> dict[str, dict[str, cx.Field]]:
+) -> typing.NestedFields:
   """Returns a `specs`-like structure of coordax.Fields from a `dataset` shard.
 
   This is a helpful function for annotating coordax.Field with full coordinates
@@ -338,26 +412,10 @@ def read_sharded_from_xarray(
   return read_from_xarray(nested_data, shard_specs, strict_matches=False)
 
 
-def fields_to_xarray(
-    fields: dict[str, cx.Field],
-) -> xarray.Dataset:
-  """Converts a coordax.Field dictionary to an xarray dataset."""
-  ds = xarray.Dataset({k: v.to_xarray() for k, v in fields.items()})
-  return ds
-
-
-def nested_fields_to_xarray(
-    nested_fields: dict[str, dict[str, cx.Field]],
-) -> dict[str, xarray.Dataset]:
-  """Converts a two level nested coordax.Field dictionary to xarray."""
-  # TODO(dkochkov): Consider switching to xarray.DataTree.
-  return {k: fields_to_xarray(v) for k, v in nested_fields.items()}
-
-
 def model_inputs_from_xarray(
     nested_data: dict[str, xarray.Dataset],
     model: api.InferenceModel | api.Model,
-) -> dict[str, dict[str, cx.Field]]:
+) -> typing.NestedFields:
   """Returns subset of `nested_data` supported by the model for assimilation."""
   nested_data = ensure_timedelta_axis(nested_data)
   return read_from_xarray(
@@ -370,7 +428,7 @@ def model_inputs_from_xarray(
 def model_dynamic_inputs_from_xarray(
     nested_data: dict[str, xarray.Dataset],
     model: api.InferenceModel | api.Model,
-) -> dict[str, dict[str, cx.Field]]:
+) -> typing.NestedFields:
   """Returns subset of `nested_data` required by the model."""
   nested_data = ensure_timedelta_axis(nested_data)
   return read_from_xarray(

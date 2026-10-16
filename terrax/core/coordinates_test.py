@@ -150,7 +150,7 @@ class CoordinatesTest(parameterized.TestCase):
       with self.subTest('xarray_roundtrip'):
         field = cx.field(np.zeros(coords.shape), coords)
         data_array = field.to_xarray()
-        reconstructed = xarray_utils.field_from_xarray(data_array)
+        reconstructed = xarray_utils.from_xarray(data_array)
         expected = expected_field_transform(field)
         coordax_testing.assert_fields_equal(reconstructed, expected)
 

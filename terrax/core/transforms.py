@@ -272,7 +272,7 @@ class PrescribedFields(PytreeTransformABC):
         da = dataset[key]
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
-        candidate = xarray_utils.field_from_xarray(da, extra_types)
+        candidate = xarray_utils.from_xarray(da, extra_types)
         candidate = candidate.order_as(*f.dims)
         if strict_matches:
           candidate = candidate.untag(f.coordinate).tag(f.coordinate)
