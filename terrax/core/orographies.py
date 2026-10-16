@@ -14,8 +14,12 @@
 
 """Modules that hold orographic data."""
 
+import dataclasses
+from typing import Literal
+
 import coordax as cx
 from flax import nnx
+import jax
 import jax.numpy as jnp
 from terrax.core import coordinates
 from terrax.core import interpolators
@@ -25,7 +29,6 @@ from terrax.core import spherical_harmonics
 from terrax.core import units
 from terrax.core import xarray_utils
 import xarray
-
 
 _OROGRAPHY_KEY = 'orography'
 _GEOPOTENTIAL_AT_SURFACE_KEY = 'geopotential_at_surface'
@@ -42,8 +45,8 @@ def _nodal_orography_from_xarray(
   attribute of the variable and default to meters.
 
   Args:
-    dataset: dataset with `orography` or `geopotential_at_surface` variables
-      on a `longitude`, `latitude` grid.
+    dataset: dataset with `orography` or `geopotential_at_surface` variables on
+      a `longitude`, `latitude` grid.
     sim_units: units used to nondimensionalize orography.
 
   Returns:
@@ -74,25 +77,57 @@ class ModalOrography(nnx.Module):
       *,
       ylm_map: spherical_harmonics.FixedYlmMapping,
       initializer: nnx.initializers.Initializer = nnx.initializers.zeros_init(),
+      mem_layout: Literal['modes', '2d'] = 'modes',
       rngs: nnx.Rngs,
   ):
     self.ylm_map = ylm_map
-    modal_shape_1d = (ylm_map.ylm_grid.fields['mask'].data.sum(),)
-    self.orography = OrographyVariable(initializer(rngs, modal_shape_1d))
+    self.mem_layout = mem_layout
+    if mem_layout == 'modes':
+      param_shape = (ylm_map.ylm_grid.fields['mask'].data.sum(),)
+    elif mem_layout == '2d':
+      param_shape = self._unpadded_grid.shape
+    else:
+      raise ValueError(f'Unsupported {mem_layout=}')
+    self.orography = OrographyVariable(initializer(rngs, param_shape))
+
+  @property
+  def _unpadded_grid(self) -> coordinates.SphericalHarmonicGrid:
+    return dataclasses.replace(
+        self.ylm_map.modal_grid, wavenumber_padding=(0, 0)
+    )
 
   @property
   def nodal_orography(self) -> cx.Field:
     return self.ylm_map.to_nodal(self.modal_orography)
 
+  def _raw_modal_orography(self) -> jax.Array:
+    """Returns stored modal orography coefficients prior to masking/expansion."""
+    return self.orography[...]
+
   @property
   def modal_orography(self) -> cx.Field:
     """Returns orography converted to modal representation with filtering."""
     ylm_grid = self.ylm_map.modal_grid
-    mask = ylm_grid.fields['mask']
-    modal_orography_2d = jnp.zeros(ylm_grid.shape)
-    return cx.field(
-        modal_orography_2d.at[mask.data].set(self.orography[...]), ylm_grid
-    )
+    coeffs = self._raw_modal_orography()
+    if self.mem_layout == 'modes':
+      mask = ylm_grid.fields['mask']
+      modal_orography_2d = jnp.zeros(ylm_grid.shape)
+      return cx.field(
+          modal_orography_2d.at[mask.unwrap(ylm_grid)].set(coeffs), ylm_grid
+      )
+    elif self.mem_layout == '2d':
+      unpadded_grid = self._unpadded_grid
+      with jax.ensure_compile_time_eval():
+        mask = unpadded_grid.fields['mask']
+      field = cx.field(coeffs, unpadded_grid)
+      field = cx.cmap(jnp.where)(mask, field, 0)
+      m_pad, l_pad = ylm_grid.wavenumber_padding
+      if m_pad or l_pad:
+        pad_fn = lambda x: jnp.pad(x, ((0, m_pad), (0, l_pad)))
+        field = cx.cpmap(pad_fn)(field.untag(unpadded_grid)).tag(ylm_grid)
+      return field
+    else:
+      raise ValueError(f'Unsupported {self.mem_layout=}')
 
   def update_from_xarray(
       self,
@@ -119,10 +154,24 @@ class ModalOrography(nnx.Module):
     modal_orography = interpolator(modal_orography)
     if isinstance(spatial_filter, spatial_filters.ModalSpatialFilter):
       modal_orography = spatial_filter.filter_modal(modal_orography)
-    modal_orography_data = modal_orography.data
-    self.orography.set_value(modal_orography_data[
-        self.ylm_map.modal_grid.fields['mask'].data
-    ])
+    ylm_grid = self.ylm_map.modal_grid
+    if self.mem_layout == 'modes':
+      mask = ylm_grid.fields['mask']
+      self.orography.set_value(
+          modal_orography.unwrap(ylm_grid)[mask.unwrap(ylm_grid)]
+      )
+    elif self.mem_layout == '2d':
+      unpadded_grid = self._unpadded_grid
+      unpadded_m, unpadded_l = unpadded_grid.shape
+      unpadded = cx.cpmap(lambda x: x[:unpadded_m, :unpadded_l])(
+          modal_orography.untag(ylm_grid)
+      ).tag(unpadded_grid)
+      with jax.ensure_compile_time_eval():
+        mask = unpadded_grid.fields['mask']
+      masked = cx.cmap(jnp.where)(mask, unpadded, 0)
+      self.orography.set_value(masked.unwrap(unpadded_grid))
+    else:
+      raise ValueError(f'Unsupported {self.mem_layout=}')
 
 
 class ModalOrographyWithCorrection(ModalOrography):
@@ -138,26 +187,23 @@ class ModalOrographyWithCorrection(ModalOrography):
       correction_initializer: nnx.initializers.Initializer = (
           nnx.initializers.truncated_normal()
       ),
+      mem_layout: Literal['modes', '2d'] = 'modes',
       rngs: nnx.Rngs,
   ):
-    super().__init__(ylm_map=ylm_map, initializer=initializer, rngs=rngs)
+    super().__init__(
+        ylm_map=ylm_map,
+        initializer=initializer,
+        mem_layout=mem_layout,
+        rngs=rngs,
+    )
     self.correction_scale = correction_scale
     self.correction = correction_param_type(
         correction_initializer(rngs.params(), self.orography.shape)
     )
 
-  @property
-  def modal_orography(self) -> cx.Field:
-    """Returns orography converted to modal representation with filtering."""
-    ylm_grid = self.ylm_map.modal_grid
-    mask = ylm_grid.fields['mask']
-    modal_orography_2d = jnp.zeros(mask.shape)
-    modal_orography_1d = (
-        self.orography[...] + self.correction[...] * self.correction_scale
-    )
-    return cx.field(
-        modal_orography_2d.at[mask.data].set(modal_orography_1d), ylm_grid
-    )
+  def _raw_modal_orography(self) -> jax.Array:
+    """Returns corrected orography coefficients prior to masking/expansion."""
+    return self.orography[...] + self.correction[...] * self.correction_scale
 
 
 class Orography(nnx.Module):
