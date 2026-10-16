@@ -146,6 +146,76 @@ class InterpolatorsTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
+          testcase_name='gaussian_to_equiangular_with_poles',
+          source_grid=coordinates.LonLatGrid.TL63(),
+          target_grid=coordinates.LonLatGrid.EL120(),
+      ),
+      dict(
+          testcase_name='equiangular_with_poles_to_gaussian',
+          source_grid=coordinates.LonLatGrid.EL120(),
+          target_grid=coordinates.LonLatGrid.T21(),
+      ),
+      dict(
+          testcase_name='shifted_longitudes',
+          source_grid=coordinates.LonLatGrid.T21(),
+          target_grid=coordinates.LonLatGrid(
+              longitude_nodes=96, latitude_nodes=48, longitude_offset=0.3
+          ),
+      ),
+  )
+  def test_bilinear_regridder_gather_matches_matmul(
+      self, source_grid, target_grid
+  ):
+    level = cx.SizedAxis('level', 2)
+    data = np.random.RandomState(0).randn(2, *source_grid.shape)
+    data[0, :5, :5] = np.nan
+    inputs = cx.field(data, level, source_grid)
+    for skipna in (False, True):
+      with self.subTest(f'{skipna=}'):
+        matmul = interpolators.BilinearRegridder(
+            target_grid, skipna=skipna, method='matmul'
+        )
+        gather = interpolators.BilinearRegridder(
+            target_grid, skipna=skipna, method='gather'
+        )
+        cx.testing.assert_fields_allclose(
+            gather(inputs), matmul(inputs), atol=1e-5
+        )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='cpu',
+          platform='cpu',
+          expected_op='stablehlo.gather',
+          unexpected_op='stablehlo.dot_general',
+      ),
+      dict(
+          testcase_name='tpu',
+          platform='tpu',
+          expected_op='stablehlo.dot_general',
+          unexpected_op='stablehlo.gather',
+      ),
+  )
+  def test_bilinear_regridder_auto_method_depends_on_platform(
+      self, platform, expected_op, unexpected_op
+  ):
+    source_grid = coordinates.LonLatGrid.T21()
+    target_grid = coordinates.LonLatGrid.TL31()
+    inputs = cx.field(np.ones(source_grid.shape, np.float32), source_grid)
+    regridder = interpolators.BilinearRegridder(target_grid)
+    traced = jax.jit(regridder).trace(inputs)
+    hlo = traced.lower(lowering_platforms=(platform,)).as_text()
+    self.assertIn(expected_op, hlo)
+    self.assertNotIn(unexpected_op, hlo)
+
+  def test_bilinear_regridder_rejects_unknown_method(self):
+    with self.assertRaisesRegex(ValueError, 'Unsupported'):
+      interpolators.BilinearRegridder(
+          coordinates.LonLatGrid.T21(), method='nearest'
+      )
+
+  @parameterized.named_parameters(
+      dict(
           testcase_name='bilinear',
           regridder_cls=interpolators.BilinearRegridder,
           skipna=False,
@@ -217,6 +287,16 @@ class InterpolatorsTest(parameterized.TestCase):
     lon_weights_shape = (target_grid.shape[0], source_grid.shape[0])
     lon_weights = [c for c in consts if np.shape(c) == lon_weights_shape]
     self.assertLen(lon_weights, 1)
+
+  def test_bilinear_regridder_gather_shares_neighbors_across_fields(self):
+    source_grid = coordinates.LonLatGrid.TL63()
+    target_grid = coordinates.LonLatGrid.EL120()
+    regridder = interpolators.BilinearRegridder(target_grid, method='gather')
+    field = cx.field(np.ones(source_grid.shape), source_grid)
+    consts = jax.make_jaxpr(regridder)({'a': field, 'b': field}).consts
+    lon_neighbors_shape = (target_grid.shape[0], 2)
+    lon_neighbors = [c for c in consts if np.shape(c) == lon_neighbors_shape]
+    self.assertLen(lon_neighbors, 2)  # indices and weights.
 
 
 if __name__ == '__main__':
