@@ -35,16 +35,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any, TypeAlias, TypeVar, cast, overload
 
 import coordax as cx
-from dinosaur import xarray_utils as dino_xarray_utils
 import jax
 import numpy as np
 from terrax.core import api
 from terrax.core import coordinates
 from terrax.core import data_specs
 from terrax.core import parallelism
-from terrax.core import scales
 from terrax.core import typing
-from terrax.core import units
 import xarray
 
 
@@ -59,54 +56,6 @@ CORE_COORD_TYPES = (
     coordinates.LayerLevels,
     cx.DummyAxis,
 )
-
-
-DatasetOrDataArray = TypeVar(
-    'DatasetOrDataArray', xarray.Dataset, xarray.DataArray
-)
-
-
-def xarray_nondimensionalize(
-    ds: DatasetOrDataArray,
-    sim_units: units.SimUnits,
-) -> DatasetOrDataArray:
-  return xarray.apply_ufunc(sim_units.nondimensionalize, ds)
-
-
-def get_longitude_latitude_names(ds: xarray.Dataset) -> tuple[str, str]:
-  """Infers names used for longitude and latitude in the dataset `ds`."""
-  if 'lon' in ds.dims and 'lat' in ds.dims:
-    return ('lon', 'lat')
-  if 'longitude' in ds.dims and 'latitude' in ds.dims:
-    return ('longitude', 'latitude')
-  raise ValueError(f'No `lon/lat`|`longitude/latitude` in {ds.coords.keys()=}')
-
-
-def attach_data_units(
-    array: xarray.DataArray,
-    default_units: typing.Quantity = typing.units.dimensionless,
-) -> xarray.DataArray:
-  """Attaches units to `array` based on `attrs.units` or `default_units`."""
-  attrs = dict(array.attrs)
-  unit = attrs.pop('units', None)
-  if unit is not None:
-    data = units.parse_units(unit) * array.data
-  else:
-    data = default_units * array.data
-  return xarray.DataArray(data, array.coords, array.dims, attrs=attrs)
-
-
-def nodal_orography_from_ds(ds: xarray.Dataset) -> xarray.DataArray:
-  """Returns orography in nodal representation from `ds`."""
-  orography_key = dino_xarray_utils.OROGRAPHY
-  if orography_key not in ds:
-    ds[orography_key] = (
-        ds[dino_xarray_utils.GEOPOTENTIAL_AT_SURFACE_KEY]
-        / scales.GRAVITY_ACCELERATION.magnitude
-    )
-  lon_lat_order = get_longitude_latitude_names(ds)
-  orography = attach_data_units(ds[orography_key], typing.units.meter)
-  return orography.transpose(*lon_lat_order)
 
 
 @overload

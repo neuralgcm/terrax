@@ -19,10 +19,47 @@ from flax import nnx
 import jax.numpy as jnp
 from terrax.core import coordinates
 from terrax.core import interpolators
+from terrax.core import scales
 from terrax.core import spatial_filters
 from terrax.core import spherical_harmonics
+from terrax.core import units
 from terrax.core import xarray_utils
 import xarray
+
+
+_OROGRAPHY_KEY = 'orography'
+_GEOPOTENTIAL_AT_SURFACE_KEY = 'geopotential_at_surface'
+
+
+def _nodal_orography_from_xarray(
+    dataset: xarray.Dataset,
+    sim_units: units.SimUnits,
+) -> cx.Field:
+  """Returns nondimensionalized nodal orography from `dataset`.
+
+  Orography is read from the `orography` variable if present, and otherwise
+  derived from `geopotential_at_surface`. Units are taken from the `units`
+  attribute of the variable and default to meters.
+
+  Args:
+    dataset: dataset with `orography` or `geopotential_at_surface` variables
+      on a `longitude`, `latitude` grid.
+    sim_units: units used to nondimensionalize orography.
+
+  Returns:
+    Nondimensionalized orography on the grid of `dataset`.
+  """
+  if _OROGRAPHY_KEY in dataset:
+    orography = dataset[_OROGRAPHY_KEY]
+  else:
+    geopotential = dataset[_GEOPOTENTIAL_AT_SURFACE_KEY]
+    orography = geopotential / scales.GRAVITY_ACCELERATION.magnitude
+  orography = orography.transpose('longitude', 'latitude')
+  data_units = units.parse_units(orography.attrs.get('units', 'meter'))
+  orography = orography.copy(
+      data=sim_units.nondimensionalize(orography.values * data_units)
+  )
+  return xarray_utils.from_xarray(orography)
 
 
 class OrographyVariable(nnx.Variable):
@@ -67,16 +104,14 @@ class ModalOrography(nnx.Module):
     sim_units = kwargs['sim_units']
     spatial_filter = kwargs.get('spatial_filter', None)
 
-    # TODO(dkochkov) use units attr on dataset with default to `meter` here.
     if spatial_filter is None:
       spatial_filter = lambda x: x
-    nodal_orography = xarray_utils.nodal_orography_from_ds(dataset)
-    nodal_orography = xarray_utils.xarray_nondimensionalize(
-        nodal_orography, sim_units
-    )
-    grid = data_ylm_map.nodal_grid
-    nodal_orography = xarray_utils.from_xarray(nodal_orography)
-    nodal_orography.untag(grid).tag(grid)  # ensure that coordinates match.
+    nodal_orography = _nodal_orography_from_xarray(dataset, sim_units)
+    data_grid = nodal_orography.coordinate
+    if data_grid != data_ylm_map.nodal_grid:
+      raise ValueError(
+          f'{data_grid=} does not match {data_ylm_map.nodal_grid=}.'
+      )
     if not isinstance(spatial_filter, spatial_filters.ModalSpatialFilter):
       nodal_orography = spatial_filter(nodal_orography)
     modal_orography = data_ylm_map.to_modal(nodal_orography)
@@ -151,14 +186,9 @@ class Orography(nnx.Module):
     sim_units = kwargs['sim_units']
     spatial_filter = kwargs.get('spatial_filter', None)
 
-    # TODO(dkochkov) use units attr on dataset with default to `meter` here.
     if spatial_filter is None:
       spatial_filter = lambda x: x
-    nodal_orography = xarray_utils.nodal_orography_from_ds(dataset)
-    nodal_orography = xarray_utils.xarray_nondimensionalize(
-        nodal_orography, sim_units
-    )
-    nodal_orography = xarray_utils.from_xarray(nodal_orography)
+    nodal_orography = _nodal_orography_from_xarray(dataset, sim_units)
     data_grid = nodal_orography.coordinate
     nodal_orography = spatial_filter(nodal_orography)
     if data_grid != self.grid:
