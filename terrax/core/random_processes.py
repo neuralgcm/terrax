@@ -919,7 +919,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       raise ValueError(f'collection_axis must be 1d, got {axis=}')
     [n_fields] = axis.shape
     init_specs = [correlation_times, correlation_lengths, variances]
-    if any(len(p) != n_fields for p in init_specs):
+    if any(len(p) != n_fields for p in init_specs):  # pyrefly: ignore[bad-argument-type]
       raise ValueError(
           'Argument lengths must match collection_axis size, but got: '
           f'{axis=} {init_specs=}'
@@ -933,7 +933,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
     corr_lengths = np.array(
         [
             units.maybe_nondimensionalize(length, sim_units)
-            for length in correlation_lengths
+            for length in correlation_lengths  # pyrefly: ignore[not-iterable]
         ]
     )
     vars_nondim = np.array(
