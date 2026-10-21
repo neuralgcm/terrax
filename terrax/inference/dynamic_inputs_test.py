@@ -216,6 +216,34 @@ class AnomalyPersistenceTest(absltest.TestCase):
           update_freq=np.timedelta64(1, 'h'),
       )
 
+  def test_sea_ice_cover_clipped_in_dict(self):
+    t0 = np.datetime64('2025-01-01T00')
+    clim_data = np.column_stack([
+        np.linspace(0.8, 0.1, 366),
+        np.full(366, np.nan),
+    ])
+    clim_ds = xarray.Dataset(
+        {'sea_ice_cover': (('dayofyear', 'x'), clim_data)},
+        coords={'dayofyear': 1 + np.arange(366), 'x': [0, 1]},
+    )
+    init_ds = xarray.Dataset(
+        {'sea_ice_cover': (('time', 'x'), np.array([[0.4, np.nan]]))},
+        coords={'time': np.array([t0]), 'x': [0, 1]},
+    )
+    forecast = dynamic_inputs_lib.AnomalyPersistence(
+        full_data={'era5:surface': init_ds},
+        climatology={'era5:surface': clim_ds},
+        update_freq=np.timedelta64(24, 'h'),
+    ).get_forecast(t0)
+    actual = forecast.get_data(
+        lead_start=np.timedelta64(0, 'D'),
+        lead_stop=np.timedelta64(365, 'D'),
+    )
+    sic = actual['era5:surface']['sea_ice_cover'].values
+    self.assertGreaterEqual(np.nanmin(sic), 0.0)
+    self.assertLessEqual(np.nanmax(sic), 1.0)
+    self.assertTrue(np.isnan(sic[:, 1]).all())
+
 
 class InvalidClimatologyTest(parameterized.TestCase):
 

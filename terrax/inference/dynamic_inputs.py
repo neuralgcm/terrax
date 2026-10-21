@@ -321,6 +321,13 @@ class Climatology(DynamicInputs[XarrayData]):
     return _get_forecast(_ClimatologyForecast, self, init_time)
 
 
+def _clip_sea_ice_cover(ds: xarray.Dataset) -> xarray.Dataset:
+  if 'sea_ice_cover' in ds:
+    ds = ds.copy()
+    ds['sea_ice_cover'] = ds['sea_ice_cover'].clip(0, 1)
+  return ds
+
+
 @dataclasses.dataclass(frozen=True)
 class _AnomalyPersistenceForecast(_Forecast[XarrayData]):  # pylint: disable=missing-class-docstring
 
@@ -355,8 +362,7 @@ class _AnomalyPersistenceForecast(_Forecast[XarrayData]):  # pylint: disable=mis
     # Ensure time is the first dimension.
     forecast = _map_over_datasets(lambda x: x.transpose('time', ...), forecast)
     # TODO(shoyer): Make a more generic solution for clipping anomaly forecasts.
-    if 'sea_ice_cover' in forecast:
-      forecast['sea_ice_cover'] = forecast['sea_ice_cover'].clip(0, 1)  # pyrefly: ignore[unsupported-operation]
+    forecast = _map_over_datasets(_clip_sea_ice_cover, forecast)
     return forecast
 
 
