@@ -15,7 +15,7 @@
 r"""Defines data loading for rollout experiments."""
 
 import collections
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 import dataclasses
 import functools
 import logging
@@ -1066,26 +1066,26 @@ class DataLoader:
     data = data.map(prep_for_to_global_array)
     return data
 
-  def _iterate_with_updated_buffer(
+  def _map_with_updated_buffer(
       self,
-      data,
+      data: grain.IterDataset,
       data_buffer: HostDataBuffer | Sequence[HostDataBuffer] | None,
-  ):
-    """Iterates over and updates the data buffer inplace, if necessary."""
-    if data_buffer is not None:
-      if isinstance(data_buffer, HostDataBuffer):
-        data_buffer = [data_buffer]
+  ) -> grain.IterDataset:
+    """Maps `data` to unpack batches and update `data_buffer` inplace."""
+    if isinstance(data_buffer, HostDataBuffer):
+      data_buffer = [data_buffer]
 
-    for batches in data:
+    def _update_and_unpack(batches):
       if data_buffer:
         buffer_batch, *other = batches
         init_slice = slice_leading_timedelta(buffer_batch, 1)
         init_slice = self.to_global_array(init_slice)
         for buffer in data_buffer:
           buffer.set_data(buffer_batch)
-        yield _unpack_size_one_tuple((init_slice,) + tuple(other))
-      else:
-        yield _unpack_size_one_tuple(tuple(batches))
+        return _unpack_size_one_tuple((init_slice,) + tuple(other))
+      return _unpack_size_one_tuple(tuple(batches))
+
+    return data.map(_update_and_unpack)
 
   def _to_global_except_first(self, targets_and_dynamic_inputs):
     return tuple([targets_and_dynamic_inputs[0]] + [
@@ -1175,7 +1175,7 @@ class DataLoader:
     data = grain.experimental.ThreadPrefetchIterDataset(
         data, prefetch_buffer_size=1
     )
-    return self._iterate_with_updated_buffer(data, data_buffer)
+    return iter(self._map_with_updated_buffer(data, data_buffer))
 
   def build_eval_inputs(
       self,
@@ -1186,7 +1186,7 @@ class DataLoader:
       batch_count: int | None = None,
       balance_diurnal_cycle: bool = False,
       data_buffer: HostDataBuffer | Sequence[HostDataBuffer] | None = None,
-  ) -> list[Any]:
+  ) -> Iterable[Any]:
     """Returns an iterable over the data for evaluation.
 
     Args:
@@ -1203,7 +1203,8 @@ class DataLoader:
         callback mechanism.
 
     Returns:
-      A list of batches of evaluation data.
+      A re-iterable dataset of evaluation batches cached in host RAM and
+      transferred to device on demand during iteration.
     """
     all_data, stencils, shard_count = self._prep_data_stencils_and_shard_count(
         *input_specs, batch_size_per_device=batch_size_per_device
@@ -1250,11 +1251,11 @@ class DataLoader:
         batch_size_per_device,
         from_xarray_fn=from_xr,
     )
+    # Cache host batches in RAM before moving to device so cached evaluation
+    # datasets do not permanently occupy device HBM.
+    data = grain.MapDataset.source(list(data)).to_iter_dataset()
     if data_buffer is not None:
       data = data.map(self._to_global_except_first)
     else:
       data = data.map(self.to_global_array)
-
-    # we call list on the iterator to cache data in memory.
-    data = list(self._iterate_with_updated_buffer(data, data_buffer))
-    return data
+    return self._map_with_updated_buffer(data, data_buffer)
