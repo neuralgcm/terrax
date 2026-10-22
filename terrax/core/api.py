@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 import dataclasses
 import functools
 from typing import Any, Callable
@@ -222,17 +223,29 @@ class Model(nnx.Module, abc.ABC):
   def from_fiddle_config(
       cls,
       config: fdl.Config[Model],
-      spmd_mesh_updates: (
-          dict[parallelism.TagOrMeshType, jax.sharding.Mesh | None] | None
-      ) = None,
-      array_partitions_updates: (
-          dict[parallelism.TagOrMeshType, parallelism.ArrayPartitions] | None
-      ) = None,
-      field_partitions_updates: (
-          dict[parallelism.TagOrMeshType, parallelism.FieldPartitions] | None
-      ) = None,
-  ):
-    """Builds a model from a fiddle config with updated mesh properties."""
+      mesh: parallelism.MeshUpdates = None,
+      attrs_to_update: Sequence[str] = ('spmd_mesh',),
+      *,
+      eager: bool = False,
+  ) -> Model:
+    """Builds a model from a Fiddle config, optionally overriding its `Mesh`.
+
+    Args:
+      config: Fiddle configuration for a `Model` subclass.
+      mesh: Optional `parallelism.Mesh` (or mapping from Fiddle tags to `Mesh`
+        instances) to apply to `Mesh` nodes in `config` before building. If
+        `None`, builds `config` with its existing `Mesh` configuration.
+      attrs_to_update: `Mesh` attribute names to copy from `mesh` into `config`
+        when `mesh` is provided. Defaults to `('spmd_mesh',)`, which updates
+        the device mesh while preserving partition schemas defined in `config`.
+      eager: If `True`, builds and shards the model eagerly instead of inside
+        `nnx.jit`. Useful when model initialization performs host-side NumPy or
+        Python operations on JAX arrays that are incompatible with JIT tracing.
+
+    Returns:
+      The constructed `Model` instance with `model.fiddle_config` stripped of
+      `spmd_mesh` topology information.
+    """
     # TODO(shoyer): Consider moving this method into a dedicated config module
     # (maybe also with some utilities from checkpointing).
     if not issubclass(config.__fn_or_cls__, Model):  # pyrefly: ignore[bad-argument-type]
@@ -240,14 +253,25 @@ class Model(nnx.Module, abc.ABC):
           f'Fiddle config defines {config.__fn_or_cls__} '
           'which does not inherit from the Model class'
       )
-    updated_config = parallelism.update_mesh_properties(
-        config,
-        spmd_mesh_updates=spmd_mesh_updates,
-        array_partitions_updates=array_partitions_updates,
-        field_partitions_updates=field_partitions_updates,
+    updated_config = config
+    if mesh is not None:
+      updated_config = parallelism.update_mesh_properties(
+          config, mesh=mesh, attrs_to_update=attrs_to_update
+      )
+
+    def build_and_shard():
+      with nnx.use_eager_sharding(False):
+        model = fdl.build(updated_config)
+      nnx.update(
+          model,
+          parallelism.shard_module_states(model, fallback_mesh=model.mesh),
+      )
+      return model
+
+    model = build_and_shard() if eager else nnx.jit(build_and_shard)()
+    model.fiddle_config = parallelism.update_mesh_properties(
+        updated_config, mesh=None
     )
-    model = fdl.build(updated_config)
-    model.fiddle_config = config
     return model
 
   def __init_subclass__(cls, **kwargs):
@@ -289,7 +313,7 @@ class VectorizedModel(Model):
     state_to_clone = nnx.clone(state_to_clone)
     vectorized_model = nnx.merge(graph_def, state_to_clone, state_to_merge)
     module_utils.vectorize_module(vectorized_model, vectorization_specs)
-    vectorized = VectorizedModel(vectorized_model)
+    vectorized = VectorizedModel(vectorized_model, mesh=model_to_vectorize.mesh)
     object.__setattr__(vectorized, '_vector_axes', list(v_axes.items()))
     return vectorized
 
@@ -311,7 +335,7 @@ class VectorizedModel(Model):
         axes_to_vectorize,
         custom_spmd_axis_names,
         custom_axis_names,
-        None if custom_names else getattr(self.vectorized_model, 'mesh', None),
+        None if custom_names else self.vectorized_model.mesh,
     )
     return vectorized_fn(self.vectorized_model, *args)
 
@@ -595,6 +619,10 @@ class InferenceModel:
       cls, model: Model, fiddle_config: fdl.Config[Model] | None = None
   ) -> InferenceModel:
     """Constructs InferenceModel from Model instance."""
+    if fiddle_config is not None:
+      fiddle_config = parallelism.update_mesh_properties(
+          fiddle_config, mesh=None
+      )
     if model.fiddle_config is not None and fiddle_config is not None:
       if model.fiddle_config != fiddle_config:
         raise ValueError(

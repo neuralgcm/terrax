@@ -384,16 +384,19 @@ def reconstruct_1d_field_from_ref_values(
     get_tick_fn: Callable[[cx.Coordinate], cx.Field] = _default_get_ticks,
 ) -> cx.Field:
   """Reconstructs 1D Field via interpolation of reference values."""
-  ticks = get_tick_fn(axis).data
-  if interpolation_space == 'log':
-    log_values = np.interp(ticks, ref_ticks, np.log(ref_values))  # pyrefly: ignore[no-matching-overload]
-    values = np.exp(log_values)
-  elif interpolation_space == 'sqrt':
-    values = np.square(np.interp(ticks, ref_ticks, np.sqrt(ref_values)))  # pyrefly: ignore[no-matching-overload]
-  elif interpolation_space == 'square':
-    values = np.sqrt(np.interp(ticks, ref_ticks, np.square(ref_values)))  # pyrefly: ignore[no-matching-overload]
-  elif interpolation_space == 'linear':
-    values = np.interp(ticks, ref_ticks, ref_values)  # pyrefly: ignore[no-matching-overload]
-  else:
-    raise ValueError(f'Unsupported interpolation space: {interpolation_space}')
-  return cx.field(values, axis)
+  with jax.ensure_compile_time_eval():
+    ticks = get_tick_fn(axis).data
+    if interpolation_space == 'log':
+      log_values = np.interp(ticks, ref_ticks, np.log(ref_values))  # pyrefly: ignore[no-matching-overload]
+      values = np.exp(log_values)
+    elif interpolation_space == 'sqrt':
+      values = np.square(np.interp(ticks, ref_ticks, np.sqrt(ref_values)))  # pyrefly: ignore[no-matching-overload]
+    elif interpolation_space == 'square':
+      values = np.sqrt(np.interp(ticks, ref_ticks, np.square(ref_values)))  # pyrefly: ignore[no-matching-overload]
+    elif interpolation_space == 'linear':
+      values = np.interp(ticks, ref_ticks, ref_values)  # pyrefly: ignore[no-matching-overload]
+    else:
+      raise ValueError(
+          f'Unsupported interpolation space: {interpolation_space}'
+      )
+    return cx.field(values, axis)

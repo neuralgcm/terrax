@@ -23,6 +23,7 @@ import coordax as cx
 from fiddle.experimental import auto_config
 from flax import nnx
 import jax
+import numpy as np
 from terrax.core import api
 from terrax.core import checkpointing
 from terrax.core import coordinates
@@ -32,8 +33,17 @@ from terrax.core import random_processes
 class MockModel(api.Model):
   """Mock Model for testing."""
 
-  def __init__(self, grid: cx.Coordinate, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      grid: cx.Coordinate,
+      rngs: nnx.Rngs,
+      host_numpy_in_init: bool = False,
+  ):
     super().__init__()
+    if host_numpy_in_init:
+      # Simulates host-side NumPy conversion on a JAX array derived from rngs,
+      # which raises TracerArrayConversionError when traced under nnx.jit.
+      _ = np.asarray(jax.random.uniform(rngs(), (4,)))
     self.process = random_processes.UniformUncorrelated.construct(
         coord=grid,
         minval=0.0,
@@ -57,10 +67,10 @@ class MockModel(api.Model):
 
 
 @auto_config.auto_config
-def build_model():
+def build_model(host_numpy_in_init: bool = False):
   rngs = nnx.Rngs(0)
   grid = coordinates.LonLatGrid.T21()
-  model = MockModel(grid, rngs)
+  model = MockModel(grid, rngs, host_numpy_in_init=host_numpy_in_init)
   return model
 
 
@@ -81,6 +91,22 @@ class CheckpointingTest(parameterized.TestCase):
     expected_model_params = nnx.state(model)
     chex.assert_trees_all_equal(restored_model_params, expected_model_params)
     self.assertEqual(model_cfg, restored_model.fiddle_config)
+
+  def test_eager_build_and_load_roundtrip(self):
+    if 'GITHUB_ACTIONS' in os.environ:
+      self.skipTest(
+          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
+          'serialization.'
+      )
+    path = os.path.join(self.create_tempdir(), 'eager_checkpoint')
+    model_cfg = build_model.as_buildable(host_numpy_in_init=True)
+    with self.assertRaises(jax.errors.TracerArrayConversionError):
+      api.Model.from_fiddle_config(model_cfg, eager=False)
+
+    model = api.Model.from_fiddle_config(model_cfg, eager=True)
+    checkpointing.save_checkpoint(model, path)
+    restored_model = checkpointing.load_model_checkpoint(path, eager=True)
+    chex.assert_trees_all_equal(nnx.state(restored_model), nnx.state(model))
 
   def test_without_paths(self):
     serialized = {

@@ -594,6 +594,22 @@ class Reconstruct1dFieldFromRefValuesTest(parameterized.TestCase):
           interpolation_space='bad_space',
       )
 
+  def test_works_under_jit_with_field_get_tick_fn(self):
+    axis = cx.LabeledAxis('x', np.array([0.0, 0.5, 1.0]))
+
+    @jax.jit
+    def build_field():
+      return field_utils.reconstruct_1d_field_from_ref_values(
+          axis,
+          ref_ticks=[0.0, 100.0],
+          ref_values=[1.0, 3.0],
+          get_tick_fn=lambda c: c.fields['x'] * 100.0,
+      )
+
+    actual = build_field()
+    expected = cx.field(np.array([1.0, 2.0, 3.0], dtype=np.float32), axis)
+    chex.assert_trees_all_close(actual, expected)
+
 
 class EnsurePositionalAxisIdxTest(parameterized.TestCase):
   """Tests ensure_positional_axis_idx utility function."""

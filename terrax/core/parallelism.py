@@ -16,17 +16,19 @@
 from __future__ import annotations
 
 import collections
+from collections.abc import Mapping, Sequence
 import contextvars
 import copy
 import dataclasses
 import math
-from typing import Self, Type, TypeGuard
+from typing import Any, Self, TypeAlias
 
 import coordax as cx
 import einops
 import fiddle as fdl
 from fiddle import selectors
 from fiddle import tagging
+from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -70,10 +72,12 @@ FieldPartitions = dict[Schema, DimPartitions]
 
 
 def get_partition_spec(
-    dims: tuple[str, ...], dim_partitions: DimPartitions
+    dims: tuple[str | None, ...], dim_partitions: DimPartitions
 ) -> P:
   """Returns partition spec for `field`."""
-  return P(*[dim_partitions.get(d, None) for d in dims])
+  return P(
+      *[dim_partitions.get(d, None) if d is not None else None for d in dims]
+  )
 
 
 @jax.tree_util.register_static
@@ -250,6 +254,7 @@ class Mesh:
         self.spmd_mesh,
         array_partitions_hashable,
         field_partitions_hashable,
+        self.memory_kind,
     ))
 
   def _validate_partitions(self):
@@ -329,6 +334,36 @@ class Mesh:
         leaves.append(self._with_sharding_constraint_array(x, schema))
     return jax.tree.unflatten(tree_def, leaves)
 
+  def get_sharding(
+      self,
+      dims: tuple[str | None, ...],
+      schema: Schema | None = None,
+  ) -> jax.sharding.NamedSharding | None:
+    """Returns `NamedSharding` for field with `dims` using sharding `schema`.
+
+    Args:
+      dims: Dimension names of a `cx.Field`.
+      schema: Partitioning schema name in `self.field_partitions`, or `None` for
+        replicated (`PartitionSpec()`).
+
+    Returns:
+      The resolved `NamedSharding`, or `None` if `self.spmd_mesh` is `None`.
+    """
+    if self.spmd_mesh is None:
+      return None
+    if schema is None:
+      pspec = P()
+    else:
+      if schema not in self.field_partitions:
+        raise ValueError(
+            f'Schema {schema!r} not found in field_partitions.'
+            f' Available schemas: {list(self.field_partitions.keys())}'
+        )
+      pspec = get_partition_spec(dims, self.field_partitions[schema])
+    return jax.sharding.NamedSharding(
+        self.spmd_mesh, pspec, memory_kind=self.memory_kind
+    )
+
   def _with_sharding_constraint_array(
       self, array: jax.Array, schema: str
   ) -> jax.Array:
@@ -347,15 +382,6 @@ class Mesh:
     )
     return jax.lax.with_sharding_constraint(array, sharding)
 
-  def _get_named_sharding(
-      self, dims: tuple[str, ...], schema: str
-  ) -> jax.sharding.NamedSharding:
-    dim_partitions = self.field_partitions[schema]
-    p_specs = get_partition_spec(dims, dim_partitions)
-    return jax.sharding.NamedSharding(
-        self.spmd_mesh, p_specs, memory_kind=self.memory_kind  # pyrefly: ignore[bad-argument-type]
-    )
-
   def _with_sharding_constraint_field(
       self, field: cx.Field, schema: str
   ) -> cx.Field:
@@ -368,8 +394,8 @@ class Mesh:
     Returns:
       Field with sharding constraint applied.
     """
-    sharding = self._get_named_sharding(field.dims, schema)  # pyrefly: ignore[bad-argument-type]
-    return jax.lax.with_sharding_constraint(field, sharding)
+    sharding = self.get_sharding(field.dims, schema)
+    return jax.lax.with_sharding_constraint(field, sharding)  # pyrefly: ignore[bad-argument-type]
 
   def unshard(
       self, field_shards: dict[jax.Device, cx.Field], schema: str
@@ -387,7 +413,8 @@ class Mesh:
     """
 
     example_field = next(iter(field_shards.values()))
-    sharding = self._get_named_sharding(example_field.dims, schema)  # pyrefly: ignore[bad-argument-type]
+    sharding = self.get_sharding(example_field.dims, schema)
+    assert sharding is not None
 
     coord = cx.get_coordinate(example_field)
     unsharded_coord = get_unsharded(coord)
@@ -500,78 +527,294 @@ def with_physics_to_dycore_sharding(
 
 
 #
-# Helper functions for updating Fiddle configs with new parallelism options.
+# Helper functions for updating model state and Fiddle configs with Mesh.
 #
 
 
-MeshType = Type[Mesh]
-TagOrMeshType = tagging.TagType | MeshType
+def _apply_leaf_sharding(
+    x: Any,
+    sharding: jax.sharding.NamedSharding | None,
+) -> Any:
+  """Applies `sharding` to a single array leaf `x`."""
+  # Inside JIT-compiled functions, leaves are abstract Tracers that cannot be
+  # copied to host via `jax.device_get` or have concrete sharding inspected;
+  # sharding is instead constrained symbolically via `with_sharding_constraint`.
+  if isinstance(x, jax.core.Tracer):
+    arr = jnp.asarray(x)
+    return (
+        jax.lax.with_sharding_constraint(arr, sharding)
+        if sharding is not None
+        else arr
+    )
+  if sharding is None:
+    if isinstance(x, jax.Array):
+      if not x.is_fully_addressable and not x.is_fully_replicated:
+        x = jax.lax.with_sharding_constraint(
+            x, x.sharding.update(spec=P())  # pyrefly: ignore[missing-attribute]
+        )
+      x = jax.device_get(x)
+    return jnp.asarray(x)
+  if isinstance(x, jax.Array):
+    if x.sharding == sharding:
+      return x
+    # In eager mode, `with_sharding_constraint` requires the input array to be
+    # uncommitted or on the same device set as `sharding`. Moving `x` to host
+    # first allows resharding across different device sets (e.g., from a single
+    # device to a multi-device mesh).
+    if isinstance(sharding.mesh, jax.sharding.AbstractMesh) or (
+        x.sharding.device_set != sharding.device_set
+    ):
+      x = jax.device_get(x)
+  return jax.lax.with_sharding_constraint(jnp.asarray(x), sharding)
+
+
+def _find_unique_module_mesh(module: nnx.Module) -> Mesh | None:
+  """Returns the unique `Mesh` attribute on `module`, or `None` if absent."""
+  meshes = {v for v in vars(module).values() if isinstance(v, Mesh)}
+  if len(meshes) > 1:
+    raise ValueError(
+        f'Module {type(module).__name__} defines multiple distinct Mesh '
+        f'attributes: {meshes}.'
+    )
+  return next(iter(meshes)) if meshes else None
+
+
+def _nearest_enclosing_mesh(
+    path: tuple[Any, ...],
+    meshes_by_path: Mapping[tuple[Any, ...], Mesh],
+    default: Mesh | None = None,
+) -> Mesh | None:
+  """Returns the `Mesh` of the nearest module enclosing `path`, or `default`."""
+  for depth in reversed(range(len(path))):  # `path[:0] == ()` is the root.
+    if (mesh := meshes_by_path.get(path[:depth])) is not None:
+      return mesh
+  return default
+
+
+class _UseModuleMesh:
+  """Sentinel indicating that module should use its own `Mesh` attribute."""
+
+
+USE_MODULE_MESH = _UseModuleMesh()
+
+
+def _shard_variable(
+    var: nnx.Variable,
+    mesh: Mesh | None,
+    *,
+    use_context_mesh: bool = True,
+    sim_state_partition_schema: str | None = None,
+    param_partition_schema: str | None = None,
+    param_partition_spec: P | None = None,
+    check_no_conflict: bool = False,
+) -> nnx.Variable:
+  """Returns a copy of `var` with sharding constraints applied to its value."""
+  metadata = var.get_metadata()
+  meta_field_schema = metadata.get('field_partitions')
+  is_sim_var = isinstance(var, typing.SimulationVariable)
+
+  requested_schema = (
+      sim_state_partition_schema if is_sim_var else param_partition_schema
+  )
+  if requested_schema is not None:
+    if (
+        check_no_conflict
+        and meta_field_schema is not None
+        and meta_field_schema != requested_schema
+    ):
+      raise ValueError(
+          f'Variable has field_partitions={meta_field_schema!r}, which '
+          f'conflicts with requested schema {requested_schema!r}.'
+      )
+    field_schema = requested_schema
+  else:
+    field_schema = meta_field_schema
+
+  var_pspec = nnx.get_partition_spec(var).get_raw_value() or P()
+  if param_partition_spec is not None:
+    if (
+        check_no_conflict
+        and var_pspec != P()
+        and var_pspec != param_partition_spec
+    ):
+      raise ValueError(
+          f'Variable has partition spec {var_pspec}, which conflicts with '
+          f'param_partition_spec={param_partition_spec}.'
+      )
+    pspec = param_partition_spec
+  else:
+    pspec = var_pspec
+
+  # Resolve sharding for non-`cx.Field` array leaves, using `mesh.spmd_mesh`
+  # first and falling back to NNX variable metadata or ambient JAX mesh when no
+  # explicit `mesh` override is provided.
+  if mesh is not None and mesh.spmd_mesh is not None:
+    array_sharding = jax.sharding.NamedSharding(
+        mesh.spmd_mesh, pspec, memory_kind=mesh.memory_kind
+    )
+  elif use_context_mesh and metadata.get('mesh') is not None:
+    array_sharding = jax.sharding.NamedSharding(metadata['mesh'], pspec)
+  elif use_context_mesh and not jax.sharding.get_abstract_mesh().empty:
+    array_sharding = jax.sharding.NamedSharding(
+        jax.sharding.get_abstract_mesh(), pspec
+    )
+  else:
+    array_sharding = None
+
+  def _shard_item(item: Any) -> Any:
+    if cx.is_field(item):
+      sharding = (
+          mesh.get_sharding(item.dims, field_schema)
+          if mesh is not None
+          else None
+      )
+      return jax.tree.map(lambda x: _apply_leaf_sharding(x, sharding), item)
+    if meta_field_schema is not None:
+      raise ValueError(
+          '`field_partitions` metadata requires `cx.Field` values, '
+          f'got {type(item)}.'
+      )
+    return jax.tree.map(lambda x: _apply_leaf_sharding(x, array_sharding), item)
+
+  sharded_val = jax.tree.map(_shard_item, var.get_value(), is_leaf=cx.is_field)
+  return var.replace(sharded_val)
+
+
+def shard_module_states(
+    module: nnx.Module,
+    mesh: Mesh | None | _UseModuleMesh = USE_MODULE_MESH,
+    *,
+    fallback_mesh: Mesh | None = None,
+    sim_state_partition_schema: str | None = None,
+    param_partition_schema: str | None = None,
+    param_partition_spec: P | None = None,
+    check_no_conflict: bool = False,
+    filter: nnx.filterlib.Filter = ...,  # pylint: disable=redefined-builtin
+) -> nnx.State:
+  """Returns `nnx.state(module)` with sharding constraints applied.
+
+  By default each `nnx.Variable` is sharded with the `Mesh` attribute of its
+  nearest enclosing module: the module that owns it, or else the closest
+  ancestor module defining a `Mesh`. Generic layers (e.g. `nnx.Linear`) and
+  containers (e.g. `nnx.Dict`) hence inherit the `Mesh` of the component they
+  belong to. `fallback_mesh` is used only when no enclosing module, including
+  `module` itself, defines a `Mesh`. An explicit `mesh` overrides all module
+  `Mesh` attributes; `mesh=None` (or a `Mesh` with `spmd_mesh=None`) unshards
+  all state arrays onto the local default device.
+
+  Variables are sharded as follows:
+    - `typing.SimulationVariable`s wrapping `cx.Field`s use
+      `sim_state_partition_schema`.
+    - `cx.Field` parameters use `param_partition_schema`.
+    - Array-valued variables (`nnx.Param`, etc.) use `param_partition_spec`.
+  For each of these, `None` (the default) uses the sharding configuration from
+  variable metadata (`field_partitions` or `out_sharding`) if present, and
+  defaults to replication (`PartitionSpec()`) otherwise.
+
+  Args:
+    module: `nnx.Module` whose state variables should be sharded.
+    mesh: Optional `parallelism.Mesh` (or `None` to unshard onto a single local
+      device) overriding all module `Mesh` attributes. Defaults to using the
+      `Mesh` of each variable's nearest enclosing module.
+    fallback_mesh: `parallelism.Mesh` used for variables without a `Mesh` on
+      any enclosing module. If `None`, such variables raise a `ValueError`.
+    sim_state_partition_schema: Directive field partition schema name in
+      `mesh.field_partitions` for `typing.SimulationVariable`s, or `None` to
+      use variable metadata / replicate.
+    param_partition_schema: Directive field partition schema name in
+      `mesh.field_partitions` for `cx.Field` parameters, or `None` to use
+      variable metadata / replicate.
+    param_partition_spec: Directive `PartitionSpec` for non-`cx.Field` array
+      variables (`nnx.Param`, etc.), or `None` to use variable metadata /
+      replicate with `PartitionSpec()`.
+    check_no_conflict: If `True`, raises `ValueError` when an explicit directive
+      (`sim_state_partition_schema`, `param_partition_schema`, or
+      `param_partition_spec`) conflicts with non-empty variable metadata.
+    filter: Optional NNX filter passed to `nnx.state(module, filter)` to select
+      which state variables to shard. Defaults to `...` (all variables).
+
+  Returns:
+    Sharded `nnx.State` suitable for updating `module` via
+    `nnx.update(module, parallelism.shard_module_states(module, ...))`.
+  """
+  use_module_mesh = isinstance(mesh, _UseModuleMesh)
+  meshes_by_path = {}
+  if use_module_mesh:
+    meshes_by_path = {
+        path: module_mesh
+        for path, submodule in nnx.iter_modules(module)
+        if (module_mesh := _find_unique_module_mesh(submodule)) is not None
+    }
+
+  def _shard_path_var(path: tuple[Any, ...], var: nnx.Variable) -> nnx.Variable:
+    if use_module_mesh:
+      target_mesh = _nearest_enclosing_mesh(path, meshes_by_path, fallback_mesh)
+      if target_mesh is None:
+        raise ValueError(
+            f'No module enclosing the variable at path {path} defines a `Mesh`'
+            ' attribute and no `fallback_mesh` was provided.'
+        )
+    else:
+      target_mesh = mesh
+    return _shard_variable(
+        var,
+        target_mesh,
+        use_context_mesh=use_module_mesh,
+        sim_state_partition_schema=sim_state_partition_schema,
+        param_partition_schema=param_partition_schema,
+        param_partition_spec=param_partition_spec,
+        check_no_conflict=check_no_conflict,
+    )
+
+  return nnx.map_state(_shard_path_var, nnx.state(module, filter))
+
+
+MeshUpdates: TypeAlias = Mesh | None | Mapping[tagging.TagType, Mesh | None]
 
 
 def update_mesh_properties(
     fiddle_config: fdl.Config,
-    spmd_mesh_updates: (
-        dict[TagOrMeshType, jax.sharding.Mesh | None] | None
-    ) = None,
-    array_partitions_updates: (
-        dict[TagOrMeshType, ArrayPartitions] | None
-    ) = None,
-    field_partitions_updates: (
-        dict[TagOrMeshType, FieldPartitions] | None
-    ) = None,
+    mesh: MeshUpdates = None,
+    attrs_to_update: Sequence[str] = ('spmd_mesh',),
 ) -> fdl.Config:
-  """Returns a copy of the Fiddle config with updated mesh properties.
+  """Returns a copy of `fiddle_config` with updated `Mesh` properties.
 
   Args:
-    fiddle_config: input configuration that will be copied and updated.
-    spmd_mesh_updates: mapping indicating how to update `spmd_mesh` attributes
-      on Mesh configurations in `fiddle_config`. Keys specify the selector of
-      Mesh objects either via tags or mesh types and values indicate the jax
-      sharding mesh to use for the `spmd_mesh` attribute.
-    array_partitions_updates: same as `spmd_mesh_updates` but for
-      `array_partitions` attribute.
-    field_partitions_updates: same as `spmd_mesh_updates` but for
-      `field_partitions` attribute.
+    fiddle_config: Input configuration that will be copied and updated.
+    mesh: Reference `Mesh` whose `attrs_to_update` attributes are copied onto
+      all `Mesh` configs in `fiddle_config`, or a mapping from Fiddle tags to
+      reference meshes applied only to the `Mesh` configs carrying that tag. A
+      `None` reference unsets `attrs_to_update`, restoring `Mesh` defaults.
+    attrs_to_update: Names of `Mesh` attributes to update, applied uniformly to
+      all selected `Mesh` configs; call repeatedly to update differently tagged
+      meshes with different attributes. Defaults to `('spmd_mesh',)`, which
+      updates the device mesh while preserving the partition schemas configured
+      in `fiddle_config`.
 
   Returns:
-    A copy of `fiddle_config` with updated mesh properties.
+    A copy of `fiddle_config` with updated `Mesh` properties.
   """
-  # Update spmd_mesh via selectors of tags or mesh subclasses.
-  spmd_mesh_updates = spmd_mesh_updates or {}
-  array_partitions_updates = array_partitions_updates or {}
-  field_partitions_updates = field_partitions_updates or {}
-
-  def _is_tag(key: TagOrMeshType) -> TypeGuard[tagging.TagType]:
-    return isinstance(key, fdl.Tag)
-
-  def _is_mesh(key: TagOrMeshType) -> TypeGuard[Type[Mesh]]:
-    return issubclass(key, Mesh)
-
+  mesh_attrs = {field.name for field in dataclasses.fields(Mesh)}
+  if unknown_attrs := set(attrs_to_update) - mesh_attrs:
+    raise ValueError(
+        f'Unsupported Mesh attributes {unknown_attrs}; expected a subset of'
+        f' {sorted(mesh_attrs)}.'
+    )
   fiddle_config = copy.deepcopy(fiddle_config)
-
-  for key, spmd_mesh in spmd_mesh_updates.items():
-    if _is_tag(key):
-      for mesh in selectors.select(fiddle_config, tag=key):
-        mesh.spmd_mesh = spmd_mesh
-    elif _is_mesh(key):
-      for mesh in selectors.select(fiddle_config, key):
-        mesh.spmd_mesh = spmd_mesh
-
-  # Update array_partitions via selectors of tags or mesh subclasses.
-  for key, partition in array_partitions_updates.items():
-    if _is_tag(key):
-      for mesh in selectors.select(fiddle_config, tag=key):
-        mesh.array_partitions = partition
-    elif _is_mesh(key):
-      for mesh in selectors.select(fiddle_config, key):
-        mesh.array_partitions = partition
-
-  # Update field_partitions via selectors of tags or mesh subclasses.
-  for key, partition in field_partitions_updates.items():
-    if _is_tag(key):
-      for mesh in selectors.select(fiddle_config, tag=key):
-        mesh.field_partitions = partition
-    elif _is_mesh(key):
-      for mesh in selectors.select(fiddle_config, key):
-        mesh.field_partitions = partition
+  if isinstance(mesh, Mapping):
+    updates = [
+        (selectors.select(fiddle_config, tag=tag), tagged_mesh)
+        for tag, tagged_mesh in mesh.items()
+    ]
+  else:
+    updates = [(selectors.select(fiddle_config, Mesh), mesh)]
+  for selection, reference_mesh in updates:
+    for mesh_cfg in selection:
+      for attr in attrs_to_update:
+        if reference_mesh is not None:
+          setattr(mesh_cfg, attr, getattr(reference_mesh, attr))
+        elif attr in mesh_cfg.__arguments__:
+          # Unset rather than assign `Mesh()` defaults: Fiddle compares an
+          # explicit `{}` as unequal to an unset `default_factory` argument.
+          delattr(mesh_cfg, attr)
   return fiddle_config

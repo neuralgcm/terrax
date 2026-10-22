@@ -26,7 +26,6 @@ import jax.numpy as jnp
 import numpy as np
 from terrax.core import typing
 
-
 # pylint: disable=logging-fstring-interpolation
 
 
@@ -297,15 +296,43 @@ def create_spmd_mesh(sizes: dict[str, int]) -> jax.sharding.Mesh:
 
 
 def ensure_replicated(pytree: PyTree, *, mesh: jax.sharding.Mesh) -> PyTree:
-  """Ensure that a pytree is replicated across all devices."""
+  """Ensures that `pytree` is replicated across `mesh`.
 
-  def replicate(x):
-    x = jnp.asarray(x)
-    spec = jax.sharding.PartitionSpec(*([None] * x.ndim))
-    sharding = jax.sharding.NamedSharding(mesh, spec)
-    return jax.lax.with_sharding_constraint(x, sharding)
+  Unsharded leaves (`SingleDeviceSharding`, host arrays, scalars, or JIT
+  tracers) are replicated onto `NamedSharding(mesh, PartitionSpec())`. If any
+  concrete `jax.Array` leaf carries a mismatched `NamedSharding`, a `ValueError`
+  is raised.
 
-  return jax.tree.map(replicate, pytree)
+  Args:
+    pytree: PyTree of arrays to replicate.
+    mesh: Target `jax.sharding.Mesh` across which `pytree` must be replicated.
+
+  Returns:
+    `pytree` with all array leaves replicated across `mesh`.
+  """
+  replicated_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec()
+  )
+
+  def _replicate_leaf(x):
+    sharding = getattr(x, 'sharding', None)
+    if sharding is not None:
+      if sharding == replicated_sharding:
+        return x
+      if isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        # In eager mode, `with_sharding_constraint` requires single-device
+        # arrays to be moved to host first before placing onto a multi-device
+        # mesh.
+        if sharding.device_set != replicated_sharding.device_set:
+          x = jax.device_get(x)
+        return jax.lax.with_sharding_constraint(x, replicated_sharding)
+      raise ValueError(
+          f'Expected unsharded or replicated sharding {replicated_sharding}, '
+          f'but got {sharding}.'
+      )
+    return jax.lax.with_sharding_constraint(jnp.asarray(x), replicated_sharding)
+
+  return jax.tree.map(_replicate_leaf, pytree)
 
 
 T = TypeVar('T')

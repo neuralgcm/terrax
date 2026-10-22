@@ -13,6 +13,7 @@
 # limitations under the License.
 """Helper utilities for checkpointing Fiddle configs used in Terrax."""
 
+from collections.abc import Sequence
 import dataclasses
 import json
 from typing import Any
@@ -21,7 +22,6 @@ from etils import epath
 import fiddle as fdl
 from fiddle.experimental import serialization
 from flax import nnx
-import jax
 import orbax.checkpoint as ocp
 from terrax.core import api
 from terrax.core import parallelism
@@ -74,15 +74,10 @@ _CONFIG_KEY = 'fiddle_config'
 
 def load_model_checkpoint(
     path: str | epath.PathLike,
-    spmd_mesh_updates: (
-        dict[parallelism.TagOrMeshType, jax.sharding.Mesh | None] | None
-    ) = None,
-    array_partitions_updates: (
-        dict[parallelism.TagOrMeshType, parallelism.ArrayPartitions] | None
-    ) = None,
-    field_partitions_updates: (
-        dict[parallelism.TagOrMeshType, parallelism.FieldPartitions] | None
-    ) = None,
+    mesh: parallelism.MeshUpdates = None,
+    attrs_to_update: Sequence[str] = ('spmd_mesh',),
+    *,
+    eager: bool = False,
 ) -> api.Model:
   """Loads a Model from a checkpoint."""
   checkpointer = ocp.Checkpointer(ocp.CompositeCheckpointHandler())
@@ -93,9 +88,9 @@ def load_model_checkpoint(
   model_config = serialization.load_json(json.dumps(model_config_dict))
   model = api.Model.from_fiddle_config(
       model_config,
-      spmd_mesh_updates=spmd_mesh_updates,
-      array_partitions_updates=array_partitions_updates,
-      field_partitions_updates=field_partitions_updates,
+      mesh=mesh,
+      attrs_to_update=attrs_to_update,
+      eager=eager,
   )
 
   # Set model parameters from checkpoint.
