@@ -14,9 +14,8 @@
 """Helper utilities for checkpointing Fiddle configs used in Terrax."""
 
 from collections.abc import Sequence
-import dataclasses
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 from etils import epath
 import fiddle as fdl
@@ -31,8 +30,7 @@ ParamInfo = ocp.type_handlers.ParamInfo
 Metadata = ocp.metadata.value.Metadata
 
 
-@dataclasses.dataclass(frozen=True)
-class _SplitState:
+class _SplitState(NamedTuple):
   params: nnx.State
   non_params: nnx.State
 
@@ -79,7 +77,24 @@ def load_model_checkpoint(
     *,
     eager: bool = False,
 ) -> api.Model:
-  """Loads a Model from a checkpoint."""
+  """Loads a Model from a checkpoint.
+
+  Args:
+    path: Path to the checkpoint directory.
+    mesh: Optional `parallelism.Mesh` (or mapping from tag types to `Mesh`
+      instances) specifying the device mesh and partition schemas to use when
+      constructing the model and restoring its parameters. If `None`, the model
+      and its parameters are loaded onto a single local device without sharding.
+    attrs_to_update: `Mesh` attribute names to copy from `mesh` into the saved
+      model config when `mesh` is provided. Defaults to `('spmd_mesh',)`, which
+      updates the device mesh while preserving partition schemas defined in the
+      checkpoint's config.
+    eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
+      `api.Model.from_fiddle_config`.
+
+  Returns:
+    The restored `api.Model` instance.
+  """
   checkpointer = ocp.Checkpointer(ocp.CompositeCheckpointHandler())
 
   # Create model from checkpoint metadata.
@@ -96,7 +111,10 @@ def load_model_checkpoint(
   # Set model parameters from checkpoint.
   state_tuple = split_model_state_for_saving(model)
   state = nnx.merge_state(state_tuple.params, state_tuple.non_params)
-  state_args = ocp.args.Composite(**{_STATE_KEY: ocp.args.PyTreeRestore(state)})
+  restore_args = ocp.checkpoint_utils.construct_restore_args(state)
+  state_args = ocp.args.Composite(
+      **{_STATE_KEY: ocp.args.PyTreeRestore(state, restore_args=restore_args)}
+  )
   restored = checkpointer.restore(path, state_args)[_STATE_KEY]
   nnx.update(model, restored)
   return model
@@ -106,16 +124,28 @@ def save_checkpoint(
     model: api.Model,
     path: str | epath.PathLike,
     fiddle_config: fdl.Config[api.Model] | None = None,
-):
-  """Saves model to a checkpoint."""
+) -> None:
+  """Saves a Model to a topology-independent checkpoint.
+
+  Both the serialized Fiddle configuration and the saved parameter arrays are
+  unsharded so the checkpoint can be loaded on any accelerator configuration
+  (including a single device).
+
+  Args:
+    model: Model instance to save.
+    path: Destination path for the checkpoint directory.
+    fiddle_config: Optional Fiddle configuration for `model`. Defaults to
+      `model.fiddle_config`.
+  """
   if fiddle_config is None:
     fiddle_config = model.fiddle_config
 
   if not isinstance(fiddle_config, fdl.Config):
     raise TypeError(f'must supply a fiddle.Config, got {fiddle_config=}')
 
-  state_tuple = split_model_state_for_saving(model)
-  state = nnx.merge_state(state_tuple.params, state_tuple.non_params)
+  fiddle_config = parallelism.update_mesh_properties(fiddle_config, mesh=None)
+  save_filter = nnx.Not((typing.SimulationVariable, typing.DynamicInput))
+  state = parallelism.shard_module_states(model, mesh=None, filter=save_filter)
   serialized_config = serialization.dump_json(fiddle_config)
   model_config_dict = without_paths(json.loads(serialized_config))
   args = ocp.args.Composite(**{

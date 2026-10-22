@@ -14,7 +14,6 @@
 """Utilities for checkpointing training runs."""
 
 from collections.abc import Sequence
-import copy
 import dataclasses
 import json
 from typing import Any
@@ -112,7 +111,22 @@ def untrained_model_from_training_dir(
     *,
     eager: bool = False,
 ) -> api.Model:
-  """Loads model without parameters."""
+  """Loads a Model from training directory metadata without restoring weights.
+
+  Args:
+    checkpoints_dir: Directory containing training checkpoints and metadata.
+    mesh: Optional `parallelism.Mesh` (or mapping from tag types to `Mesh`
+      instances) specifying the device mesh and partition schemas to use when
+      constructing the model. If `None`, builds the model with its saved
+      configuration (without sharding).
+    attrs_to_update: `Mesh` attribute names to copy from `mesh` into the saved
+      model config when `mesh` is provided. Defaults to `('spmd_mesh',)`.
+    eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
+      `api.Model.from_fiddle_config`.
+
+  Returns:
+    An initialized `api.Model` instance before checkpoint restoration.
+  """
   logging.info('loading model metadata')
   with read_only_manager(checkpoints_dir) as manager:
     model_config_dict = manager.metadata().custom_metadata[_MODEL_CONFIG_KEY]
@@ -138,7 +152,26 @@ def model_from_training_checkpoint(
     *,
     eager: bool = False,
 ) -> api.Model:
-  """Load a checkpoint into a Model."""
+  """Loads a Model and its parameters from a training checkpoint.
+
+  Args:
+    checkpoints_dir: Directory containing training checkpoints.
+    step: Training step to restore. If `None`, restores the latest step.
+    use_ema_params: Whether to restore EMA parameters (`ema_params`) or raw
+      parameters (`params`).
+    mesh: Optional `parallelism.Mesh` (or mapping from tag types to `Mesh`
+      instances) specifying the device mesh and partition schemas for the
+      restored model and parameters. If `None`, the model and its parameters are
+      loaded onto a single local device regardless of the accelerator topology
+      used during training.
+    attrs_to_update: `Mesh` attribute names to copy from `mesh` into the saved
+      model config when `mesh` is provided. Defaults to `('spmd_mesh',)`.
+    eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
+      `api.Model.from_fiddle_config`.
+
+  Returns:
+    The restored `api.Model` instance.
+  """
   logging.info(f'Loading checkpoint for step {step} from {checkpoints_dir}')
   model = untrained_model_from_training_dir(
       checkpoints_dir,
@@ -146,18 +179,16 @@ def model_from_training_checkpoint(
       attrs_to_update=attrs_to_update,
       eager=eager,
   )
-  abstract_state = model_checkpointing.split_model_state_for_saving(model)
+  state = model_checkpointing.split_model_state_for_saving(model)
 
   param_key = 'ema_params' if use_ema_params else 'params'
   restore_kwargs = {
       'metadata': ocp.args.JsonRestore(),
-      param_key: ocp.args.StandardRestore(abstract_state.params),
+      param_key: ocp.args.StandardRestore(state.params),
   }
-  has_non_params = bool(jax.tree.leaves(abstract_state.non_params))
+  has_non_params = bool(jax.tree.leaves(state.non_params))
   if has_non_params:
-    restore_kwargs['non_params'] = ocp.args.StandardRestore(
-        abstract_state.non_params
-    )
+    restore_kwargs['non_params'] = ocp.args.StandardRestore(state.non_params)
   restore_args = ocp.args.Composite(**restore_kwargs)
 
   with read_only_manager(checkpoints_dir) as manager:
@@ -183,7 +214,7 @@ def export_training_to_model_checkpoint(
     *,
     eager: bool = False,
 ) -> None:
-  """Load a training checkpoint and save it as a model checkpoint.
+  """Loads a training checkpoint and saves it as a standalone model checkpoint.
 
   Args:
     train_checkpoints_dir: The directory containing training checkpoints.
@@ -200,9 +231,4 @@ def export_training_to_model_checkpoint(
       use_ema_params=use_ema_params,
       eager=eager,
   )
-  fiddle_config = copy.deepcopy(model.fiddle_config)
-  assert fiddle_config is not None
-  fiddle_config = parallelism.update_mesh_properties(fiddle_config, mesh=None)
-  model_checkpointing.save_checkpoint(
-      model, model_checkpoint_path, fiddle_config=fiddle_config
-  )
+  model_checkpointing.save_checkpoint(model, model_checkpoint_path)

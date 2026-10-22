@@ -41,6 +41,7 @@ from terrax.metrics import scaling
 from terrax.toy_model_examples import lorenz96
 from terrax.training import data_loading
 from terrax.training import model_calibrators
+from terrax.training import train_utils
 from terrax.training import trainer
 
 
@@ -1041,6 +1042,42 @@ class TrainerTest(parameterized.TestCase):
       self.assertNotAlmostEqual(
           float(model.forcing.get_value()), source_forcing
       )
+
+  def test_ensure_replicated(self):
+    mesh = jax.sharding.Mesh(jax.devices()[:1], ('batch',))
+    replicated_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+
+    with self.subTest('replicates_unsharded_leaves'):
+      state = {'w': nnx.Param(jnp.ones((2, 2)))}
+      replicated = train_utils.ensure_replicated(state, mesh=mesh)
+      self.assertEqual(
+          replicated['w'].get_value().sharding, replicated_sharding
+      )
+
+    with self.subTest('raises_on_sharded_array'):
+      sharded_arr = jax.device_put(
+          jnp.ones((2, 2)),
+          jax.sharding.NamedSharding(
+              mesh, jax.sharding.PartitionSpec('batch', None)
+          ),
+      )
+      with self.assertRaisesRegex(
+          ValueError, 'Expected unsharded or replicated sharding'
+      ):
+        train_utils.ensure_replicated({'w': sharded_arr}, mesh=mesh)
+
+    with self.subTest('raises_on_mismatched_named_sharding'):
+      other_mesh = jax.sharding.Mesh(jax.devices()[:1], ('other_axis',))
+      other_sharding = jax.sharding.NamedSharding(
+          other_mesh, jax.sharding.PartitionSpec()
+      )
+      mismatched_arr = jax.device_put(jnp.ones((2, 2)), other_sharding)
+      with self.assertRaisesRegex(
+          ValueError, 'Expected unsharded or replicated sharding'
+      ):
+        train_utils.ensure_replicated({'w': mismatched_arr}, mesh=mesh)
 
 
 if __name__ == '__main__':

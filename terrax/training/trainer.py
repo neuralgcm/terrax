@@ -864,6 +864,7 @@ class RolloutTrainer:
 
     # Validating compatibility of the data loader with the model.
     assert isinstance(self.model, api.Model)
+    self._shard_model_state()
     for stage in self.train_schedule.stages:
       try:
         data_specs.validate_inputs(stage.inputs_spec, self.model.inputs_spec)
@@ -1139,6 +1140,9 @@ class RolloutTrainer:
       self, init_params, non_params
   ) -> ExperimentState:
     """Makes initial parameters and optimizer state for the experiment."""
+    init_params, non_params = train_utils.ensure_replicated(
+        (init_params, non_params), mesh=self.spmd_mesh
+    )
 
     @jax.jit
     def init():
@@ -2169,13 +2173,30 @@ class RolloutTrainer:
         metadata=self.checkpoint_config.metadata,
     )
 
+  def _shard_model_state(self) -> None:
+    """Applies training sharding constraints to `self.model`."""
+    nnx.update(
+        self.model,
+        parallelism.shard_module_states(
+            self.model,
+            mesh=self.training_mesh,
+            sim_state_partition_schema='physics',
+            param_partition_spec=jax.sharding.PartitionSpec(),
+            check_no_conflict=True,
+        ),
+    )
+
   def _run_calibrators(self, *, run_on_restore: bool) -> None:
     """Runs calibrators with matching `run_on_restore` on `self.model`."""
+    ran_calibrator = False
     for calibrator in self.calibration_modules or ():
       if calibrator.run_on_restore == run_on_restore:
         self.model = calibrator(  # pyrefly: ignore[bad-assignment]
             self.model, self.data_loader, self.train_schedule
         )
+        ran_calibrator = True
+    if ran_calibrator:
+      self._shard_model_state()
 
   def _restore_checkpoint(
       self,

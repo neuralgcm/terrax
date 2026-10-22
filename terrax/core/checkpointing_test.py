@@ -27,6 +27,7 @@ import numpy as np
 from terrax.core import api
 from terrax.core import checkpointing
 from terrax.core import coordinates
+from terrax.core import parallelism
 from terrax.core import random_processes
 
 
@@ -37,9 +38,10 @@ class MockModel(api.Model):
       self,
       grid: cx.Coordinate,
       rngs: nnx.Rngs,
+      mesh: parallelism.Mesh = parallelism.default_mesh(),
       host_numpy_in_init: bool = False,
   ):
-    super().__init__()
+    super().__init__(mesh=mesh)
     if host_numpy_in_init:
       # Simulates host-side NumPy conversion on a JAX array derived from rngs,
       # which raises TracerArrayConversionError when traced under nnx.jit.
@@ -70,7 +72,10 @@ class MockModel(api.Model):
 def build_model(host_numpy_in_init: bool = False):
   rngs = nnx.Rngs(0)
   grid = coordinates.LonLatGrid.T21()
-  model = MockModel(grid, rngs, host_numpy_in_init=host_numpy_in_init)
+  mesh = parallelism.Mesh()
+  model = MockModel(
+      grid, rngs, mesh=mesh, host_numpy_in_init=host_numpy_in_init
+  )
   return model
 
 
@@ -107,6 +112,57 @@ class CheckpointingTest(parameterized.TestCase):
     checkpointing.save_checkpoint(model, path)
     restored_model = checkpointing.load_model_checkpoint(path, eager=True)
     chex.assert_trees_all_equal(nnx.state(restored_model), nnx.state(model))
+
+  def test_save_and_load_with_spmd_mesh(self):
+    if 'GITHUB_ACTIONS' in os.environ:
+      self.skipTest(
+          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
+          'serialization.'
+      )
+    path = os.path.join(self.create_tempdir(), 'checkpoint')
+    model_cfg = build_model.as_buildable()
+    model_cfg.mesh.field_partitions = {'physics': {'longitude': 'batch'}}
+    spmd_mesh = jax.sharding.Mesh(jax.devices()[:1], ('batch',))
+    train_mesh = parallelism.Mesh(
+        spmd_mesh=spmd_mesh,
+        field_partitions={'physics': {'longitude': 'batch'}},
+    )
+    sharded_model = api.Model.from_fiddle_config(
+        model_cfg, mesh=parallelism.Mesh(spmd_mesh=spmd_mesh)
+    )
+    self.assertEqual(sharded_model.mesh, train_mesh)
+    self.assertEqual(sharded_model.fiddle_config, model_cfg)
+
+    checkpointing.save_checkpoint(sharded_model, path)
+
+    # Loading with mesh=None restores an unsharded single-device model while
+    # preserving partition schemas defined in the saved config.
+    unsharded_restored = checkpointing.load_model_checkpoint(path, mesh=None)
+    self.assertEqual(
+        unsharded_restored.mesh,
+        parallelism.Mesh(field_partitions={'physics': {'longitude': 'batch'}}),
+    )
+    self.assertEqual(unsharded_restored.fiddle_config, model_cfg)
+    single_device_sharding = jax.sharding.SingleDeviceSharding(
+        jax.local_devices()[0]
+    )
+    for leaf in jax.tree.leaves(
+        checkpointing.split_model_state_for_saving(unsharded_restored)
+    ):
+      self.assertEqual(leaf.sharding, single_device_sharding)
+
+    # Loading with an explicit parallelism.Mesh shards parameters onto that
+    # mesh.
+    target_mesh = parallelism.Mesh(spmd_mesh=spmd_mesh)
+    restored_model = checkpointing.load_model_checkpoint(path, mesh=target_mesh)
+    self.assertEqual(restored_model.mesh, train_mesh)
+    expected_sharding = jax.sharding.NamedSharding(
+        spmd_mesh, jax.sharding.PartitionSpec()
+    )
+    for leaf in jax.tree.leaves(
+        checkpointing.split_model_state_for_saving(restored_model)
+    ):
+      self.assertEqual(leaf.sharding, expected_sharding)
 
   def test_without_paths(self):
     serialized = {
