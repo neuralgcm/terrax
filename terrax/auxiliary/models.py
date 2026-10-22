@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Auxiliary models that facilitate extension of model prognostics."""
+"""Auxiliary models that facilitate extension of model prognostics.
+
+Note: `third_party/py/neuralgcm/coupled/auxiliary.py` is branched from this
+module while iterating on the `neuralgcm.base.model.Model` integration.
+"""
 
 import abc
 from typing import Literal
