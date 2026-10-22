@@ -115,6 +115,31 @@ class OrographyTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'does not match'):
       orography.update_from_xarray(dataset, sim_units=units.DEFAULT_UNITS)
 
+  def test_update_from_xarray_keeps_sharding(self):
+    grid = coordinates.LonLatGrid.T21()
+    spmd_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()).reshape((2, 4)), axis_names=['x', 'y']
+    )
+    sharding = jax.sharding.NamedSharding(
+        spmd_mesh, jax.sharding.PartitionSpec('x', 'y')
+    )
+    orography = orographies.Orography(grid=grid, rngs=nnx.Rngs(0))
+    orography.orography.set_value(
+        jax.device_put(orography.orography.get_value(), sharding)
+    )
+    sim_units = units.DEFAULT_UNITS
+    dataset = _dataset_on_grid(
+        'orography', np.full(grid.shape, 1.5), grid, units='km'
+    )
+
+    orography.update_from_xarray(dataset, sim_units=sim_units)
+
+    self.assertEqual(orography.orography.get_value().sharding, sharding)
+    expected = sim_units.nondimensionalize(1500 * scales.units.meter)
+    np.testing.assert_allclose(
+        orography.nodal_orography.data, expected, rtol=1e-6
+    )
+
 
 class ModalOrographyTest(parameterized.TestCase):
 

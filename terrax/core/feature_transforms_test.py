@@ -235,6 +235,29 @@ class FeatureTransformsTest(parameterized.TestCase):
     coord_features = feature_transforms.ParamFeatures(coords, rngs=nnx.Rngs(1))
     self._test_feature_module(coord_features, None)
 
+  def test_param_features_update_from_xarray_keeps_sharding(self):
+    grid = coordinates.LonLatGrid.T21()
+    sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(np.array(jax.devices()[:1]), ('x',)),
+        jax.sharding.PartitionSpec(),
+    )
+    param_features = feature_transforms.ParamFeatures(
+        {'land_sea_mask': grid}, rngs=nnx.Rngs(1)
+    )
+    feature = param_features.features['land_sea_mask']
+    feature.set_value(jax.device_put(feature.get_value(), sharding))
+    dataset = (
+        cx.field(np.ones(grid.shape), grid)
+        .to_xarray()
+        .assign_attrs(units='dimensionless')
+        .to_dataset(name='land_sea_mask')
+    )
+
+    param_features.update_from_xarray(dataset, sim_units=units.DEFAULT_UNITS)
+
+    np.testing.assert_array_equal(feature.get_value(), np.ones(grid.shape))
+    self.assertEqual(feature.get_value().sharding, sharding)
+
   @parameterized.named_parameters(
       dict(
           testcase_name='T21_grid',

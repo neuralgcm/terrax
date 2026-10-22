@@ -568,6 +568,35 @@ def _apply_leaf_sharding(
   return jax.lax.with_sharding_constraint(jnp.asarray(x), sharding)
 
 
+def shard_like(value: Any, like: Any) -> Any:
+  """Returns `value` with array leaves sharded like matching leaves of `like`.
+
+  Use this to update variables in place without changing their placement, e.g.
+  `var.set_value(shard_like(new_value, var.get_value()))`. Leaves of `like`
+  that are not `jax.Array`s with a `NamedSharding` (e.g. NumPy arrays, Python
+  scalars or single-device arrays) leave the matching leaves of `value`
+  unchanged.
+
+  Args:
+    value: Pytree of array leaves to shard.
+    like: Pytree with the same structure as `value` whose leaves provide the
+      target shardings.
+
+  Returns:
+    `value` with each array leaf placed with the sharding of the corresponding
+    leaf of `like`.
+  """
+
+  def _place(x: Any, reference: Any) -> Any:
+    if isinstance(reference, jax.Array) and isinstance(
+        reference.sharding, jax.sharding.NamedSharding
+    ):
+      return _apply_leaf_sharding(x, reference.sharding)
+    return x
+
+  return jax.tree.map(_place, value, like)
+
+
 def _find_unique_module_mesh(module: nnx.Module) -> Mesh | None:
   """Returns the unique `Mesh` attribute on `module`, or `None` if absent."""
   meshes = {v for v in vars(module).values() if isinstance(v, Mesh)}

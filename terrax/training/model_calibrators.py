@@ -21,15 +21,17 @@ from typing import Any, ClassVar, TypeAlias
 import coordax as cx
 from flax import nnx
 import jax
+from terrax.core import api
 from terrax.core import checkpointing
 from terrax.core import data_specs
 from terrax.core import module_utils
+from terrax.core import parallelism
 from terrax.core import transforms
 from terrax.training import checkpointing as training_checkpointing
 from terrax.training import data_loading
 import xarray
 
-Model: TypeAlias = nnx.Module  # Avoid circular import with api.py
+Model: TypeAlias = api.Model
 DataLoader: TypeAlias = data_loading.DataLoader
 TrainSchedule: TypeAlias = Any  # Avoid circular import with trainer.py
 
@@ -69,12 +71,58 @@ def _canonicalize_component_keys(
   return tuple(component_key)
 
 
+def _collect_all_node_paths(
+    root: Any, target_types: type[Any] | tuple[Any, ...]
+) -> dict[tuple[Any, ...], Any]:
+  """Returns a mapping from all alias paths to nodes matching `target_types`.
+
+  Unlike `nnx.iter_graph`, which yields each shared submodule only once at its
+  first-encountered path, this helper expands duplicate paths from
+  `nnx.find_duplicates` so that variables and submodules inside shared parent
+  modules are indexed under every valid path from `root`.
+
+  Args:
+    root: Root NNX module or pytree node to traverse.
+    target_types: Type or tuple of types to collect.
+
+  Returns:
+    Dictionary mapping each valid path tuple from `root` to the matching node.
+  """
+  all_paths = dict(nnx.iter_graph(root))
+  duplicate_groups = nnx.find_duplicates(root)
+  changed = True
+  while changed:
+    changed = False
+    for primary_path, *alias_paths in reversed(duplicate_groups):
+      n = len(primary_path)
+      entries = [
+          (path[n:], node)
+          for path, node in all_paths.items()
+          if path[:n] == primary_path
+      ]
+      for alias_path in alias_paths:
+        if alias_path[:n] == primary_path:
+          continue
+        for suffix, node in entries:
+          full_path = (*alias_path, *suffix)
+          if full_path not in all_paths:
+            all_paths[full_path] = node
+            changed = True
+  return {
+      path: node
+      for path, node in all_paths.items()
+      if isinstance(node, target_types)
+  }
+
+
 class ModelCalibrator(abc.ABC):
   """Abstract base class for model calibrators.
 
   Calibrators are expected to update existing model variables in place (e.g.
   via `set_value`) rather than add or replace variables, which would drop
-  metadata set by other calibrators (e.g. tags set by `SetVariableTags`).
+  metadata set by other calibrators (e.g. tags set by `SetVariableTags`), and
+  to keep the placement of updated values (see `parallelism.shard_like`) so
+  that calibration does not change the sharding of the model.
 
   `RolloutTrainer` runs calibrators in two groups, each in the listed order:
   calibrators with `run_on_restore=True` run when the trainer is constructed,
@@ -102,7 +150,15 @@ class ModelCalibrator(abc.ABC):
 
 @dataclasses.dataclass
 class UpdateSubmodulesFromXarray(ModelCalibrator):
-  """Updates submodules from Xarray datasets."""
+  """Updates submodules from Xarray datasets.
+
+  For each `(cls, suffix)` key in `update_specs`, calls
+  `module.update_from_xarray(dataset, **kwargs)` on every module of type `cls`
+  whose path from the model root ends with `suffix`, where any path of a shared
+  module counts. Implementations of `update_from_xarray` are expected to update
+  their variables in place and keep their placement, e.g. via
+  `var.set_value(parallelism.shard_like(value, var.get_value()))`.
+  """
 
   # pylint: disable=g-bare-generic
   update_specs: dict[tuple[type, str], xarray.Dataset]
@@ -118,35 +174,18 @@ class UpdateSubmodulesFromXarray(ModelCalibrator):
   ) -> Model:
     del data_loader, train_schedule  # Unused.
 
-    # Find duplicates to handle multiple paths to the same object.
-    duplicate_paths_groups = nnx.graph.find_duplicates(model)
-    # Maps a path string to a set of all equivalent path strings (aliases).
-    path_to_aliases = {}
-
     def path_to_str(path):
       return '.'.join(str(p) for p in path)
 
-    for group in duplicate_paths_groups:
-      # group is a list of paths (tuples of keys).
-      aliases = {path_to_str(path) for path in group}
-      for path in group:
-        path_to_aliases[path_to_str(path)] = aliases
-
     for (cls, suffix), dataset in self.update_specs.items():
-      modules, paths = module_utils.retrieve_subclass_modules(
-          model, cls, return_paths=True
-      )
-
-      updated = False
-      for module, path in zip(modules, paths):
-        full_path = path_to_str(path)
-        candidates = path_to_aliases.get(full_path, {full_path})
-
-        if any(candidate.endswith(suffix) for candidate in candidates):
+      path_to_module = _collect_all_node_paths(model, cls)
+      updated_ids = set()
+      for path, module in path_to_module.items():
+        if id(module) not in updated_ids and path_to_str(path).endswith(suffix):
           module.update_from_xarray(dataset, **self.kwargs)
-          updated = True
+          updated_ids.add(id(module))
 
-      if not updated and self.raise_on_no_update:
+      if not updated_ids and self.raise_on_no_update:
         raise ValueError(
             f'No module of type {cls} with suffix "{suffix}" found for update.'
         )
@@ -205,6 +244,7 @@ class CollectNormalizationStats(ModelCalibrator):
     rng = jax.random.key(self.rng_seed)
 
     def unroll_fn(model, inputs, dynamic_data, rng, queries):
+      model.reset_diagnostic_state()
       model.initialize_random_processes(cx.field(rng))
       model.update_dynamic_inputs(dynamic_data)
       model.assimilate(inputs)
@@ -239,16 +279,23 @@ class CollectNormalizationStats(ModelCalibrator):
       )
       jax.block_until_ready(result)
 
-    # Set update_stats to False to avoid updating stats during training.
+    # Set update_stats to False to avoid updating stats during training, and
+    # reset any diagnostic state accumulated during calibration steps.
     for stream_norm in stream_norms:
       stream_norm.update_stats = False
+    model.reset_diagnostic_state()
 
     return model
 
 
 @dataclasses.dataclass
 class LoadModelComponentParams(ModelCalibrator):
-  """Loads parameters for a specific model component from a checkpoint."""
+  """Loads parameters for a specific model component from a checkpoint.
+
+  The checkpoint model is materialized on the device mesh of `model` and loaded
+  values are placed like the parameters they replace, so the sharding of
+  `model` is unchanged.
+  """
 
   component_key: str | None
   ckpt_path_or_dir: str
@@ -264,58 +311,48 @@ class LoadModelComponentParams(ModelCalibrator):
       train_schedule: TrainSchedule,
   ) -> Model:
     del data_loader, train_schedule  # Unused.
-    # TODO(dkochkov): Consider if we need to provide spmd_mesh updates. For
-    # standard model parameters this should not be necessary, since we tend to
-    # store them in a non-padded format, but this might be safer or useful in
-    # other cases.
     if self.is_training_checkpoint:
       component = training_checkpointing.model_from_training_checkpoint(
-          checkpoints_dir=self.ckpt_path_or_dir, step=self.ckpt_step
+          checkpoints_dir=self.ckpt_path_or_dir,
+          step=self.ckpt_step,
+          mesh=model.mesh,
       )
     else:
       component = checkpointing.load_model_checkpoint(
-          path=self.ckpt_path_or_dir
+          path=self.ckpt_path_or_dir,
+          mesh=model.mesh,
       )
 
-    loaded_state = nnx.state(component, self.param_types)
     key = self.component_key
     to_update = _get_component(model, key)
-    target_state = nnx.state(to_update, self.param_types)
 
     if self.load_subset:
-      loaded_vars = {
-          path: node
-          for path, node in nnx.graph.iter_graph(component)
-          if isinstance(node, self.param_types)
-      }
-      # Expanding loaded_vars to include duplicate aliases.
-      for group in nnx.graph.find_duplicates(component):
-        canonical = next((p for p in group if p in loaded_vars), None)
-        if canonical is not None:
-          val = loaded_vars[canonical]
-          for p in group:
-            loaded_vars[p] = val
-      target_vars = {
-          path: node
-          for path, node in nnx.graph.iter_graph(to_update)
-          if isinstance(node, self.param_types)
-      }
-      # Expanding target_vars to include duplicate aliases symmetrically.
-      # This ensures that if module has extra references that affect the
-      # traversal order in `to_update`, we still identify such duplicates.
-      for group in nnx.graph.find_duplicates(to_update):
-        canonical = next((p for p in group if p in target_vars), None)
-        if canonical is not None:
-          val = target_vars[canonical]
-          for p in group:
-            target_vars[p] = val
-
-      common_keys = set(loaded_vars.keys()).intersection(target_vars.keys())
-      for path in common_keys:
-        target_vars[path].set_value(loaded_vars[path].get_value())
+      loaded_vars = _collect_all_node_paths(component, self.param_types)
+      target_vars = _collect_all_node_paths(to_update, self.param_types)
+      # Iterate in `to_update` traversal order so that a target variable that
+      # is shared between several paths deterministically takes the value at
+      # its first-visited path.
+      common_paths = [path for path in target_vars if path in loaded_vars]
+      if not common_paths:
+        raise ValueError(
+            f'No parameters of types {self.param_types} in checkpoint'
+            f' {self.ckpt_path_or_dir!r} match the structure of component'
+            f' {key!r}.'
+        )
+      updated_ids = set()
+      for path in common_paths:
+        target_var = target_vars[path]
+        if id(target_var) not in updated_ids:
+          loaded_value = loaded_vars[path].get_value()
+          target_var.set_value(
+              parallelism.shard_like(loaded_value, target_var.get_value())
+          )
+          updated_ids.add(id(target_var))
     else:
       # Compare and update using pure dicts of values so existing variable
       # metadata (e.g. tags set by `SetVariableTags`) is preserved.
+      loaded_state = nnx.state(component, self.param_types)
+      target_state = nnx.state(to_update, self.param_types)
       loaded_values = nnx.to_pure_dict(loaded_state)
       target_values = nnx.to_pure_dict(target_state)
       loaded_struct = jax.tree.structure(loaded_values)
@@ -326,7 +363,9 @@ class LoadModelComponentParams(ModelCalibrator):
             f'Loaded structure: {loaded_struct}\n'
             f'Target structure: {target_struct}'
         )
-      nnx.update(to_update, loaded_values)
+      nnx.update(
+          to_update, parallelism.shard_like(loaded_values, target_values)
+      )
     return model
 
 
@@ -349,7 +388,9 @@ class SetVariableTags(ModelCalibrator):
     component_key: Key(s) of model components whose variables are updated, see
       `_get_component`. If None, updates variables of the whole model.
     tag: Tag to set on matching variables. If None, removes existing tags.
-    variable_filter: Filter that selects variables to update.
+    variable_filter: Filter that selects variables to update. Path-based filters
+      are matched against all paths of a variable from the component, including
+      aliases through shared submodules.
     run_on_restore: True, since tags are not saved in checkpoints and hence need
       to be set whenever the trainer is constructed.
   """
@@ -369,17 +410,21 @@ class SetVariableTags(ModelCalibrator):
     is_selected = nnx.filterlib.to_predicate(self.variable_filter)
     for key in _canonicalize_component_keys(self.component_key):
       component = _get_component(model, key)
-      variables = [
-          node
-          for path, node in nnx.iter_graph(component)
-          if isinstance(node, nnx.Variable) and is_selected(path, node)
-      ]
+      # Index variables under all of their paths, so that path-based filters
+      # also match variables of shared submodules reached via secondary
+      # aliases. A variable is selected if any of its paths matches.
+      path_to_variable = _collect_all_node_paths(component, nnx.Variable)
+      variables = {
+          id(node): node
+          for path, node in path_to_variable.items()
+          if is_selected(path, node)
+      }
       if not variables:
         raise ValueError(
             f'No variables matching {self.variable_filter=} found for'
             f' component {key!r}.'
         )
-      for variable in variables:
+      for variable in variables.values():
         if self.tag is None:
           if variable.has_metadata('tag'):
             variable.del_metadata('tag')

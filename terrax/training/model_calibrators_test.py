@@ -15,7 +15,19 @@
 from unittest import mock
 
 from absl.testing import absltest
+import coordax as cx
 from flax import nnx
+import jax
+import jax.numpy as jnp
+import numpy as np
+import orbax.checkpoint as ocp
+from terrax.core import checkpointing as core_checkpointing
+from terrax.core import coordinates
+from terrax.core import parallelism
+from terrax.core import transforms
+from terrax.core import typing
+from terrax.core import units
+from terrax.training import checkpointing as training_checkpointing
 from terrax.training import model_calibrators
 import xarray
 
@@ -35,6 +47,7 @@ class MockModule(nnx.Module, pytree=False):
 class Model(nnx.Module, pytree=False):
 
   def __init__(self):
+    self.mesh = parallelism.default_mesh()
     self.submodule_a = MockModule()
     self.sub_dict = {'b': MockModule()}
     self.submodule_c = MockModule()
@@ -44,11 +57,17 @@ class Model(nnx.Module, pytree=False):
 class MockModelParams(nnx.Module):
   l1: nnx.Param = nnx.data(default_factory=lambda: nnx.Param(1.0))
   l2: nnx.Param = nnx.data(default_factory=lambda: nnx.Param(2.0))
+  mesh: parallelism.Mesh = nnx.static(
+      default_factory=parallelism.default_mesh, kw_only=True
+  )
 
 
 @nnx.dataclass
 class MockModelSubsetParams(nnx.Module):
   l1: nnx.Param = nnx.data(default_factory=lambda: nnx.Param(1.0))
+  mesh: parallelism.Mesh = nnx.static(
+      default_factory=parallelism.default_mesh, kw_only=True
+  )
 
 
 @nnx.dataclass
@@ -56,6 +75,9 @@ class MockLargeModel(nnx.Module):
   l1: nnx.Param = nnx.data(default_factory=lambda: nnx.Param(1.0))
   l2: nnx.Param = nnx.data(init=False)
   l3: nnx.Param = nnx.data(default_factory=lambda: nnx.Param(3.0))
+  mesh: parallelism.Mesh = nnx.static(
+      default_factory=parallelism.default_mesh, kw_only=True
+  )
 
   def __post_init__(self):
     self.l2 = self.l1  # l2 is an alias of l1
@@ -65,12 +87,16 @@ class ParentModel(nnx.Module):
   """Mock module for testing component update."""
 
   def __init__(self, val1=1.0, val2=2.0):
+    self.mesh = parallelism.default_mesh()
     self.my_component = MockModelParams(l1=nnx.Param(val1), l2=nnx.Param(val2))
 
 
 @nnx.dataclass
 class MockSmallModel(nnx.Module):
   l2: nnx.Param = nnx.data(default_factory=lambda: nnx.Param(0.0))
+  mesh: parallelism.Mesh = nnx.static(
+      default_factory=parallelism.default_mesh, kw_only=True
+  )
 
 
 class ModelCalibratorsTest(absltest.TestCase):
@@ -170,6 +196,36 @@ class ModelCalibratorsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'No module of type .* found'):
       calibrator(model, None, None)
 
+  def test_update_submodules_from_xarray_keeps_sharding(self):
+    grid = coordinates.LonLatGrid.T21()
+    sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(np.array(jax.devices()[:1]), ('x',)),
+        jax.sharding.PartitionSpec(),
+    )
+    mask = cx.field(jax.device_put(jnp.zeros(grid.shape), sharding), grid)
+
+    class ModelWithMask(nnx.Module):
+
+      def __init__(self):
+        self.mesh = parallelism.default_mesh()
+        self.mask = transforms.PrescribedFields({'land_sea_mask': mask})
+
+    model = ModelWithMask()
+    dataset = (
+        cx.field(np.ones(grid.shape), grid)
+        .to_xarray()
+        .assign_attrs(units='dimensionless')
+        .to_dataset(name='land_sea_mask')
+    )
+    model_calibrators.UpdateSubmodulesFromXarray(
+        {(transforms.PrescribedFields, 'mask'): dataset},
+        kwargs={'sim_units': units.DEFAULT_UNITS},
+    )(model, None, None)
+
+    updated = model.mask.prescribed_fields['land_sea_mask'].get_value()
+    np.testing.assert_array_equal(updated.data, np.ones(grid.shape))
+    self.assertEqual(updated.data.sharding, sharding)
+
   @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
   def test_load_model_component_params(self, mock_load):
     mock_load.return_value = MockModelParams(
@@ -186,7 +242,7 @@ class ModelCalibratorsTest(absltest.TestCase):
 
     self.assertEqual(model.l1.get_value(), 3.0)
     self.assertEqual(model.l2.get_value(), 4.0)
-    mock_load.assert_called_once_with(path='/dummy/path')
+    mock_load.assert_called_once_with(path='/dummy/path', mesh=model.mesh)
 
   @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
   def test_load_model_component_params_with_key(self, mock_load):
@@ -204,7 +260,7 @@ class ModelCalibratorsTest(absltest.TestCase):
 
     self.assertEqual(model.my_component.l1.get_value(), 3.0)
     self.assertEqual(model.my_component.l2.get_value(), 4.0)
-    mock_load.assert_called_once_with(path='/dummy/path')
+    mock_load.assert_called_once_with(path='/dummy/path', mesh=model.mesh)
 
   @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
   def test_load_model_component_params_subset(self, mock_load):
@@ -241,6 +297,79 @@ class ModelCalibratorsTest(absltest.TestCase):
         ValueError, 'Parameter structures do not match'
     ):
       calibrator(model, None, None)
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_subset_raises_on_no_common_params(
+      self, mock_load
+  ):
+
+    class Unrelated(nnx.Module):
+
+      def __init__(self):
+        self.mesh = parallelism.default_mesh()
+        self.other = nnx.Param(0.0)
+
+    mock_load.return_value = MockModelParams(
+        l1=nnx.Param(3.0), l2=nnx.Param(4.0)
+    )
+    calibrator = model_calibrators.LoadModelComponentParams(
+        component_key=None,
+        ckpt_path_or_dir='/dummy/path',
+        load_subset=True,
+    )
+
+    with self.assertRaisesRegex(ValueError, 'No parameters of types'):
+      calibrator(Unrelated(), None, None)
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_subset_shared_target_is_deterministic(
+      self, mock_load
+  ):
+    # `l1` and `l2` alias one variable in the target model but are distinct in
+    # the checkpoint; the first-visited target path (`l1`) provides the value.
+    mock_load.return_value = MockModelParams(
+        l1=nnx.Param(3.0), l2=nnx.Param(4.0)
+    )
+    model = MockLargeModel(l1=nnx.Param(0.0), l3=nnx.Param(0.0))
+
+    model_calibrators.LoadModelComponentParams(
+        component_key=None,
+        ckpt_path_or_dir='/dummy/path',
+        load_subset=True,
+    )(model, None, None)
+
+    self.assertEqual(model.l1.get_value(), 3.0)
+    self.assertEqual(model.l2.get_value(), 3.0)
+    self.assertEqual(model.l3.get_value(), 0.0)
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_keeps_target_sharding(self, mock_load):
+    device = np.array(jax.devices()[:1])
+    target_sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(device, ('target',)), jax.sharding.PartitionSpec()
+    )
+    loaded_sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(device, ('ckpt',)), jax.sharding.PartitionSpec()
+    )
+    place = lambda v, s: nnx.Param(jax.device_put(jnp.array(v), s))
+    mock_load.return_value = MockModelParams(
+        l1=place(3.0, loaded_sharding), l2=place(4.0, loaded_sharding)
+    )
+
+    for load_subset in (False, True):
+      with self.subTest(load_subset=load_subset):
+        model = MockModelParams(
+            l1=place(1.0, target_sharding), l2=place(2.0, target_sharding)
+        )
+        model_calibrators.LoadModelComponentParams(
+            component_key=None,
+            ckpt_path_or_dir='/dummy/path',
+            load_subset=load_subset,
+        )(model, None, None)
+
+        for param, expected in ((model.l1, 3.0), (model.l2, 4.0)):
+          self.assertEqual(float(param.get_value()), expected)
+          self.assertEqual(param.get_value().sharding, target_sharding)
 
   def test_set_variable_tags_and_clear(self):
     class CoupledParent(nnx.Module):
@@ -306,6 +435,34 @@ class ModelCalibratorsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'No variables matching'):
       calibrator(model, None, None)
 
+  def test_set_variable_tags_matches_path_filter_via_secondary_alias(self):
+
+    class SharedTower(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(1.0)
+
+    class ModelWithSharedTower(nnx.Module):
+
+      def __init__(self):
+        tower = SharedTower()
+        # `nnx.iter_graph` visits `a_first` before `z_frozen` and yields the
+        # shared tower's variables only under the `a_first` path.
+        self.a_first = tower
+        self.z_frozen = tower
+        self.other = SharedTower()
+
+    model = ModelWithSharedTower()
+    model_calibrators.SetVariableTags(
+        component_key=None,
+        tag='frozen',
+        variable_filter=nnx.All(nnx.Param, nnx.PathContains('z_frozen')),
+    )(model, None, None)
+
+    self.assertEqual(model.z_frozen.w.tag, 'frozen')
+    self.assertEqual(model.a_first.w.tag, 'frozen')  # Same variable.
+    self.assertFalse(model.other.w.has_metadata('tag'))
+
   @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
   def test_load_model_component_params_preserves_existing_tags(self, mock_load):
     mock_load.return_value = MockModelParams(
@@ -330,6 +487,7 @@ class ModelCalibratorsTest(absltest.TestCase):
     class ModelWithOperators(nnx.Module):
 
       def __init__(self):
+        self.mesh = parallelism.default_mesh()
         self.operators = nnx.data({
             'q07_era5:surface': MockModelParams(
                 l1=nnx.Param(1.0), l2=nnx.Param(2.0)
@@ -388,6 +546,7 @@ class ModelCalibratorsTest(absltest.TestCase):
     class ParamAndStat(nnx.Module):
 
       def __init__(self, param: float, stat: float):
+        self.mesh = parallelism.default_mesh()
         self.param = nnx.Param(param)
         self.stat = nnx.BatchStat(stat)
 
@@ -440,6 +599,211 @@ class ModelCalibratorsTest(absltest.TestCase):
     self.assertEqual(q07_op.tower.l2.tag, 'trainable')
     self.assertFalse(tl63_op.l1.has_metadata('tag'))
     self.assertFalse(q07_op.ref_coarse.l1.has_metadata('tag'))
+
+  def test_load_model_component_params_sharded_onto_model_mesh(self):
+    spmd_mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('batch',))
+    mesh = parallelism.Mesh(
+        spmd_mesh=spmd_mesh, field_partitions={'physics': {}}
+    )
+    ckpt_dir = self.create_tempdir().full_path
+    saved_model = MockModelParams(
+        l1=nnx.Param(jnp.array(3.0)), l2=nnx.Param(jnp.array(4.0))
+    )
+    saved_state = core_checkpointing.split_model_state_for_saving(saved_model)
+    with training_checkpointing.training_manager(
+        ckpt_dir,
+        options=ocp.CheckpointManagerOptions(),
+        model_config_str='{}',
+    ) as manager:
+      manager.save(
+          100,
+          args=ocp.args.Composite(
+              metadata=ocp.args.JsonSave({'step': 100}),
+              ema_params=ocp.args.StandardSave(saved_state.params),
+          ),
+      )
+
+    untrained = MockModelParams(
+        l1=nnx.Param(jnp.array(0.0)), l2=nnx.Param(jnp.array(0.0))
+    )
+    nnx.update(
+        untrained, parallelism.shard_module_states(untrained, mesh)
+    )
+    with mock.patch.object(
+        training_checkpointing,
+        'untrained_model_from_training_dir',
+        return_value=untrained,
+    ) as mock_untrained:
+      model = MockModelParams(
+          l1=nnx.Param(jnp.array(1.0)), l2=nnx.Param(jnp.array(2.0))
+      )
+      model.mesh = mesh
+      model_calibrators.LoadModelComponentParams(
+          component_key=None,
+          ckpt_path_or_dir=ckpt_dir,
+          ckpt_step=100,
+          is_training_checkpoint=True,
+      )(model, None, None)
+      mock_untrained.assert_called_once_with(
+          ckpt_dir, mesh=mesh, attrs_to_update=('spmd_mesh',), eager=False
+      )
+
+    expected_sharding = jax.sharding.NamedSharding(
+        spmd_mesh, jax.sharding.PartitionSpec()
+    )
+    self.assertEqual(float(model.l1.get_value()), 3.0)
+    self.assertEqual(float(model.l2.get_value()), 4.0)
+    self.assertEqual(model.l1.get_value().sharding, expected_sharding)
+    self.assertEqual(model.l2.get_value().sharding, expected_sharding)
+
+    with mock.patch.object(
+        model_calibrators.checkpointing,
+        'load_model_checkpoint',
+        return_value=MockModelParams(l1=nnx.Param(7.0), l2=nnx.Param(8.0)),
+    ) as mock_model_load_from_model_mesh:
+      model_with_mesh = MockModelParams(l1=nnx.Param(1.0), l2=nnx.Param(2.0))
+      model_with_mesh.mesh = mesh
+      model_calibrators.LoadModelComponentParams(
+          component_key=None,
+          ckpt_path_or_dir='/dummy/model_ckpt',
+          is_training_checkpoint=False,
+      )(model_with_mesh, None, None)
+      mock_model_load_from_model_mesh.assert_called_once_with(
+          path='/dummy/model_ckpt',
+          mesh=mesh,
+      )
+
+  @mock.patch.object(model_calibrators.checkpointing, 'load_model_checkpoint')
+  def test_load_model_component_params_subset_with_shifted_shared_submodules(
+      self, mock_load
+  ):
+    class SharedFeature(nnx.Module):
+
+      def __init__(self, val: float):
+        self.weight = nnx.Param(val)
+
+    class CoarseOperator(nnx.Module):
+
+      def __init__(self, feature: SharedFeature, val: float):
+        self.feature = feature
+        self.bias = nnx.Param(val)
+
+    class DownscalingOperator(nnx.Module):
+
+      def __init__(self, coarse_op: CoarseOperator, val: float):
+        self.ref_coarse = coarse_op
+        self.tower = nnx.Param(val)
+
+    class ModelWithOptionalDownscaling(nnx.Module):
+
+      def __init__(
+          self,
+          include_downscaling: bool,
+          feat_val: float,
+          coarse_val: float,
+          tower_val: float = 0.0,
+      ):
+        self.mesh = parallelism.default_mesh()
+        feat = SharedFeature(feat_val)
+        coarse = CoarseOperator(feat, coarse_val)
+        ops = {'tl63:surface': coarse}
+        if include_downscaling:
+          # Alphabetically precedes 'tl63:surface', shifting first-visited
+          # traversal paths of `coarse` and `feat` in `nnx.iter_graph`.
+          ops['equiangular:surface'] = DownscalingOperator(coarse, tower_val)
+        self.operators = nnx.data(dict(sorted(ops.items())))
+
+    base_model = ModelWithOptionalDownscaling(
+        include_downscaling=False, feat_val=10.0, coarse_val=20.0
+    )
+    mock_load.return_value = base_model
+
+    target_model = ModelWithOptionalDownscaling(
+        include_downscaling=True, feat_val=1.0, coarse_val=2.0, tower_val=5.0
+    )
+    model_calibrators.LoadModelComponentParams(
+        component_key=None,
+        ckpt_path_or_dir='/dummy/path',
+        load_subset=True,
+    )(target_model, None, None)
+
+    self.assertEqual(
+        target_model.operators['tl63:surface'].bias.get_value(), 20.0
+    )
+    self.assertEqual(
+        target_model.operators['tl63:surface'].feature.weight.get_value(), 10.0
+    )
+    self.assertEqual(
+        target_model.operators['equiangular:surface'].tower.get_value(), 5.0
+    )
+
+  def test_collect_normalization_stats_resets_diagnostic_state(self):
+    x_axis = cx.SizedAxis('x', 2)
+
+    class ToyModelWithDiagnostics(nnx.Module):
+
+      def __init__(self):
+        self.norm = transforms.StreamNorm({'u': x_axis})
+        self.state_u = typing.Prognostic(cx.field(jnp.zeros(2), x_axis))
+        self.diag_clock = typing.Diagnostic(jnp.array(0.0))
+        self.diag_accum = typing.Diagnostic(cx.field(jnp.zeros(2), x_axis))
+
+      def reset_diagnostic_state(self):
+        self.diag_clock.set_value(jnp.array(0.0))
+        self.diag_accum.set_value(cx.field(jnp.zeros(2), x_axis))
+
+      def initialize_random_processes(self, rng):
+        del rng
+
+      def update_dynamic_inputs(self, dynamic_data):
+        del dynamic_data
+
+      def assimilate(self, inputs):
+        self.state_u.set_value(inputs['data']['u'].isel(timedelta=-1))
+
+      def advance(self):
+        self.diag_clock.set_value(self.diag_clock.get_value() + 1.0)
+        self.diag_accum.set_value(
+            self.diag_accum.get_value() + self.state_u.get_value()
+        )
+
+      def observe(self, queries):
+        del queries
+        return {'data': self.norm({'u': self.diag_accum.get_value()})}
+
+    model = ToyModelWithDiagnostics()
+    td_axis = coordinates.TimeDelta(np.array([np.timedelta64(0, 'h')]))
+    batch = (
+        {'data': {'u': cx.field(jnp.array([[2.0, 4.0]]), td_axis, x_axis)}},
+        {},
+    )
+    loader = mock.MagicMock()
+    loader.build_eval_inputs.return_value = [batch, batch]
+    stage = mock.MagicMock()
+    stage.inputs_spec = {}
+    stage.dynamic_inputs_spec = {}
+    stage.time_sample_offset = np.timedelta64(6, 'h')
+    stage.queries_spec = {'data': {'u': x_axis}}
+    schedule = mock.MagicMock(stages=[stage])
+
+    calibrator = model_calibrators.CollectNormalizationStats(
+        train_stage_idx=0,
+        rng_seed=0,
+        time_start='2005-01-01',
+        time_end='2005-01-02',
+        batch_count=2,
+    )
+    calibrator(model, loader, schedule)
+
+    self.assertFalse(model.norm.update_stats)
+    np.testing.assert_allclose(
+        model.norm.stream_norm.means.get_value()['u'].data,
+        np.array([2.0, 4.0]),
+    )
+    self.assertEqual(float(model.diag_clock.get_value()), 0.0)
+    np.testing.assert_allclose(
+        model.diag_accum.get_value().data, np.zeros(2)
+    )
 
 
 if __name__ == '__main__':

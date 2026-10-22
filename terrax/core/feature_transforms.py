@@ -30,6 +30,7 @@ from terrax.core import coordinates
 from terrax.core import diagnostics
 from terrax.core import dynamic_io
 from terrax.core import orographies
+from terrax.core import parallelism
 from terrax.core import random_processes
 from terrax.core import transforms
 from terrax.core import typing
@@ -280,7 +281,8 @@ class ParamFeatures(transforms.PytreeTransformABC):
         data_units = units.parse_units(da.attrs['units'])
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
         candidate = xarray_utils.from_xarray(da)
-        feature.set_value(candidate.order_as(self.coords[key]).data)
+        value = candidate.order_as(self.coords[key]).data
+        feature.set_value(parallelism.shard_like(value, feature.get_value()))
 
 
 class ClimatologyFeatures(transforms.PytreeTransformABC):
@@ -348,4 +350,5 @@ class ClimatologyFeatures(transforms.PytreeTransformABC):
         da = da.copy(data=sim_units.nondimensionalize(da.values * data_units))
         candidate = xarray_utils.from_xarray(da, (cx.LabeledAxis,))
         full_coord = cx.coords.compose(day_axis, self.coords[key])
-        feature.set_value(candidate.order_as(full_coord).data)
+        value = candidate.order_as(full_coord).data
+        feature.set_value(parallelism.shard_like(value, feature.get_value()))

@@ -505,6 +505,41 @@ class HelperFunctionsTest(parameterized.TestCase):
             tagged_cfg, attrs_to_update=('bad_attr',)
         )
 
+  def test_shard_like(self):
+    spmd_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()).reshape((2, 4)), axis_names=['x', 'y']
+    )
+    sharding = jax.sharding.NamedSharding(
+        spmd_mesh, jax.sharding.PartitionSpec('x', 'y')
+    )
+    like = {
+        'array': jax.device_put(jnp.zeros((4, 8)), sharding),
+        'field': cx.field(
+            jax.device_put(jnp.zeros((2, 4)), sharding), 'a', 'b'
+        ),
+        'numpy': np.zeros(3),
+        'scalar': 0.0,
+    }
+    value = {
+        'array': np.ones((4, 8)),
+        'field': cx.field(np.ones((2, 4)), 'a', 'b'),
+        'numpy': np.ones(3),
+        'scalar': 1.0,
+    }
+
+    result = parallelism.shard_like(value, like)
+
+    self.assertEqual(result['array'].sharding, sharding)
+    np.testing.assert_array_equal(result['array'], np.ones((4, 8)))
+    self.assertEqual(result['field'].data.sharding, sharding)
+    self.assertEqual(result['field'].dims, ('a', 'b'))
+    # Leaves without a `NamedSharding` reference are returned unchanged.
+    self.assertIsInstance(result['numpy'], np.ndarray)
+    self.assertEqual(result['scalar'], 1.0)
+
+    with self.assertRaises(ValueError):
+      parallelism.shard_like({'a': 1.0}, {'b': 1.0})
+
   def test_shard_module_states_basic_and_unshard(self):
     spmd_mesh = jax.sharding.Mesh(
         np.array(jax.devices()).reshape((2, 4)), axis_names=['x', 'y']

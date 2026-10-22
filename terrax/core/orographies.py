@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 from terrax.core import coordinates
 from terrax.core import interpolators
+from terrax.core import parallelism
 from terrax.core import scales
 from terrax.core import spatial_filters
 from terrax.core import spherical_harmonics
@@ -154,9 +155,7 @@ class ModalOrography(nnx.Module):
       modal_orography = spatial_filter.filter_modal(modal_orography)
     if self.mem_layout == 'modes':
       mask = ylm_grid.fields['mask']
-      self.orography.set_value(
-          modal_orography.unwrap(ylm_grid)[mask.unwrap(ylm_grid)]
-      )
+      value = modal_orography.unwrap(ylm_grid)[mask.unwrap(ylm_grid)]
     elif self.mem_layout == '2d':
       unpadded_grid = self._unpadded_grid
       regridder = interpolators.SpectralRegridder(unpadded_grid)
@@ -164,9 +163,12 @@ class ModalOrography(nnx.Module):
       with jax.ensure_compile_time_eval():
         mask = unpadded_grid.fields['mask']
       masked = cx.cmap(jnp.where)(mask, unpadded, 0)
-      self.orography.set_value(masked.unwrap(unpadded_grid))
+      value = masked.unwrap(unpadded_grid)
     else:
       raise ValueError(f'Unsupported {self.mem_layout=}')
+    self.orography.set_value(
+        parallelism.shard_like(value, self.orography.get_value())
+    )
 
 
 class ModalOrographyWithCorrection(ModalOrography):
@@ -234,4 +236,6 @@ class Orography(nnx.Module):
     nodal_orography = spatial_filter(nodal_orography)
     if data_grid != self.grid:
       raise ValueError(f'{data_grid=} does not match {self.grid=}.')
-    self.orography.set_value(nodal_orography.data)
+    self.orography.set_value(
+        parallelism.shard_like(nodal_orography.data, self.orography.get_value())
+    )

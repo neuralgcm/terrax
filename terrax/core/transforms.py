@@ -278,7 +278,7 @@ class PrescribedFields(PytreeTransformABC):
           candidate = candidate.untag(f.coordinate).tag(f.coordinate)
         else:
           candidate = candidate.untag(*f.dims).tag(f.coordinate)
-        f.set_value(candidate)
+        f.set_value(parallelism.shard_like(candidate, f.get_value()))
 
   @classmethod
   def zeros_like(
