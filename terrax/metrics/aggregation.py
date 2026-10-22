@@ -346,7 +346,7 @@ def split_aggregation_state_for_metrics(
   """
   aggregation_state_per_metric = {}
   for metric_name, metric in metrics.items():
-    metric_stats = {s.unique_name for s in metric.statistics.values()}
+    metric_stats = sorted({s.unique_name for s in metric.statistics.values()})
     # Missing statistics is allowed at aggregation level, since it might be
     # filled in at a later stage. If not, the error would be raised when metric
     # values are being computed.

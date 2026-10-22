@@ -55,9 +55,9 @@ class ModalNeuralDivCurlParameterization(nnx.Module):
     if len(div_curl_fields.intersection(volume_field_names)) != 2:
       raise ValueError('Volume fields must contain `divergence & vorticity`.')
 
-    for name in (set(volume_field_names) | uv_fields) - div_curl_fields:
+    for name in sorted((set(volume_field_names) | uv_fields) - div_curl_fields):
       prediction_split_axes[name] = levels
-    for name in set(surface_field_names):
+    for name in sorted(set(surface_field_names)):
       prediction_split_axes[name] = cx.Scalar()
 
     input_shapes = features_module.output_shapes(input_state_shapes)

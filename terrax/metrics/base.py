@@ -122,7 +122,7 @@ class PerVariableMetric(Metric):
         *[set(statistic_values[k]) for k in self.statistics]
     )
     values = {}
-    for v in common_variables:  # Compute values for all common variables.
+    for v in sorted(common_variables):  # Compute values for all common variables.
       stats_per_var = {k: statistic_values[k][v] for k in self.statistics}
       values[v] = self._values_from_mean_statistics_per_variable(stats_per_var)
     return values
@@ -178,7 +178,7 @@ class PerVariableStatistic(Statistic):
   ) -> dict[str, cx.Field]:
     return {
         k: self._compute_per_variable(predictions[k], targets[k])
-        for k in targets
+        for k in sorted(targets)
     }
 
 

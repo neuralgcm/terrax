@@ -175,7 +175,7 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
     else:
       modal_features = {}
     prognostics_keys = list(inputs.keys())
-    for k in set(self.fields_to_include) - set([self.u_key, self.v_key]):
+    for k in sorted(set(self.fields_to_include) - set([self.u_key, self.v_key])):
       if k not in prognostics_keys:
         raise ValueError(f'Requested field {k} not in {prognostics_keys=}.')
       modal_features[typing.KeyWithCosLatFactor(prefix + k, 0)] = inputs[k]

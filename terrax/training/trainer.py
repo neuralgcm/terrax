@@ -842,6 +842,9 @@ class RolloutTrainer:
   # targets. If False, they are returned by `observe` and scored against
   # themselves.
   wrap_field_in_query_as_auxiliary: bool = True
+  # If False, skips the immediate evaluation at `start_step` when resuming from
+  # a checkpoint (`start_step > 0` or `initial_checkpoint` is set).
+  evaluate_on_restore: bool = False
 
   def __post_init__(self):
     if self.data_loader.parallelism_mesh is None:
@@ -1952,7 +1955,9 @@ class RolloutTrainer:
 
   def run_training(self, show_progress_bar: bool = False):
     """Runs the training experiment."""
+    restoring = self.checkpoint_manager.latest_step() is not None
     start_step, auto_restart, experiment_state = self.initialize_experiment()
+    restoring = restoring or start_step > 0
 
     if start_step >= self._total_train_steps:
       logging.warning(
@@ -1960,6 +1965,13 @@ class RolloutTrainer:
           f' {self._total_train_steps=}. Will simply return.'
       )
       return
+
+    evaluate_at_start_step = self.evaluate_on_restore or not restoring
+    if not evaluate_at_start_step:
+      logging.info(
+          'Skipping evaluations at step=%s after restoring from checkpoint.',
+          start_step,
+      )
 
     def logging_callback(step, schedule_idx, loss, auto_restart):
       loss = float(jax.device_get(loss))
@@ -1991,17 +2003,6 @@ class RolloutTrainer:
       pbar = tqdm.auto.tqdm(total=self._total_train_steps, initial=start_step)
 
     while step < self._total_train_steps:
-      old_schedule_idx = schedule_idx
-      schedule_idx = np.sum(  # compute which leg of the schedule we are at.
-          step >= np.asarray(self._train_schedule_boundaries)
-      )
-      if schedule_idx != old_schedule_idx:
-        (
-            train_iter,
-            train_step_fn,
-            evaluation_fns,
-        ) = self.build_train_and_eval_iterators(schedule_idx)  # pyrefly: ignore[bad-argument-type]
-
       # restart on NaN loss
       if (
           np.isnan(prev_loss)
@@ -2025,7 +2026,9 @@ class RolloutTrainer:
             * self.auto_restart_config.restart_lookback_steps
         )
         target_step = step - 1 - lookback
+        logging_stream.wait()
         step, experiment_state = self.reinitialize_for_nan_restart(target_step)
+        prev_loss = loss = 1.0
         if pbar is not None:
           pbar.n = step
           pbar.refresh()
@@ -2039,6 +2042,17 @@ class RolloutTrainer:
             f' In particular, {step=}. Therefore reset auto_restart.'
         )
         auto_restart = AutoRestart()
+
+      old_schedule_idx = schedule_idx
+      schedule_idx = np.sum(  # compute which leg of the schedule we are at.
+          step >= np.asarray(self._train_schedule_boundaries)
+      )
+      if schedule_idx != old_schedule_idx:
+        (
+            train_iter,
+            train_step_fn,
+            evaluation_fns,
+        ) = self.build_train_and_eval_iterators(schedule_idx)  # pyrefly: ignore[bad-argument-type]
 
       # save checkpoint
       if start_step == 0 or step > start_step:
@@ -2066,7 +2080,9 @@ class RolloutTrainer:
 
       current_step_metrics = []
       for cadence, evaluate_fn in evaluation_fns:
-        if (step + 1) % cadence == 0 or step == start_step:
+        if (step + 1) % cadence == 0 or (
+            step == start_step and evaluate_at_start_step
+        ):
           online_metrics = evaluate_fn(experiment_state)
           if cadence == min_cadence and step > start_step:
             assert training_time is not None

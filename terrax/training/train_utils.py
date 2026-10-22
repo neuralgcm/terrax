@@ -14,6 +14,7 @@
 """Training utility functions for Terrax."""
 
 from collections.abc import Callable
+import hashlib
 import logging
 import math
 import time
@@ -339,7 +340,7 @@ T = TypeVar('T')
 
 
 def jit_once(f: T, **jit_kwargs) -> T:
-  """Like jax.jit, but raises an error instead of compiling multiple times."""
+  """Like jax.jit, but logs StableHLO hash and compiles at most once."""
   compiled = None
 
   def g(*args, **kwargs):
@@ -347,8 +348,18 @@ def jit_once(f: T, **jit_kwargs) -> T:
     if compiled is None:
       start_time = time.perf_counter()
       logging.info(f'Lowering {f}')
-      lowered = jax.jit(f, **jit_kwargs).lower(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
+      # pyrefly: ignore[bad-argument-type]
+      lowered = jax.jit(f, **jit_kwargs).lower(*args, **kwargs)
       lower_time = time.perf_counter()
+      stablehlo_text = lowered.as_text(dialect='stablehlo', debug_info=False)
+      stablehlo_sha256 = hashlib.sha256(
+          stablehlo_text.encode('utf-8')
+      ).hexdigest()
+      logging.info(
+          f'Lowered {f} in {lower_time - start_time:.1f}s'
+          f' (process={jax.process_index()},'
+          f' stablehlo_sha256={stablehlo_sha256})'
+      )
       logging.info(f'Compiling {f}')
       compiled = lowered.compile()
       compile_time = time.perf_counter()

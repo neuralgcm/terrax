@@ -839,6 +839,8 @@ class TrainerTest(parameterized.TestCase):
       duration: int = 2,
       initial_checkpoint: trainer.InitialCheckpoint | None = None,
       trainable_parameters_filter: nnx.filterlib.Filter | None = None,
+      online_metrics_saver: trainer.OnlineMetricsSaver | None = None,
+      evaluate_on_restore: bool = False,
   ) -> trainer.RolloutTrainer:
     """Returns a trainer for a model created by `_make_coupled_model`."""
     queries_specs = self._create_queries_specs(model)
@@ -913,8 +915,9 @@ class TrainerTest(parameterized.TestCase):
         auto_restart_config=trainer.AutoRestartConfig(),
         remat_config=trainer.RematConfig(),
         ensemble_axis=cx.SizedAxis('ensemble', 2),
-        online_metrics_saver=InMemorySaver(),
+        online_metrics_saver=online_metrics_saver or InMemorySaver(),
         trainable_parameters_filter=trainable_parameters_filter,
+        evaluate_on_restore=evaluate_on_restore,
     )
 
   def test_trainer_with_trainable_parameters_filter(self):
@@ -1078,6 +1081,44 @@ class TrainerTest(parameterized.TestCase):
           ValueError, 'Expected unsharded or replicated sharding'
       ):
         train_utils.ensure_replicated({'w': mismatched_arr}, mesh=mesh)
+
+  @parameterized.parameters(True, False)
+  def test_evaluate_on_restore(self, evaluate_on_restore):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    data_loader = self._create_data_loader(all_data)
+
+    # Initial run saves checkpoint at step 2.
+    first_saver = InMemorySaver()
+    first_trainer = self._create_coupled_model_trainer(
+        _make_coupled_model(),
+        data_loader,
+        self.test_dir,
+        duration=2,
+        online_metrics_saver=first_saver,
+    )
+    first_trainer.run_training()
+    first_steps = [s for s, _ in first_saver.metrics]
+    self.assertIn(0, first_steps)
+    self.assertIn(2, first_steps)
+
+    # Resume from step 2 to step 4 with cadence=2.
+    resumed_saver = InMemorySaver()
+    resumed_trainer = self._create_coupled_model_trainer(
+        _make_coupled_model(),
+        data_loader,
+        self.test_dir,
+        duration=4,
+        online_metrics_saver=resumed_saver,
+        evaluate_on_restore=evaluate_on_restore,
+    )
+    resumed_trainer.run_training()
+    resumed_steps = [s for s, _ in resumed_saver.metrics]
+    if evaluate_on_restore:
+      self.assertIn(2, resumed_steps)
+    else:
+      self.assertNotIn(2, resumed_steps)
+    self.assertIn(3, resumed_steps)
+    self.assertIn(4, resumed_steps)
 
 
 if __name__ == '__main__':
