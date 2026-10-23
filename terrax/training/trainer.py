@@ -193,6 +193,35 @@ def _remove_timedelta(c: cx.Coordinate | data_specs.CoordSpec) -> cx.Coordinate:
   )
 
 
+def _validate_initial_loss_inputs(
+    inputs_spec: DataSpec, queries_spec: data_specs.QueriesSpec
+) -> None:
+  """Raises if queried variables in `inputs_spec` have no timedelta=0 entry.
+
+  With `include_initial_loss=True` the model state after assimilation is scored
+  against t=0 data, see `_compute_initial_observation_agg_states`. This requires
+  a t=0 entry for every variable that is used as a target or inserted into
+  queries.
+
+  Args:
+    inputs_spec: Inputs spec of a train or eval stage.
+    queries_spec: Standardized queries spec of the same stage.
+  """
+  t0 = np.timedelta64(0, 's')
+  query_data_spec = data_loading.select_query_data(inputs_spec, queries_spec)
+  missing = []
+  for data_key, variables in query_data_spec.items():
+    for var_name, coord in variables.items():
+      timedelta = cx.coords.extract(coord, coordinates.TimeDelta)
+      if t0 not in timedelta.deltas:  # pyrefly: ignore[missing-attribute]
+        missing.append(f'{data_key}/{var_name}')
+  if missing:
+    raise ValueError(
+        'include_initial_loss=True requires a timedelta=0 entry in inputs_spec'
+        f' for all variables used in queries, but {missing} have none.'
+    )
+
+
 def _drop_empty_agg_state(
     in_dict: dict[str, aggregation.AggregationState],
 ) -> dict[str, aggregation.AggregationState]:
@@ -228,7 +257,7 @@ def _prepare_inputs_and_targets(
     init_slice = inputs
     rollout_data = None
   else:
-    init_slice = data_loading.slice_leading_timedelta(inputs, 1)
+    init_slice = data_loading.sel_init_fields(inputs)
     # Select targets starting from t > 0
     rollout_inputs = data_loading.sel_target_fields(inputs)
     # rollout inputs might contain fields that are only used for initialization,
@@ -858,6 +887,9 @@ class RolloutTrainer:
           ' use_data_loading_callback=True.'
       )
     self._standardize_queries_specs()
+    if self.include_initial_loss:
+      for stage in [*self.train_schedule.stages, *self.eval_schedule.stages]:
+        _validate_initial_loss_inputs(stage.inputs_spec, stage.queries_spec)
     self.run_evaluator = _maybe_on_host(
         _run_evaluator, self.compute_loss_on_host
     )
@@ -993,8 +1025,9 @@ class RolloutTrainer:
       self, stage: EvalSchema | TrainStage
   ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     """Returns tuples of retrieve_fns and buffers for a given stage."""
+    rollout_spec = data_loading.sel_target_timedeltas(stage.inputs_spec)
     data_spec = data_loading.select_query_data(
-        stage.inputs_spec, stage.queries_spec
+        rollout_spec, stage.queries_spec
     )
     nested_steps, nested_data_specs = self._get_nested_steps_and_specs(
         data_spec  # pyrefly: ignore[bad-argument-type]
@@ -1340,10 +1373,13 @@ class RolloutTrainer:
       Updated init_agg_states_seq with t=0 contributions added to each
       nesting level's aggregation state.
     """
-    # Remove the timedelta dimension from t=0 data. The init_slice has
-    # a single timedelta=0 entry, which we squeeze out.
+    # Remove the timedelta dimension from t=0 data by selecting the
+    # timedelta=0 entry from init_slice and squeezing it out.
     def _squeeze_timedelta(field: cx.Field) -> cx.Field:
       if 'timedelta' in field.axes:
+        field = data_loading.sel_timedelta_fields(
+            field, np.timedelta64(0, 's')
+        )
         return field.isel(timedelta=0)
       return field
 
@@ -1580,7 +1616,7 @@ class RolloutTrainer:
     )
     _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)  # pyrefly: ignore[bad-argument-type]
     targets_spec = data_loading.select_targets(
-        inputs_spec, train_stage.queries_spec
+        rollout_spec, train_stage.queries_spec
     )
     _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)  # pyrefly: ignore[bad-argument-type]
     full_queries_spec = _construct_full_queries_spec(  # include timedelta now.
@@ -1766,7 +1802,7 @@ class RolloutTrainer:
     )
     _, nested_rollout_specs = self._get_nested_steps_and_specs(rollout_spec)  # pyrefly: ignore[bad-argument-type]
     targets_spec = data_loading.select_targets(
-        inputs_spec, eval_schema.queries_spec
+        rollout_spec, eval_schema.queries_spec
     )
     _, nested_targets_spec = self._get_nested_steps_and_specs(targets_spec)  # pyrefly: ignore[bad-argument-type]
     full_queries_spec = _construct_full_queries_spec(  # include timedelta now.

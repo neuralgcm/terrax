@@ -59,6 +59,55 @@ class TestLorenz96(lorenz96.Lorenz96):
   pass
 
 
+@nnx.dataclass
+class MultiSliceLorenz96(lorenz96.Lorenz96):
+  """Lorenz96 variant that requires two initial time slices `[-4*dt, 0]`."""
+
+  history_weight: nnx.Param = nnx.data(
+      default_factory=lambda: nnx.Param(jnp.array(0.0))
+  )
+  x_prev: typing.Prognostic = nnx.data(init=False)
+
+  def __post_init__(self):
+    super().__post_init__()
+    self.x_prev = typing.Prognostic(
+        cx.field(jnp.zeros(self.k_axis.shape), self.k_axis)
+    )
+
+  @property
+  def history_deltas(self) -> np.ndarray:
+    dt_slow = self.timestep * 4
+    return np.arange(-1, 1) * dt_slow
+
+  @property
+  def inputs_spec(self):
+    cs = {'x': self.x.get_value().coordinate, 'time': cx.Scalar()}
+    return {
+        'slow': {
+            k: data_specs.CoordSpec.with_given_timedelta(v, self.history_deltas)
+            for k, v in cs.items()
+        }
+    }
+
+  def assimilate(self, inputs: dict[str, dict[str, cx.Field]]) -> None:
+    expected_td = coordinates.TimeDelta(self.history_deltas)
+    actual_td = inputs['slow']['x'].axes['timedelta']
+    if actual_td != expected_td:
+      raise ValueError(f'Expected {expected_td=}, got {actual_td=}')
+    self.x_prev.set_value(inputs['slow']['x'].isel(timedelta=0))
+    self.x.set_value(inputs['slow']['x'].isel(timedelta=-1))
+    self.time.set_value(inputs['slow']['time'].isel(timedelta=-1))
+
+  def advance(self) -> None:
+    x_curr = self.x.get_value()
+    x_prev = self.x_prev.get_value()
+    super().advance()
+    self.x.set_value(
+        self.x.get_value() + self.history_weight.get_value() * (x_curr - x_prev)
+    )
+    self.x_prev.set_value(x_curr)
+
+
 class TestLorenz96WithTwoScales(lorenz96.Lorenz96WithTwoScales):
 
   def __post_init__(self):
@@ -787,6 +836,42 @@ class TrainerTest(parameterized.TestCase):
         trainer._construct_full_queries_spec(inputs_spec, request_only)
       self.assertIn('fast/request', ' '.join(cm.exception.__notes__))
 
+  def test_validate_initial_loss_inputs(self):
+    k = cx.LabeledAxis('k', np.arange(8))
+    hour = np.timedelta64(1, 'h')
+    full_td = coordinates.TimeDelta(np.arange(-1, 3) * hour)
+    target_only_td = coordinates.TimeDelta(np.arange(1, 3) * hour)
+    init_only_td = coordinates.TimeDelta(np.arange(-1, 1) * hour)
+    auxiliary_time = typing.Auxiliary(data_specs.FieldInQuerySpec(cx.Scalar()))
+    queries_spec = {'slow': {'x': k, 'time': auxiliary_time}}
+
+    with self.subTest('passes_with_t0_entries'):
+      inputs_spec = {
+          'slow': {
+              'x': cx.coords.compose(full_td, k),
+              'time': full_td,
+              # Variables that are not queried do not need a t=0 entry.
+              'history': cx.coords.compose(init_only_td, k),
+          }
+      }
+      trainer._validate_initial_loss_inputs(inputs_spec, queries_spec)
+
+    with self.subTest('raises_for_target_only_query_variable'):
+      inputs_spec = {
+          'slow': {'x': cx.coords.compose(target_only_td, k), 'time': full_td}
+      }
+      with self.assertRaisesRegex(ValueError, r"timedelta=0 .*\['slow/x'\]"):
+        trainer._validate_initial_loss_inputs(inputs_spec, queries_spec)
+
+    with self.subTest('raises_for_target_only_field_in_query'):
+      inputs_spec = {
+          'slow': {'x': cx.coords.compose(full_td, k), 'time': target_only_td}
+      }
+      with self.assertRaisesRegex(
+          ValueError, r"timedelta=0 .*\['slow/time'\]"
+      ):
+        trainer._validate_initial_loss_inputs(inputs_spec, queries_spec)
+
   def test_create_initial_evaluators(self):
     k = cx.LabeledAxis('k', np.arange(8))
     td = coordinates.TimeDelta(np.arange(1, 5) * np.timedelta64(1, 'h'))
@@ -1119,6 +1204,105 @@ class TrainerTest(parameterized.TestCase):
       self.assertNotIn(2, resumed_steps)
     self.assertIn(3, resumed_steps)
     self.assertIn(4, resumed_steps)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='default',
+          include_initial_loss=False,
+          use_data_loading_callback=False,
+      ),
+      dict(
+          testcase_name='with_initial_loss',
+          include_initial_loss=True,
+          use_data_loading_callback=False,
+      ),
+      dict(
+          testcase_name='with_callback',
+          include_initial_loss=False,
+          use_data_loading_callback=True,
+      ),
+  )
+  def test_trainer_multi_slice_init(
+      self, include_initial_loss: bool, use_data_loading_callback: bool
+  ):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    k = cx.LabeledAxis('k', np.arange(8))
+    model = MultiSliceLorenz96(k_axis=k, dt=0.01, forcing=nnx.Param(10.0))
+    queries_specs = self._create_queries_specs(model)
+    data_loader = self._create_data_loader(all_data)
+    eval_metrics, loss = self._create_evaluators(
+        dims_to_reduce=('ensemble', 'batch', 'k')
+    )
+    eval_metrics = evaluators.FlattenedEvaluator(eval_metrics)
+    loss = evaluators.FlattenedEvaluator(loss)
+    dt_slow = model.timestep * 4
+
+    optimizer = optax.adam(1e-3)
+    opt_config = trainer.OptimizationConfig(optimizer, ema_num_steps=10)
+
+    # Timedeltas start at -dt_slow so assimilation receives [-dt_slow, 0].
+    train_td = coordinates.TimeDelta(np.arange(-1, 3) * dt_slow)
+    inputs_spec = _construct_spec(model.inputs_spec, train_td)
+    dyn_spec = _construct_spec(model.dynamic_inputs_spec, train_td)
+    train_stage = trainer.TrainStage(
+        duration=2,
+        inputs_spec=inputs_spec,
+        dynamic_inputs_spec=dyn_spec,
+        queries_spec=queries_specs,
+        loss=loss,
+        time_sample_offset=dt_slow,
+        batch_size_per_device=1,
+        shuffle_buffer_size=0,
+        train_time_slice=None,
+        eval_time_slice=None,
+    )
+    eval_td = coordinates.TimeDelta(np.arange(-1, 5) * dt_slow)
+    eval_inputs_spec = _construct_spec(model.inputs_spec, eval_td)
+    eval_dyn_spec = _construct_spec(model.dynamic_inputs_spec, eval_td)
+    eval_schedule = trainer.EvalSchedule(
+        stages=[
+            trainer.EvalSchema(
+                cadence=2,
+                inputs_spec=eval_inputs_spec,
+                dynamic_inputs_spec=eval_dyn_spec,
+                queries_spec=queries_specs,
+                metrics_evaluator=eval_metrics,
+                loss_evaluator=loss,
+                time_sample_offset=dt_slow,
+                batch_size_per_device=1,
+                num_batches=1,
+                train_time_slice=None,
+                eval_time_slice=None,
+                name='eval',
+            )
+        ]
+    )
+
+    metrics_saver = InMemorySaver()
+    rollout_trainer = trainer.RolloutTrainer(
+        experiment_dir=self.test_dir,
+        model=model,
+        data_loader=data_loader,
+        process_observations=transforms.Identity(),
+        calibration_modules=None,
+        train_schedule=trainer.TrainSchedule(stages=[train_stage]),
+        eval_schedule=eval_schedule,
+        optimization_config=opt_config,
+        initial_checkpoint=None,
+        checkpoint_config=trainer.CheckpointConfig(
+            save_interval_steps=2,
+            keep_every_n_steps=10,
+            model_config_str='{}',
+        ),
+        auto_restart_config=trainer.AutoRestartConfig(),
+        remat_config=trainer.RematConfig(),
+        ensemble_axis=cx.SizedAxis('ensemble', 2),
+        online_metrics_saver=metrics_saver,
+        include_initial_loss=include_initial_loss,
+        use_data_loading_callback=use_data_loading_callback,
+    )
+    rollout_trainer.run_training()
+    self.assertTrue(metrics_saver.metrics)
 
 
 if __name__ == '__main__':

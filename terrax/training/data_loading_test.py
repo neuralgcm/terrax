@@ -666,7 +666,8 @@ class DataLoaderTest(absltest.TestCase):
     sample_std, _ = next(iter_std)
     sample_cb_init, _ = next(iter_cb)  # pylint: disable=unused-variable
 
-    retrieve_fn_fast, retrieve_fn_slow = tuple(retrieve_fns)  # pylint: disable=unbalanced-tuple-unpacking
+    # pylint: disable=unbalanced-tuple-unpacking
+    retrieve_fn_fast, retrieve_fn_slow = tuple(retrieve_fns)
 
     with self.subTest('fast_component'):
       for i in range(self.fast_deltas.size):
@@ -678,6 +679,81 @@ class DataLoaderTest(absltest.TestCase):
       for i in range(0, self.slow_deltas.size):
         retrieved = retrieve_fn_slow(i * idx_steps[1])
         expected_x = sample_std['slow']['x'].data[i]
+        np.testing.assert_allclose(retrieved['slow']['x'].data, expected_x)
+
+  def test_callback_loading_with_negative_timedeltas(self):
+    batch_size_per_device = None
+    dt_slow = np.timedelta64(24, 'h')
+    dt_fast = np.timedelta64(6, 'h')
+    slow_deltas = np.arange(-1, 4) * dt_slow
+    fast_deltas = np.arange(-4, 13) * dt_fast
+    input_specs = {
+        'slow': {'x': coordinates.TimeDelta(slow_deltas)},
+        'fast': {'y': coordinates.TimeDelta(fast_deltas)},
+    }
+
+    loader = data_loading.DataLoader(
+        all_data=self.all_data,
+        parallelism_mesh=self.mesh,
+        loading_partition_schema='data',
+    )
+    shared_args = dict(
+        batch_size_per_device=batch_size_per_device,
+        shuffle_buffer_size_in_bytes=1000,
+        dataset_rng_seed=42,
+        time_sample_offset=dt_slow,
+        dataset_time_slice=None,
+    )
+
+    rollout_specs = data_loading.sel_target_timedeltas(input_specs)
+    nested_specs = scan_utils.nested_scan_specs(rollout_specs)
+    nested_steps = scan_utils.nested_scan_steps(rollout_specs)
+    idx_steps = [1] + list(map(int, np.cumprod(nested_steps)[:-1]))
+
+    retrieve_fns, buffers = [], []
+    for spec, stride in zip(nested_specs, idx_steps):
+      data_slice_struct = loader.data_slice_struct(
+          spec, batch_size_per_device=batch_size_per_device
+      )
+      retrieve_fn, data_buffer = loader.setup_targets_via_callback(
+          data_slice_struct, idx_step=stride
+      )
+      retrieve_fns.append(jax.jit(retrieve_fn))
+      buffers.append(data_buffer)
+
+    standard_iter = loader.build_train_inputs(input_specs, {}, **shared_args)
+    callback_iter = loader.build_train_inputs(
+        input_specs, {}, data_buffer=buffers, **shared_args
+    )
+
+    standard_sample, _ = next(standard_iter)
+    callback_init_sample, _ = next(callback_iter)
+    expected_init = data_loading.sel_init_fields(standard_sample)
+
+    with self.subTest('init_slice_contains_all_non_positive_timedeltas'):
+      cx.testing.assert_fields_allclose(
+          callback_init_sample['slow']['x'], expected_init['slow']['x']
+      )
+      cx.testing.assert_fields_allclose(
+          callback_init_sample['fast']['y'], expected_init['fast']['y']
+      )
+
+    # pylint: disable=unbalanced-tuple-unpacking
+    retrieve_fn_fast, retrieve_fn_slow = tuple(retrieve_fns)
+    expected_rollout_sample = data_loading.sel_timedelta_fields(
+        standard_sample, slice(np.timedelta64(0, 's'), None)
+    )
+
+    with self.subTest('fast_component'):
+      for i in range(13):
+        retrieved = retrieve_fn_fast(i)
+        expected_y = expected_rollout_sample['fast']['y'].data[i]
+        np.testing.assert_allclose(retrieved['fast']['y'].data, expected_y)
+
+    with self.subTest('slow_component'):
+      for i in range(4):
+        retrieved = retrieve_fn_slow(i * idx_steps[1])
+        expected_x = expected_rollout_sample['slow']['x'].data[i]
         np.testing.assert_allclose(retrieved['slow']['x'].data, expected_x)
 
 
@@ -711,6 +787,21 @@ class TestTimedeltaSelectors(absltest.TestCase):
       target = data_loading.sel_target_fields(batch)
       self.assertEqual(list(target.keys()), ['source_1', 'source_2'])
       self.assertEqual(list(target['source_1'].keys()), ['y'])
+
+  def test_sel_target_timedeltas_drops_empty_coords(self):
+    make_td = lambda hours: coordinates.TimeDelta(
+        np.array(hours, dtype='timedelta64[h]')
+    )
+    specs = {
+        'source_1': {'x': make_td([-1, 0]), 'y': make_td([-1, 0, 1])},
+        'source_2': {'z': make_td([1, 2, 3])},
+    }
+    target = data_loading.sel_target_timedeltas(specs)
+    # Consistent with `sel_target_fields`: init-only entries are dropped.
+    self.assertEqual(list(target.keys()), ['source_1', 'source_2'])
+    self.assertEqual(list(target['source_1'].keys()), ['y'])
+    self.assertEqual(target['source_1']['y'], make_td([1]))
+    self.assertEqual(target['source_2']['z'], make_td([1, 2, 3]))
 
 
 if __name__ == '__main__':

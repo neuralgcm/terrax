@@ -270,12 +270,14 @@ class CollectNormalizationStats(ModelCalibrator):
 
     for i, (inputs, dynamic_data) in enumerate(data_iter):
       init_slice = data_loading.sel_init_fields(inputs)
-      # For queries we need a single time slice of input data.
+      # Queries are observed after `advance`, i.e. at t > 0, so we construct
+      # them from the last time slice of `inputs`, which, unlike `init_slice`,
+      # retains variables that are only available at t > 0.
       queries = data_specs.construct_query(
-          sel_timedelta(init_slice), train_stage.queries_spec
+          sel_timedelta(inputs), train_stage.queries_spec
       )
       result = unroll_fn(
-          model, inputs, dynamic_data, jax.random.fold_in(rng, i), queries
+          model, init_slice, dynamic_data, jax.random.fold_in(rng, i), queries
       )
       jax.block_until_ready(result)
 

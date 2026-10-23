@@ -412,7 +412,7 @@ def _drop_empty_fields(node: PyTree) -> PyTree:
         continue
 
       filtered_dict[k] = processed_v
-    return filtered_dict
+    return type(node)(filtered_dict)
 
   return node
 
@@ -432,7 +432,7 @@ def sel_timedelta_coords(
     coords: PyTree,
     values: np.timedelta64 | slice,
 ) -> PyTree:
-  """Returns `coords` with TimeDelta coordinate sliced to side of `ref`."""
+  """Returns `coords` with TimeDelta coordinates selected at `values`."""
   fields = jax.tree.map(cx.shape_struct_field, coords, is_leaf=cx.is_coord)
   fn = functools.partial(sel_timedelta_fields, values=values)
   out = jax.eval_shape(fn, fields)
@@ -440,7 +440,11 @@ def sel_timedelta_coords(
 
 
 def sel_target_timedeltas(inputs: PyTree) -> PyTree:
-  return sel_timedelta_coords(inputs, slice(np.timedelta64(1, 's'), None))
+  """Returns coordinates of `inputs` with timedelta values > 0."""
+  all_target_td_coords = sel_timedelta_coords(
+      inputs, slice(np.timedelta64(1, 's'), None)
+  )
+  return _drop_empty_fields(all_target_td_coords)
 
 
 def filter_missing_optional(
@@ -1078,10 +1082,14 @@ class DataLoader:
     def _update_and_unpack(batches):
       if data_buffer:
         buffer_batch, *other = batches
-        init_slice = slice_leading_timedelta(buffer_batch, 1)
+        init_slice = sel_init_fields(buffer_batch)
         init_slice = self.to_global_array(init_slice)
+        # HostDataBuffer untags `timedelta` and indexes slices starting at t=0.
+        non_neg_batch = sel_timedelta_fields(
+            buffer_batch, slice(np.timedelta64(0, 's'), None)
+        )
         for buffer in data_buffer:
-          buffer.set_data(buffer_batch)
+          buffer.set_data(non_neg_batch)
         return _unpack_size_one_tuple((init_slice,) + tuple(other))
       return _unpack_size_one_tuple(tuple(batches))
 
