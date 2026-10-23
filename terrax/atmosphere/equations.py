@@ -284,8 +284,8 @@ class _PrimitiveEquationsBase:
       self, state: primitive_equations.State, is_tendency: bool = True
   ) -> dict[str, cx.Field]:
     """Converts a primitive equations state to a dict of fields."""
-    sigma_levels, ylm_grid = self.levels, self.ylm_map.modal_grid
-    nodal_grid = self.ylm_map.nodal_grid
+    sigma_levels, ylm_grid = self.levels, self.ylm_map.ylm_grid
+    nodal_grid = self.ylm_map.lon_lat_grid
     tracers = {
         k: cx.field(
             state.tracers[k],  # pyrefly: ignore[bad-argument-type]
@@ -682,7 +682,7 @@ class HeldSuarezForcing(time_integrators.ExplicitODE):
   def _from_primitive_equations_state(
       self, state: primitive_equations.State
   ) -> dict[str, cx.Field]:
-    levels, ylm_grid = self.levels, self.ylm_map.modal_grid
+    levels, ylm_grid = self.levels, self.ylm_map.ylm_grid
     volume_field_names = ['divergence', 'vorticity', 'temperature_variation']
     volume_fields = {
         k: cx.field(getattr(state, k), levels, ylm_grid)

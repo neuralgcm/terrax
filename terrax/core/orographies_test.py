@@ -63,7 +63,9 @@ def _make_ylm_map(padded: bool = False) -> spherical_harmonics.FixedYlmMapping:
     mesh = parallelism.default_mesh()
     schema_key = None
   return spherical_harmonics.FixedYlmMapping(
-      lon_lat_grid=coordinates.LonLatGrid.T21(),
+      lon_lat_grid=coordinates.LonLatGrid.T21(
+          mesh=mesh, partition_schema_key=schema_key
+      ),
       ylm_grid=coordinates.SphericalHarmonicGrid.T21(
           mesh=mesh, partition_schema_key=schema_key
       ),
@@ -148,7 +150,7 @@ class ModalOrographyTest(parameterized.TestCase):
         lon_lat_grid=coordinates.LonLatGrid.T21(),
         ylm_grid=coordinates.SphericalHarmonicGrid.T21(),
     )
-    grid = ylm_map.nodal_grid
+    grid = ylm_map.lon_lat_grid
     sim_units = units.DEFAULT_UNITS
     dataset = _dataset_on_grid(
         'orography', np.full(grid.shape, 1000.0), grid, units='m'
@@ -274,7 +276,7 @@ class ModalOrographyTest(parameterized.TestCase):
   def test_update_from_xarray_matches_across_layouts(self, padded):
     ylm_map = _make_ylm_map(padded)
     data_ylm_map = _make_ylm_map(padded=False)
-    grid = data_ylm_map.nodal_grid
+    grid = data_ylm_map.lon_lat_grid
     rng = np.random.default_rng(7)
     geopotential = rng.uniform(0.0, 1000.0, size=grid.shape).astype(np.float32)
     ds = _dataset_on_grid('geopotential_at_surface', geopotential, grid)

@@ -1277,7 +1277,7 @@ def spherical_harmonic_lon_lat_encodings(
   """Spherical harmonic positional encodings for lon-lat grids."""
 
   def _get_ylm(l, m):
-    zeros = np.zeros(ylm_map.modal_grid.shape)
+    zeros = np.zeros(ylm_map.ylm_grid.shape)
     # TODO(dkochkov): use sel semantic once it is added to coordax.
     zeros[2 * abs(m) + int(m < 0), l] = 1
     return ylm_map.to_nodal_array(zeros)  # pyrefly: ignore[bad-argument-type]

@@ -141,9 +141,9 @@ class ModalOrography(nnx.Module):
       spatial_filter = lambda x: x
     nodal_orography = _nodal_orography_from_xarray(dataset, sim_units)
     data_grid = nodal_orography.coordinate
-    if data_grid != data_ylm_map.nodal_grid:
+    if data_grid != data_ylm_map.lon_lat_grid:
       raise ValueError(
-          f'{data_grid=} does not match {data_ylm_map.nodal_grid=}.'
+          f'{data_grid=} does not match {data_ylm_map.lon_lat_grid=}.'
       )
     if not isinstance(spatial_filter, spatial_filters.ModalSpatialFilter):
       nodal_orography = spatial_filter(nodal_orography)

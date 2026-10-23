@@ -192,7 +192,7 @@ class BaseSphericalHarmonicRandomProcessTest(parameterized.TestCase):
       var_tol_in_standard_errs=4,
   ):
     dt = self.dt
-    grid = ylm_map.nodal_grid
+    grid = ylm_map.lon_lat_grid
 
     # generating multiple trajectories of random fields.
     n_samples = 500
@@ -438,7 +438,7 @@ class GaussianRandomFieldTest(BaseSphericalHarmonicRandomProcessTest):
         rngs=nnx.Rngs(0),
     )
     with self.subTest('nnx_state_structure_invariance'):
-      self.check_nnx_state_structure_is_invariant(grf, ylm_map.nodal_grid)
+      self.check_nnx_state_structure_is_invariant(grf, ylm_map.lon_lat_grid)
 
     with self.subTest('nnx_param_count'):
       params = nnx.state(grf, nnx.Param)
@@ -741,7 +741,7 @@ class BatchGaussianRandomFieldTest(BaseSphericalHarmonicRandomProcessTest):
         lon_lat_grid=coordinates.LonLatGrid.T42(),
         ylm_grid=coordinates.SphericalHarmonicGrid.T42(),
     )
-    grid = ylm_map.nodal_grid
+    grid = ylm_map.lon_lat_grid
     axis = cx.SizedAxis('grf', 2)  # 2 fields.
     grf = random_processes.VectorizedGaussianRandomField.construct(
         ylm_map=ylm_map,

@@ -52,7 +52,7 @@ def _dino_state_fields(
     raise ValueError(f'Unknown temperature format: {temperature_format}')
   # Remove dummy dimension used in dinosaur codebase.
   state_dict['log_surface_pressure'] = state_dict['log_surface_pressure'][0]
-  grid, ylm_grid = ylm_map.nodal_grid, ylm_map.modal_grid
+  grid, ylm_grid = ylm_map.lon_lat_grid, ylm_map.ylm_grid
   coords_map = {
       2: ylm_grid,  # for log_surface_pressure.
       3: cx.coords.compose(levels, ylm_grid),  # other fields.

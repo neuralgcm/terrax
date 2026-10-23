@@ -211,7 +211,7 @@ class OrographyWithGradsFeatures(transforms.PytreeTransformABC):
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     del inputs  # unused.
     ylm_map = self.orography_module.ylm_map
-    grid = ylm_map.nodal_grid
+    grid = ylm_map.lon_lat_grid
     modal_features = {'orography': self.orography_module.modal_orography}
     modal_features = {
         typing.KeyWithCosLatFactor(k, 0): v for k, v in modal_features.items()

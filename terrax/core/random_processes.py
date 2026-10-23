@@ -774,7 +774,7 @@ class GaussianRandomFieldCore(nnx.Module):
 
   @property
   def core_grid(self) -> coordinates.SphericalHarmonicGrid:
-    return self.ylm_map.modal_grid
+    return self.ylm_map.ylm_grid
 
 
 class GaussianRandomField(RandomProcessModule):
@@ -832,7 +832,7 @@ class GaussianRandomField(RandomProcessModule):
       rngs: nnx.Rngs,
   ):
     dist = TruncatedNormalDistribution(-clip, clip)
-    coord = ylm_map.modal_grid
+    coord = ylm_map.ylm_grid
     sampler = DistributionSampler(dist, coord)
     return cls(
         sampler=sampler,
@@ -882,15 +882,15 @@ class GaussianRandomField(RandomProcessModule):
       coord: cx.Coordinate | None = None,
   ) -> cx.Field:
     if coord is None:
-      coord = self.ylm_map.nodal_grid
-    if coord == self.ylm_map.modal_grid:
+      coord = self.ylm_map.lon_lat_grid
+    if coord == self.ylm_map.ylm_grid:
       return self.core.get_value()
-    elif coord == self.ylm_map.nodal_grid:
+    elif coord == self.ylm_map.lon_lat_grid:
       return self.ylm_map.to_nodal(self.core.get_value())
     else:
       raise ValueError(
           f'Interpolation is not supported yet, requested {coord=} '
-          f'but the process is defined on {self.ylm_map.nodal_grid=}'
+          f'but the process is defined on {self.ylm_map.lon_lat_grid=}'
       )
 
 
@@ -988,7 +988,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       rngs: nnx.Rngs,
   ):
     dist = TruncatedNormalDistribution(-clip, clip)
-    coord = ylm_map.modal_grid
+    coord = ylm_map.ylm_grid
     sampler = DistributionSampler(dist, coord)
     return cls(
         sampler=sampler,
@@ -1055,15 +1055,15 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       coord: cx.Coordinate | None = None,
   ) -> cx.Field:
     if coord is None:
-      coord = self.ylm_map.nodal_grid
-    if coord == self.ylm_map.modal_grid:
+      coord = self.ylm_map.lon_lat_grid
+    if coord == self.ylm_map.ylm_grid:
       return self.core.get_value()
-    elif coord == self.ylm_map.nodal_grid:
+    elif coord == self.ylm_map.lon_lat_grid:
       return self.ylm_map.to_nodal(self.core.get_value())
     else:
       raise ValueError(
           f'Interpolation is not supported yet, requested {coord=} '
-          f'but the process is defined on {self.ylm_map.nodal_grid=}'
+          f'but the process is defined on {self.ylm_map.lon_lat_grid=}'
       )
 
   @classmethod

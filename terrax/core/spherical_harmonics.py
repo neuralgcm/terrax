@@ -24,9 +24,6 @@ from terrax.core import coordinates
 from terrax.core import parallelism
 from terrax.core import typing
 
-# TODO(dkochkov): Consider dropping nodal_grid and modal_grid properties and
-# instead have them as arguments when grids contain explicit padding details.
-
 
 SphericalHarmonicMethods = Literal['fast', 'real']
 TruncationRules = Literal['linear', 'cubic']
@@ -180,10 +177,11 @@ class FixedYlmMapping:
 
   @functools.cached_property
   def dinosaur_grid(self) -> spherical_harmonic.Grid:
+    """Returns the underlying `dinosaur.spherical_harmonic.Grid`."""
     method = coordinates.SPHERICAL_HARMONICS_METHODS[
         self.ylm_grid.spherical_harmonics_method
     ]
-    return spherical_harmonic.Grid(
+    grid = spherical_harmonic.Grid(
         longitude_wavenumbers=self.ylm_grid.longitude_wavenumbers,
         total_wavenumbers=self.ylm_grid.total_wavenumbers,
         longitude_nodes=self.lon_lat_grid.longitude_nodes,
@@ -195,16 +193,21 @@ class FixedYlmMapping:
         spmd_mesh=self.dinosaur_spmd_mesh,
         basis_as_jax_arrays=self.basis_as_jax_arrays,
     )
-
-  @property
-  def nodal_grid(self) -> coordinates.LonLatGrid:
-    return coordinates.LonLatGrid.from_dinosaur_grid(self.dinosaur_grid)
-
-  @property
-  def modal_grid(self) -> coordinates.SphericalHarmonicGrid:
-    return coordinates.SphericalHarmonicGrid.from_dinosaur_grid(
-        self.dinosaur_grid
-    )
+    if (
+        self.lon_lat_grid.lon_lat_padding != grid.nodal_padding
+        or self.ylm_grid.wavenumber_padding != grid.modal_padding
+    ):
+      raise ValueError(
+          'Grid padding does not match padding required by'
+          f' (mesh, partition_schema_key={self.partition_schema_key!r}):'
+          f' got {self.lon_lat_grid.lon_lat_padding=} (expected'
+          f' {grid.nodal_padding}) and'
+          f' {self.ylm_grid.wavenumber_padding=} (expected'
+          f' {grid.modal_padding}). Pass the same `mesh` and'
+          ' `partition_schema_key` when constructing `lon_lat_grid` and'
+          ' `ylm_grid`.'
+      )
+    return grid
 
   def to_modal_array(self, x: typing.cx.Field) -> typing.cx.Field:
     """Converts a nodal array to a modal array."""
@@ -228,8 +231,8 @@ class FixedYlmMapping:
     """Converts a nodal field(s) to a modal field(s)."""
     if isinstance(x, dict):
       return {k: self.to_modal(v) for k, v in x.items()}
-    modal = cx.cpmap(self.to_modal_array)(x.untag(self.nodal_grid))
-    return modal.tag(self.modal_grid)
+    modal = cx.cpmap(self.to_modal_array)(x.untag(self.lon_lat_grid))
+    return modal.tag(self.ylm_grid)
 
   @overload
   def to_nodal(self, x: cx.Field) -> cx.Field:
@@ -245,80 +248,80 @@ class FixedYlmMapping:
     """Converts a modal field(s) to a nodal field(s)."""
     if isinstance(x, dict):
       return {k: self.to_nodal(v) for k, v in x.items()}
-    nodal = cx.cpmap(self.to_nodal_array)(x.untag(self.modal_grid))
-    return nodal.tag(self.nodal_grid)
+    nodal = cx.cpmap(self.to_nodal_array)(x.untag(self.ylm_grid))
+    return nodal.tag(self.lon_lat_grid)
 
   def cos_lat(self, x: cx.Field) -> cx.Field:
     """Returns the cos(lat) values verified to be present in `x`."""
-    if not all(ax in x.axes.values() for ax in self.nodal_grid.axes):
-      raise ValueError(f'{self.nodal_grid=} was not found on {x=}')
-    return self.nodal_grid.cos_lat
+    if not all(ax in x.axes.values() for ax in self.lon_lat_grid.axes):
+      raise ValueError(f'{self.lon_lat_grid=} was not found on {x=}')
+    return self.lon_lat_grid.cos_lat
 
   def laplacian(self, x: cx.Field) -> cx.Field:
     """Returns the Laplacian of `x`."""
-    y = cx.cpmap(self.dinosaur_grid.laplacian)(x.untag(self.modal_grid))
-    return y.tag(self.modal_grid)
+    y = cx.cpmap(self.dinosaur_grid.laplacian)(x.untag(self.ylm_grid))
+    return y.tag(self.ylm_grid)
 
   def inverse_laplacian(self, x: cx.Field) -> cx.Field:
     """Returns the inverse Laplacian of `x`."""
     return cx.cpmap(self.dinosaur_grid.inverse_laplacian)(
-        x.untag(self.modal_grid)
-    ).tag(self.modal_grid)
+        x.untag(self.ylm_grid)
+    ).tag(self.ylm_grid)
 
   def d_dlon(self, x: cx.Field) -> cx.Field:
     """Returns the longitudinal derivative of `x`."""
-    result = cx.cpmap(self.dinosaur_grid.d_dlon)(x.untag(self.modal_grid))
-    return result.tag(self.modal_grid)
+    result = cx.cpmap(self.dinosaur_grid.d_dlon)(x.untag(self.ylm_grid))
+    return result.tag(self.ylm_grid)
 
   def cos_lat_d_dlat(self, x: cx.Field) -> cx.Field:
     """Returns the cos(lat)-weighted latitudinal derivative of `x`."""
-    y = cx.cpmap(self.dinosaur_grid.cos_lat_d_dlat)(x.untag(self.modal_grid))
-    return y.tag(self.modal_grid)
+    y = cx.cpmap(self.dinosaur_grid.cos_lat_d_dlat)(x.untag(self.ylm_grid))
+    return y.tag(self.ylm_grid)
 
   def sec_lat_d_dlat_cos2(self, x: cx.Field) -> cx.Field:
     """Returns `secθ ∂/∂θ(cos²θ x)`."""
     y = cx.cpmap(self.dinosaur_grid.sec_lat_d_dlat_cos2)(
-        x.untag(self.modal_grid)
+        x.untag(self.ylm_grid)
     )
-    return y.tag(self.modal_grid)
+    return y.tag(self.ylm_grid)
 
   def clip_wavenumbers(self, x: cx.Field, n: int = 1) -> cx.Field:
     """Zeros out the highest `n` total wavenumbers."""
-    return self.modal_grid.clip_wavenumbers(x, n)
+    return self.ylm_grid.clip_wavenumbers(x, n)
 
   def cos_lat_grad(
       self, x: cx.Field, clip: bool = True
   ) -> tuple[cx.Field, cx.Field]:
     """Returns the cos(lat) gradient of `x`."""
     grad_fn = lambda x: self.dinosaur_grid.cos_lat_grad(x, clip=clip)
-    u, v = cx.cpmap(grad_fn)(x.untag(self.modal_grid))
-    return u.tag(self.modal_grid), v.tag(self.modal_grid)
+    u, v = cx.cpmap(grad_fn)(x.untag(self.ylm_grid))
+    return u.tag(self.ylm_grid), v.tag(self.ylm_grid)
 
   def k_cross(self, u: cx.Field, v: cx.Field) -> tuple[cx.Field, cx.Field]:
     """Returns the k-cross of `(u, v)`."""
     k_cross_fn = lambda u, v: self.dinosaur_grid.k_cross((u, v))
-    out_u, out_v = cx.cpmap(k_cross_fn)(*cx.untag((u, v), self.modal_grid))
-    return out_u.tag(self.modal_grid), out_v.tag(self.modal_grid)
+    out_u, out_v = cx.cpmap(k_cross_fn)(*cx.untag((u, v), self.ylm_grid))
+    return out_u.tag(self.ylm_grid), out_v.tag(self.ylm_grid)
 
   def div_cos_lat(
       self, u: cx.Field, v: cx.Field, clip: bool = True
   ) -> cx.Field:
     """Returns the cos(lat)-weighted divergence of `(u, v)`."""
     div_fn = lambda u, v: self.dinosaur_grid.div_cos_lat((u, v), clip=clip)
-    result = cx.cpmap(div_fn)(*cx.untag((u, v), self.modal_grid))
-    return result.tag(self.modal_grid)
+    result = cx.cpmap(div_fn)(*cx.untag((u, v), self.ylm_grid))
+    return result.tag(self.ylm_grid)
 
   def curl_cos_lat(
       self, u: cx.Field, v: cx.Field, clip: bool = True
   ) -> cx.Field:
     """Returns the cos(lat)-weighted curl of `(u, v)`."""
     curl_fn = lambda u, v: self.dinosaur_grid.curl_cos_lat((u, v), clip=clip)
-    result = cx.cpmap(curl_fn)(*cx.untag((u, v), self.modal_grid))
-    return result.tag(self.modal_grid)
+    result = cx.cpmap(curl_fn)(*cx.untag((u, v), self.ylm_grid))
+    return result.tag(self.ylm_grid)
 
   def integrate(self, x: cx.Field) -> cx.Field:
     """Returns the integral of `x` over the sphere."""
-    return cx.cpmap(self.dinosaur_grid.integrate)(x.untag(self.nodal_grid))
+    return cx.cpmap(self.dinosaur_grid.integrate)(x.untag(self.lon_lat_grid))
 
 
 # TODO(dkochkov): Remove this alias once all new models have been updated to use

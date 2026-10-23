@@ -281,7 +281,7 @@ class FeatureTransformsTest(parameterized.TestCase):
       random_process.unconditional_sample(jax.random.key(0))
       randomness_features = feature_transforms.RandomnessFeatures(
           random_process=random_process,
-          coord=ylm_map.nodal_grid,
+          coord=ylm_map.lon_lat_grid,
       )
       self._test_feature_module(randomness_features, None)
 
@@ -299,7 +299,7 @@ class FeatureTransformsTest(parameterized.TestCase):
       random_process.unconditional_sample(jax.random.key(0))
       randomness_features = feature_transforms.RandomnessFeatures(
           random_process=random_process,
-          coord=ylm_map.nodal_grid,
+          coord=ylm_map.lon_lat_grid,
       )
       self._test_feature_module(randomness_features, None)
 

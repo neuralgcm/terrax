@@ -108,27 +108,44 @@ class SphericalTransformsTest(parameterized.TestCase):
         ylm_mapper = spherical_harmonics.YlmMapper(mesh=mesh)
         self.assertIsInstance(ylm_mapper.mesh, parallelism.Mesh)
 
-  def test_modal_grid_property_is_padded(self):
-    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
-    lon_lat_grid = coordinates.LonLatGrid.T21()
+  def test_fixed_ylm_mapping_with_padding(self):
     spmd_mesh = jax.sharding.Mesh(
         devices=np.array(jax.devices()).reshape((2, 2, 2)),
         axis_names=['z', 'x', 'y'],
     )
     mesh = parallelism.Mesh(
         spmd_mesh=spmd_mesh,
-        field_partitions={'spatial': {'longitude': 'x', 'latitude': 'y'}},
+        field_partitions={
+            'spatial': {
+                'longitude': 'x',
+                'latitude': 'y',
+                'longitude_wavenumber': 'x',
+                'total_wavenumber': 'y',
+                'level': 'z',
+            }
+        },
+    )
+    lon_lat_grid = coordinates.LonLatGrid.T21(
+        mesh=mesh, partition_schema_key='spatial'
+    )
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21(
+        mesh=mesh, partition_schema_key='spatial'
     )
     ylm_map = spherical_harmonics.FixedYlmMapping(
-        lon_lat_grid=lon_lat_grid,
-        ylm_grid=ylm_grid,
-        mesh=mesh,
-        partition_schema_key='spatial',
+        lon_lat_grid, ylm_grid, mesh=mesh, partition_schema_key='spatial'
     )
-    padded_modal_grid = ylm_map.modal_grid
-    self.assertIsInstance(padded_modal_grid, coordinates.SphericalHarmonicGrid)
-    self.assertEqual(ylm_map.modal_grid.total_wavenumbers, 23)
-    self.assertEqual(ylm_map.modal_grid.shape, (64, 32))
+    f = cx.field(np.ones(lon_lat_grid.shape), lon_lat_grid)
+    modal_f = ylm_map.to_modal(f)
+    self.assertEqual(cx.get_coordinate(modal_f), ylm_grid)
+    self.assertEqual(cx.get_coordinate(ylm_map.to_nodal(modal_f)), lon_lat_grid)
+
+    with self.assertRaisesRegex(ValueError, 'Grid padding does not match'):
+      _ = spherical_harmonics.FixedYlmMapping(
+          lon_lat_grid,
+          coordinates.SphericalHarmonicGrid.T21(),
+          mesh=mesh,
+          partition_schema_key='spatial',
+      ).dinosaur_grid
 
   @parameterized.parameters(
       dict(

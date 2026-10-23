@@ -65,7 +65,7 @@ class TemperatureAdjustmentForEnergyBalance(nnx.Module):
 
   @property
   def diagnostics_query(self) -> dict[str, cx.Coordinate]:
-    return {self.imbalance_diagnostic_key: self.ylm_map.nodal_grid}
+    return {self.imbalance_diagnostic_key: self.ylm_map.lon_lat_grid}
 
   def __call__(
       self,
@@ -149,7 +149,7 @@ class GlobalEnergyFixer(nnx.Module):
 
   @property
   def diagnostics_query(self) -> dict[str, cx.Coordinate]:
-    return {'column_energy_budget': self.ylm_map.nodal_grid}
+    return {'column_energy_budget': self.ylm_map.lon_lat_grid}
 
   def __call__(
       self,
@@ -167,12 +167,12 @@ class GlobalEnergyFixer(nnx.Module):
     p_surface = cx.cmap(jnp.exp)(to_nodal(targets['log_surface_pressure']))
     g = self.sim_units.gravity_acceleration
     column_mass = p_surface / g
-    total_mass = self.ylm_map.nodal_grid.integrate(column_mass, radius=1.0)
+    total_mass = self.ylm_map.lon_lat_grid.integrate(column_mass, radius=1.0)
 
     # delta_T = (Target_E - Current_E) / (Cp * Total_Mass)
     # We compute (Target_E - Current_E) by integrating the difference of column
     # energies, to avoid precision issues.
-    energy_diff = self.ylm_map.nodal_grid.integrate(
+    energy_diff = self.ylm_map.lon_lat_grid.integrate(
         column_energy_star_t1 - column_energy_t1, radius=1.0
     )
     cp = self.sim_units.Cp
@@ -211,7 +211,7 @@ class GlobalDryAirMassFixer(nnx.Module):
 
   @property
   def diagnostics_query(self) -> dict[str, cx.Coordinate]:
-    return {'column_dry_air_mass': self.ylm_map.nodal_grid}
+    return {'column_dry_air_mass': self.ylm_map.lon_lat_grid}
 
   def __call__(
       self,
@@ -231,10 +231,10 @@ class GlobalDryAirMassFixer(nnx.Module):
     #       = 1 + delta_mass / total_mass_t1
     # We compute delta_mass by integrating the difference of column masses,
     # to avoid precision issues.
-    mass_diff = self.ylm_map.nodal_grid.integrate(
+    mass_diff = self.ylm_map.lon_lat_grid.integrate(
         column_dry_air_mass_t0 - column_dry_air_mass_t1, radius=1.0
     )
-    total_mass_t1 = self.ylm_map.nodal_grid.integrate(
+    total_mass_t1 = self.ylm_map.lon_lat_grid.integrate(
         column_dry_air_mass_t1, radius=1.0
     )
     gamma = 1.0 + mass_diff / total_mass_t1
