@@ -1350,6 +1350,29 @@ class TransformsTest(parameterized.TestCase):
     actual = seq.output_shapes(inputs)
     self.assertEqual(sorted(actual.keys()), ['a', 'b'])
 
+  def test_to_wind_speed(self):
+    x = cx.SizedAxis('x', 2)
+    inputs = {
+        '10m_u': cx.field(jnp.array([3.0, 0.0]), x),
+        '10m_v': cx.field(jnp.array([4.0, -5.0]), x),
+    }
+    tx = transforms.Sequential([
+        transforms.Identity(),
+        transforms.MergeFromSource(
+            transforms.ToWindSpeed('10m_u', '10m_v', 'wind_speed')
+        ),
+    ])
+    actual = tx(inputs)
+    expected = {
+        '10m_u': inputs['10m_u'],
+        '10m_v': inputs['10m_v'],
+        'wind_speed': cx.field(jnp.array([5.0, 5.0]), x),
+    }
+    cx.testing.assert_fields_allclose(
+        actual['wind_speed'], expected['wind_speed']
+    )
+    self.assertEqual(actual.keys(), expected.keys())
+
 
 class ExtractLocalPatchFromGridTest(parameterized.TestCase):
 

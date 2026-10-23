@@ -2230,6 +2230,36 @@ class VelocityToDivCurl(PytreeTransformABC):
 
 
 @nnx.dataclass
+class ToWindSpeed(PytreeTransformABC):
+  """Computes wind speed from u and v wind components.
+
+  Args:
+    u_key: Key for the u-component of wind in ``inputs``.
+    v_key: Key for the v-component of wind in ``inputs``.
+    out_key: Key for the output wind speed field.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {
+    ...     'u': cx.field(jnp.array([3.0, 0.0])),
+    ...     'v': cx.field(jnp.array([4.0, -5.0])),
+    ... }
+    >>> transforms.ToWindSpeed('u', 'v', 'speed')(inputs)['speed'].data
+    Array([5., 5.], dtype=float32)
+  """
+
+  u_key: str = 'u_component_of_wind'
+  v_key: str = 'v_component_of_wind'
+  out_key: str = 'wind_speed'
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    u, v = inputs[self.u_key], inputs[self.v_key]
+    return {self.out_key: cx.cmap(jnp.hypot)(u, v)}
+
+
+@nnx.dataclass
 class ExtractLocalPatchFromGrid(PytreeTransformABC):
   """Extracts a patch of neighbors from gridded fields around query points.
 
