@@ -82,11 +82,6 @@ def build_model(host_numpy_in_init: bool = False):
 class CheckpointingTest(parameterized.TestCase):
 
   def test_save_and_load_roundtrip(self):
-    if 'GITHUB_ACTIONS' in os.environ:
-      self.skipTest(
-          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
-          'serialization.'
-      )
     path = os.path.join(self.create_tempdir(), 'checkpoint')
     model_cfg = build_model.as_buildable()
     model = api.Model.from_fiddle_config(model_cfg)
@@ -98,11 +93,6 @@ class CheckpointingTest(parameterized.TestCase):
     self.assertEqual(model_cfg, restored_model.fiddle_config)
 
   def test_eager_build_and_load_roundtrip(self):
-    if 'GITHUB_ACTIONS' in os.environ:
-      self.skipTest(
-          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
-          'serialization.'
-      )
     path = os.path.join(self.create_tempdir(), 'eager_checkpoint')
     model_cfg = build_model.as_buildable(host_numpy_in_init=True)
     with self.assertRaises(jax.errors.TracerArrayConversionError):
@@ -114,11 +104,6 @@ class CheckpointingTest(parameterized.TestCase):
     chex.assert_trees_all_equal(nnx.state(restored_model), nnx.state(model))
 
   def test_save_and_load_with_spmd_mesh(self):
-    if 'GITHUB_ACTIONS' in os.environ:
-      self.skipTest(
-          'TODO(dkochkov): Fiddle on PyPI lacks support for bound method '
-          'serialization.'
-      )
     path = os.path.join(self.create_tempdir(), 'checkpoint')
     model_cfg = build_model.as_buildable()
     model_cfg.mesh.field_partitions = {'physics': {'longitude': 'batch'}}

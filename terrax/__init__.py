@@ -14,4 +14,4 @@
 """Terrax: Library for AI-first Earth System Modeling."""
 
 
-__version__ = "0.0.5"  # keep in sync with pyproject.toml
+__version__ = "0.0.6"  # keep in sync with pyproject.toml

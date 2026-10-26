@@ -19,7 +19,7 @@ packages = [
 [project]
 name = "terrax"
 description = "Terrax: Library for AI-first Earth System Modeling"
-version = "0.0.5"  # keep in sync with __version__ in terrax/__init__.py
+version = "0.0.6"  # keep in sync with __version__ in terrax/__init__.py
 authors = [
     {name = "Google LLC", email = "noreply@google.com"},
 ]
@@ -31,17 +31,15 @@ dependencies = [
     "chex",
     "coordax>=0.2.9",
     "dask",
-    "dinosaur>=1.3.6",
+    "dinosaur>=1.5.1",
     "einops",
     "etils",
-    "fiddle>=0.3.0",
-    # "fiddle @ git+https://github.com/google/fiddle.git",
-    "flax>=0.12.0",
+    "fiddle>=0.3.1",
+    # flax 0.12.10 is the first release compatible with jax>=0.11.2, which
+    # renamed `jax.experimental.hijax.HiPrimitive` to `HiPrim`.
+    "flax>=0.12.10",
     "grain",
-    # jax 0.11.2 renamed `jax.experimental.hijax.HiPrimitive` to `HiPrim`, which
-    # breaks `flax.nnx` up to and including flax 0.12.9. The upper bound can be
-    # removed once a flax release containing the fix is available.
-    "jax<0.11.2",
+    "jax",
     "jax-datetime>=0.1.2",
     "jax-solar",
     "jaxlib",
@@ -69,7 +67,7 @@ tests = [
 ]
 docs = [
     "furo==2024.4.27",
-    "Jinja2==3.1.4",
+    "Jinja2==3.1.6",
     "myst-nb==1.1.0",
     "myst-parser==3.0.1",
     "sphinx==7.3.7",
