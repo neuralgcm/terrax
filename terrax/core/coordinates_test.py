@@ -338,6 +338,18 @@ class CoordinatesMethodsTest(parameterized.TestCase):
     self.assertEqual(grid_cls.F48(), grid_cls.TL95())
     self.assertEqual(grid_cls.F64(), grid_cls.TL127())
 
+  def test_lon_lat_grid_construct_explicit_nodes(self):
+    grid = coordinates.LonLatGrid.construct(
+        longitude_nodes=382, latitude_nodes=191
+    )
+    self.assertEqual(grid, coordinates.LonLatGrid(382, 191))
+    with self.assertRaises(ValueError):
+      coordinates.LonLatGrid.construct(
+          gaussian_nodes=64, longitude_nodes=382, latitude_nodes=191
+      )
+    with self.assertRaises(ValueError):
+      coordinates.LonLatGrid.construct(longitude_nodes=382)
+
   def test_lon_lat_grid_partial_integrate(self):
     n_lon, n_lat = 64, 32
     grid = coordinates.LonLatGrid(

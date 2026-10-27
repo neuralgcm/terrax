@@ -428,32 +428,53 @@ class LonLatGrid(cx.Coordinate):
   @classmethod
   def construct(
       cls,
-      gaussian_nodes: int,
+      gaussian_nodes: int | None = None,
       latitude_spacing: str = 'gauss',
       longitude_offset: float = 0.0,
       mesh: parallelism.Mesh | None = None,
       partition_schema_key: str | None = None,
+      *,
+      longitude_nodes: int | None = None,
+      latitude_nodes: int | None = None,
   ) -> LonLatGrid:
-    """Constructs a `LonLatGrid` with specified number of latitude nodes.
+    """Constructs a `LonLatGrid` with specified number of nodes.
 
     Args:
-      gaussian_nodes: number of nodes between the equator and a pole.
-      latitude_spacing: either 'gauss' or 'equiangular'. This determines the
-        spacing of grid points in the latitudinal (north-south) direction.
+      gaussian_nodes: number of nodes between the equator and a pole. Mutually
+        exclusive with `(longitude_nodes, latitude_nodes)`.
+      latitude_spacing: either 'gauss', 'equiangular', 'equiangular_with_poles'.
+        This determines the spacing of grid points in the latitudinal direction.
       longitude_offset: the value of the first longitude node, in radians.
       mesh: optional Mesh that specifies necessary grid padding.
       partition_schema_key: key indicating a partition schema on `mesh` to infer
         padding details. Used only if an appropriate `mesh` is passed in.
+      longitude_nodes: explicit number of longitude nodes; must be specified
+        together with `latitude_nodes` when `gaussian_nodes` is omitted.
+      latitude_nodes: explicit number of latitude nodes; must be specified
+        together with `longitude_nodes` when `gaussian_nodes` is omitted.
 
     Returns:
       Constructed LonLatGrid object.
     """
+    if gaussian_nodes is not None:
+      if longitude_nodes is not None or latitude_nodes is not None:
+        raise ValueError(
+            '`gaussian_nodes` and `(longitude_nodes, latitude_nodes)`, are'
+            ' mutually exclusive, please specify only one.'
+        )
+      longitude_nodes = 4 * gaussian_nodes
+      latitude_nodes = 2 * gaussian_nodes
+    elif longitude_nodes is None or latitude_nodes is None:
+      raise ValueError(
+          'Either `gaussian_nodes` or both `(longitude_nodes, latitude_nodes)`'
+          ' must be specified.'
+      )
     dims = ('longitude', 'latitude')
     ylm_grid = spherical_harmonic.Grid(
         longitude_wavenumbers=0,
         total_wavenumbers=0,
-        longitude_nodes=(4 * gaussian_nodes),
-        latitude_nodes=(2 * gaussian_nodes),
+        longitude_nodes=longitude_nodes,
+        latitude_nodes=latitude_nodes,
         latitude_spacing=latitude_spacing,
         longitude_offset=longitude_offset,
         spherical_harmonics_impl=FastSphericalHarmonics,
