@@ -2430,39 +2430,49 @@ class SanitizeGradients(TransformABC):
   transform: Transform
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    @nnx.custom_vjp
-    def _sanitized_transform(t, inputs):
-      return t(inputs)
+    t_def, t_state_before = nnx.split(self.transform)
 
-    def _sanitized_fwd(t, inputs):
+    def _apply_transform(s, x):
+      t = nnx.merge(t_def, s, copy=True)
+      out = t(x)
+      _, new_s = nnx.split(t)
+      # Return only mutated leaves so unchanged params are not vmap outputs.
+      state_updates = jax.tree.map(
+          lambda old, new: new if new is not old else None, s, new_s
+      )
+      return out, state_updates
+
+    @jax.custom_vjp
+    def _sanitized_transform(s, x):
+      return _apply_transform(s, x)
+
+    def _sanitized_fwd(s, x):
       # we convert any arrays to jax arrays in residual to avoid jax converting
       # them to an internal type of numpy arrays that is not supported in `cx`.
-      t_def, t_state_before = nnx.split(t)
-      to_array = lambda x: jnp.asarray(x, dtype=x.dtype)
-      residuals = (jax.tree.map(to_array, inputs), t_def, t_state_before)
-      return _sanitized_transform(t, inputs), residuals
+      to_array = lambda a: jnp.asarray(a, dtype=a.dtype)
+      residuals = (jax.tree.map(to_array, x), s)
+      return _sanitized_transform(s, x), residuals
 
     def _sanitized_bwd(res, g):
-      input_updates_g, out_g = g
-      inputs, t_def, t_state_before = res
-      t_updates_g, _ = input_updates_g  # inputs are not stateful -> ignored.
-      is_nan = jax.tree.map(jnp.isnan, inputs)
-      safe_inputs = _sanitize_values(inputs, is_nan)  # Sanitize inputs.
+      out_g, state_updates_g = g
+      x, s_before = res
+      is_nan = jax.tree.map(jnp.isnan, x)
+      safe_inputs = _sanitize_values(x, is_nan)  # Sanitize inputs.
       grad_nans = jax.tree.map(jnp.isnan, out_g)  # Sanitize gradients.
       safe_out_g = _sanitize_values(out_g, grad_nans)
-
-      def _apply_transform(s, x):
-        t = nnx.merge(t_def, s, copy=True)
-        out = t(x)
-        _, new_s = nnx.split(t)
-        return out, new_s
-
-      _, vjp_fn = jax.vjp(_apply_transform, t_state_before, safe_inputs)
-      state_g, inputs_g = vjp_fn((safe_out_g, t_updates_g))
-      return state_g, inputs_g
+      _, vjp_fn = jax.vjp(_apply_transform, s_before, safe_inputs)
+      return vjp_fn((safe_out_g, state_updates_g))
 
     _sanitized_transform.defvjp(_sanitized_fwd, _sanitized_bwd)
-    return _sanitized_transform(self.transform, inputs)
+    out, state_updates = _sanitized_transform(t_state_before, inputs)
+    if jax.tree.leaves(state_updates):
+      updated_state = jax.tree.map(
+          lambda old, new: old if new is None else new,
+          t_state_before,
+          state_updates,
+      )
+      nnx.update(self.transform, updated_state)
+    return out
 
 
 #

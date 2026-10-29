@@ -1711,6 +1711,38 @@ class SanitizedNanGradTransformTest(parameterized.TestCase):
     np.testing.assert_allclose(out_san, out_orig, err_msg='output mismatch')
     chex.assert_trees_all_close(grads_san_inner, grads_orig)
 
+  def test_vmap_multiple_calls_grad(self):
+    """Verifies gradients when called multiple times under vmap."""
+    inputs = {
+        'a': cx.field(
+            np.array([[1.0, np.nan, 2.0], [np.nan, 2.0, 3.0]]), 'batch', 'x'
+        )
+    }
+    inputs_filtered = {
+        'a': cx.field(np.array([[1.0, 2.0], [2.0, 3.0]]), 'batch', 'x')
+    }
+
+    def loss_fn(transform, batch_inputs):
+      @nnx.vmap(in_axes=(None, 0))
+      def forward_twice(t, x):
+        y1 = t(x)['a'].data
+        y2 = t(x)['a'].data
+        return jnp.nanmean(jnp.square(y1 + y2))
+
+      batched = {'a': batch_inputs['a'].untag('batch')}
+      return jnp.mean(forward_twice(transform, batched))
+
+    original = SimpleScale(2.0)
+    out_orig, grads_orig = nnx.value_and_grad(loss_fn)(
+        original, inputs_filtered
+    )
+
+    sanitized = transforms.SanitizeGradients(SimpleScale(2.0))
+    out_san, grads_san = nnx.value_and_grad(loss_fn)(sanitized, inputs)
+
+    np.testing.assert_allclose(out_san, out_orig, err_msg='output mismatch')
+    chex.assert_trees_all_close(grads_san['transform'], grads_orig)
+
 
 class NestedTransformTest(parameterized.TestCase):
 
