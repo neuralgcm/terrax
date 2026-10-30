@@ -259,6 +259,27 @@ class TransformsTest(parameterized.TestCase):
     with self.assertRaises(KeyError):
       normalize(inputs)
 
+  def test_scale_fields_per_key_scales(self):
+    x, z = cx.SizedAxis('x', 3), cx.SizedAxis('z', 2)
+    inputs = {
+        'a': cx.field(np.ones((2, 3)), z, x),
+        'b': cx.field(np.ones(x.shape), x),
+    }
+    scale = transforms.ScaleFields({
+        'a': cx.field(np.array([2.0, 0.0]), z),  # per-level, incl. zero mask.
+        'b': cx.field(3.0),
+        'unused_ok': cx.field(np.nan),
+    })
+    out = scale(inputs)
+    expected = {
+        'a': cx.field(np.array([[2.0] * 3, [0.0] * 3]), z, x),
+        'b': cx.field(3.0 * np.ones(x.shape), x),
+    }
+    chex.assert_trees_all_close(out, expected)
+    with self.subTest('raises_on_missing_key'):
+      with self.assertRaises(KeyError):
+        scale({'c': cx.field(np.ones(x.shape), x)})
+
   def test_stop_gradient(self):
     x = cx.SizedAxis('x', 3)
     stop_grad = transforms.StopGradient()

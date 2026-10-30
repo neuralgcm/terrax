@@ -1192,7 +1192,9 @@ class ScaleFields(PytreeTransformABC):
   """Applies x * `self.scale` to all fields in ``inputs``.
 
   Args:
-    scale: The coordax Field used to scale the inputs.
+    scale: The coordax Field used to scale the inputs, or a dict mapping each
+      input key to its own scale Field. When a dict is provided, every key in
+      ``inputs`` must have a scale (a `KeyError` is raised otherwise).
 
   Examples:
     >>> import coordax as cx
@@ -1202,15 +1204,19 @@ class ScaleFields(PytreeTransformABC):
     >>> out = transforms.ScaleFields(cx.field(2.0))(inputs)
     >>> out['a'].data[0]
     Array(2., dtype=float32)
+    >>> out = transforms.ScaleFields({'a': cx.field(3.0)})(inputs)
+    >>> out['a'].data[0]
+    Array(3., dtype=float32)
   """
 
-  def __init__(self, scale: cx.Field):
+  def __init__(self, scale: cx.Field | dict[str, cx.Field]):
     self.scale = TransformParams(scale)
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     scale = self.scale.get_value()
-    scale_fn = lambda x: x * scale
-    return {k: scale_fn(v) for k, v in inputs.items()}
+    if isinstance(scale, dict):
+      return {k: v * scale[k] for k, v in inputs.items()}
+    return {k: v * scale for k, v in inputs.items()}
 
 
 class StandardizeFields(PytreeTransformABC):
