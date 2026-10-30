@@ -149,6 +149,30 @@ class WeightingTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'No SphericalHarmonicGrid'):
       no_skip_weighting.weights(ll_field)
 
+  def test_complement_weighting(self):
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    field = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    low_pass = weighting.SigmoidWavenumberWeighting(
+        cutoff_wavenumber=8, inflection_factor=0.5, width_factor=0.2
+    )
+    high_pass = weighting.ComplementWeighting(low_pass)
+    low = low_pass.weights(field)
+    high = high_pass.weights(field)
+    ones = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    cx.testing.assert_fields_allclose(low + high, ones)
+    cx.testing.assert_fields_allclose(
+        high.isel(longitude_wavenumber=0, total_wavenumber=0), cx.field(0.0)
+    )
+    ls = ylm_grid.fields['total_wavenumber']
+    cx.testing.assert_fields_allclose(high * (ls >= 8), ones * (ls >= 8))
+
+    # Complement of a weighting defaulting to 1.0 on other fields is 0.0.
+    lon_lat_grid = coordinates.LonLatGrid.T21()
+    ll_field = cx.field(np.ones(lon_lat_grid.shape), lon_lat_grid)
+    cx.testing.assert_fields_allclose(
+        high_pass.weights(ll_field), cx.field(0.0)
+    )
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')

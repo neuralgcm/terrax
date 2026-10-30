@@ -154,6 +154,39 @@ class ClipWeighting(Weighting):
 
 
 @dataclasses.dataclass
+class ComplementWeighting(Weighting):
+  """Weighting that wraps a `weighting` and returns `1 - weights`.
+
+  Useful for splitting a term into complementary parts that together recover
+  the wrapped weighting, e.g. applying different metrics to low and high total
+  wavenumbers: `[low_pass]` and `[high_pass, ComplementWeighting(low_pass)]`
+  partition `high_pass` wherever the low-pass weights are 1 at small
+  wavenumbers. Note that the complement of weightings that default to 1.0 on
+  fields without a matching coordinate (e.g. `SigmoidWavenumberWeighting` with
+  `skip_missing=True` on lon-lat fields) is 0.0 on those fields, and that masks
+  of other weightings (e.g. of padded modes) are not inherited.
+
+  Since `Aggregator` normalizes each term by its own summed weights, terms
+  aggregated with `weight_by=[..., low_pass]` and
+  `weight_by=[..., high_pass, ComplementWeighting(low_pass)]` are weighted
+  means over their respective bands and do not add up to the unsplit mean
+  unless each term is weighted by its share of the total weight,
+  `sum(w_term) / sum(w_total)` (e.g. via `Evaluator.term_weights`).
+  """
+
+  weighting: Weighting
+
+  def weights(
+      self,
+      field: cx.Field,
+      field_name: str | None = None,
+      context: dict[str, cx.Field] | None = None,
+  ) -> cx.Field:
+    """Returns one minus the weights of the wrapped weighting."""
+    return 1.0 - self.weighting.weights(field, field_name, context=context)
+
+
+@dataclasses.dataclass
 class PerVariableWeighting(Weighting):
   """Weighting that returns weights from `weightings_by_name[field_name]`."""
 

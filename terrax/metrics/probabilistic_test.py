@@ -52,6 +52,81 @@ class ProbabilisticMetricsTest(parameterized.TestCase):
           cx.field(np.full(d.shape, 1.0), d),
       )
 
+  def test_crps_pseudo_huber_kernel(self):
+    """CRPS with `delta > 0` uses the pseudo-Huber kernel in both terms."""
+    e, d = cx.SizedAxis('ensemble', 2), cx.SizedAxis('d', 5)
+    rng = np.random.default_rng(seed=0)
+    pred_data = rng.normal(size=e.shape + d.shape)
+    target_data = rng.normal(size=d.shape)
+    predictions = {'x': cx.field(pred_data, e, d)}
+    targets = {'x': cx.field(target_data, d)}
+    delta = 0.7
+    rho = lambda r: np.sqrt(r**2 + delta**2) - delta
+
+    with self.subTest('delta_zero_matches_default'):
+      default_crps = probabilistic_metrics.CRPS()
+      zero_delta_crps = probabilistic_metrics.CRPS(delta=0.0)
+      self.assertEqual(
+          {k: v.unique_name for k, v in default_crps.statistics.items()},
+          {k: v.unique_name for k, v in zero_delta_crps.statistics.items()},
+      )
+
+    crps_metric = probabilistic_metrics.CRPS(delta=delta)
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'crps': crps_metric}, predictions, targets
+    )
+    skill = stats['EnergySkill_ensemble_beta_1.0_delta_0.7']['x']
+    spread = stats['EnergySpread_ensemble_beta_1.0_delta_0.7']['x']
+    expected_skill = np.mean(rho(pred_data - target_data), axis=0)
+    expected_spread = rho(pred_data[0] - pred_data[1])
+    np.testing.assert_allclose(skill.data, expected_skill, rtol=1e-5)
+    np.testing.assert_allclose(spread.data, expected_spread, rtol=1e-5)
+    values = crps_metric.values_from_mean_statistics(stats)
+    np.testing.assert_allclose(
+        values['x'].data,
+        expected_skill - 0.5 * expected_spread,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+    with self.subTest('large_delta_approaches_fair_squared_error'):
+      # For |errors| << delta, the score tends to the fair squared error of
+      # the ensemble mean, which for 2 members is (X - Y)(X' - Y) / (2 delta).
+      large_delta = 1e3
+      large_delta_crps = probabilistic_metrics.CRPS(delta=large_delta)
+      stats = base.compute_unique_statistics_for_all_metrics(
+          {'crps': large_delta_crps}, predictions, targets
+      )
+      values = large_delta_crps.values_from_mean_statistics(stats)
+      errors = pred_data - target_data
+      expected = errors[0] * errors[1] / (2 * large_delta)
+      np.testing.assert_allclose(values['x'].data, expected, rtol=1e-3)
+
+    with self.subTest('continuous_gradient_at_zero_error'):
+      skill_stat = probabilistic_metrics.EnergySkill(delta=delta)
+      zero_error_preds = np.stack([target_data, target_data])
+
+      def total_skill(pred):
+        return skill_stat.compute({'x': cx.field(pred, e, d)}, targets)['x']
+
+      grad = jax.grad(lambda p: total_skill(p).data.sum())(zero_error_preds)
+      np.testing.assert_allclose(grad, 0.0, atol=1e-6)
+
+    # TODO(dkochkov): Consider including tests covering: unbiasedness of the
+    # 2-member estimator against Monte-Carlo estimates of E[ρ(X - Y)] and
+    # E[ρ(X - X')], and properness on a Gaussian toy problem (expected score
+    # over a grid of means and spreads minimized at the truth for several
+    # delta).
+
+  @parameterized.parameters(
+      probabilistic_metrics.EnergySkill,
+      probabilistic_metrics.EnergySpread,
+      probabilistic_metrics.CRPS,
+  )
+  def test_negative_delta_raises_at_construction(self, cls):
+    with self.assertRaisesRegex(ValueError, 'delta must be non-negative'):
+      cls(delta=-0.1)
+
   def test_energy_spread_broadcast_target_nans_behavior(self):
     e, d = cx.SizedAxis('ensemble', 2), cx.SizedAxis('d', 4)
     predictions = {'x': cx.field(np.ones(e.shape + d.shape), e, d)}
@@ -94,54 +169,43 @@ class ProbabilisticMetricsTest(parameterized.TestCase):
     expected_crps = expected_skill - 0.5 * expected_spread
     cx.testing.assert_fields_allclose(values['x'], expected_crps, atol=1e-6)
 
-  def test_energy_spread_algorithms(self):
-    stat_flip = probabilistic_metrics.EnergySpread(algorithm='flip')
-    stat_sort = probabilistic_metrics.EnergySpread(algorithm='sort')
-    stat_all_pairs = probabilistic_metrics.EnergySpread(algorithm='all_pairs')
-    stat_ring_chain = probabilistic_metrics.EnergySpread(algorithm='ring_chain')
-    stat_auto = probabilistic_metrics.EnergySpread(algorithm='auto')
+  @parameterized.parameters(dict(delta=0.0), dict(delta=0.7))
+  def test_energy_spread_algorithms(self, delta):
+    def make_stat(algorithm):
+      return probabilistic_metrics.EnergySpread(
+          algorithm=algorithm, delta=delta
+      )
+
+    algorithms = ['flip', 'all_pairs', 'ring_chain', 'auto']
+    if delta == 0.0:
+      algorithms.append('sort')
+    else:
+      with self.assertRaisesRegex(ValueError, 'sort algorithm only supports'):
+        make_stat('sort')
+    stats = {algorithm: make_stat(algorithm) for algorithm in algorithms}
+
+    def expected_spread(pred_data):
+      # Mean of ρ(x_i - x_j) over all ordered pairs of members i != j.
+      n = pred_data.shape[0]
+      diffs = pred_data[:, None] - pred_data[None, :]
+      rho = np.sqrt(diffs**2 + delta**2) - delta
+      return rho.sum(axis=(0, 1)) / (n * (n - 1))
 
     rng = np.random.default_rng(seed=0)
     d = cx.SizedAxis('d', 4)
     targets = {'x': cx.field(rng.random(d.shape), d)}
 
-    with self.subTest('n=2'):
-      e_size_2 = cx.SizedAxis('ensemble', 2)
-      ens_2_predictions = {
-          'x': cx.field(rng.random(e_size_2.shape + d.shape), e_size_2, d)
-      }
-
-      spread_flip = stat_flip.compute(ens_2_predictions, targets)['x']
-      spread_sort = stat_sort.compute(ens_2_predictions, targets)['x']
-      spread_all_pairs = stat_all_pairs.compute(ens_2_predictions, targets)['x']
-      spread_ring_chain = stat_ring_chain.compute(ens_2_predictions, targets)[
-          'x'
-      ]
-      spread_auto = stat_auto.compute(ens_2_predictions, targets)['x']
-
-      cx.testing.assert_fields_allclose(spread_flip, spread_sort, atol=1e-6)
-      cx.testing.assert_fields_allclose(
-          spread_flip, spread_all_pairs, atol=1e-6
-      )
-      cx.testing.assert_fields_allclose(
-          spread_flip, spread_ring_chain, atol=1e-6
-      )
-      cx.testing.assert_fields_allclose(spread_flip, spread_auto, atol=1e-6)
-
-    with self.subTest('n=4'):
-      e_size_4 = cx.SizedAxis('ensemble', 4)
-      ens_4_predictions = {
-          'x': cx.field(rng.random(e_size_4.shape + d.shape), e_size_4, d)
-      }
-
-      spread_sort4 = stat_sort.compute(ens_4_predictions, targets)['x']
-      spread_pairs4 = stat_all_pairs.compute(ens_4_predictions, targets)['x']
-      spread_chain4 = stat_ring_chain.compute(ens_4_predictions, targets)['x']
-      spread_auto4 = stat_auto.compute(ens_4_predictions, targets)['x']
-
-      cx.testing.assert_fields_allclose(spread_sort4, spread_pairs4, atol=1e-6)
-      cx.testing.assert_fields_allclose(spread_sort4, spread_chain4, atol=1e-6)
-      cx.testing.assert_fields_allclose(spread_sort4, spread_auto4, atol=1e-6)
+    for n in (2, 4):
+      e = cx.SizedAxis('ensemble', n)
+      pred_data = rng.random(e.shape + d.shape)
+      predictions = {'x': cx.field(pred_data, e, d)}
+      expected = cx.field(expected_spread(pred_data), d)
+      for algorithm, stat in stats.items():
+        if algorithm == 'flip' and n != 2:
+          continue  # `flip` is only defined for 2 members.
+        with self.subTest(n=n, algorithm=algorithm):
+          spread = stat.compute(predictions, targets)['x']
+          cx.testing.assert_fields_allclose(spread, expected, atol=1e-6)
 
   @parameterized.parameters(
       dict(n=2),
