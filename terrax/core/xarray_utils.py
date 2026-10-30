@@ -194,7 +194,7 @@ _TimedeltaOrNested: TypeAlias = np.timedelta64 | dict[str, np.timedelta64]
 
 def ensure_timedelta_axis(
     ds: _DatasetOrNestedDataset,
-    timedelta_origin: _TimedeltaOrNested = np.timedelta64(0),
+    timedelta_origin: _TimedeltaOrNested = np.timedelta64(0, 's'),
 ) -> _DatasetOrNestedDataset:
   """Returns `ds` indexed by `timedelta` rather than absolute `time`.
 

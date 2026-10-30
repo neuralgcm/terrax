@@ -72,7 +72,7 @@ def _check_and_get_periods(
     interval: np.timedelta64, resolution: np.timedelta64, name: str = 'interval'
 ) -> int:
   """Checks interval bounds and returns the number of periods."""
-  if interval % resolution != np.timedelta64(0):
+  if interval % resolution != np.timedelta64(0, 's'):
     raise ValueError(
         f'{name}({interval}) must be a multiple of resolution({resolution}).'
     )
@@ -273,14 +273,16 @@ class IntervalDiagnostic(TemporalDiagnosticModule):
     )
 
     if self.accumulation_frequency is not None:
-      if self.resolution % self.accumulation_frequency != np.timedelta64(0):
+      if self.resolution % self.accumulation_frequency != np.timedelta64(
+          0, 's'
+      ):
         raise ValueError(
             f'{self.resolution=} must be a multiple of '
             f'{self.accumulation_frequency=}.'
         )
       if self.default_timedelta is not None:
         timedelta = self.default_timedelta
-        if self.accumulation_frequency % timedelta != np.timedelta64(0):
+        if self.accumulation_frequency % timedelta != np.timedelta64(0, 's'):
           raise ValueError(
               f'{self.accumulation_frequency=} must be a multiple of '
               f'{self.default_timedelta=}.'

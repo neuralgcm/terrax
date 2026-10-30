@@ -238,22 +238,22 @@ class InferenceRunner:
         )
     unique_freqs = self.unique_output_freqs
     for finer_freq, coarser_freq in zip(unique_freqs[:-1], unique_freqs[1:]):
-      if coarser_freq % finer_freq != np.timedelta64(0):
+      if coarser_freq % finer_freq != np.timedelta64(0, 's'):
         raise ValueError(
             'output frequencies must be congruent, i.e. each frequency must be '
             f'a multiple of every finer one, but {coarser_freq=} is not a '
             f'multiple of {finer_freq=}'
         )
     coarsest_freq = self.coarsest_output_freq
-    if self.output_duration % coarsest_freq != np.timedelta64(0):
+    if self.output_duration % coarsest_freq != np.timedelta64(0, 's'):
       raise ValueError(
           f'{self.output_duration=} must be a multiple of {coarsest_freq=}'
       )
-    if self.unroll_duration % coarsest_freq != np.timedelta64(0):
+    if self.unroll_duration % coarsest_freq != np.timedelta64(0, 's'):
       raise ValueError(
           f'{self.unroll_duration=} must be a multiple of {coarsest_freq=}'
       )
-    if self.write_duration % coarsest_freq != np.timedelta64(0):
+    if self.write_duration % coarsest_freq != np.timedelta64(0, 's'):
       raise ValueError(
           f'{self.write_duration=} must be a multiple of {coarsest_freq=}'
       )
@@ -273,7 +273,7 @@ class InferenceRunner:
             f'write_duration in steps for {ds_key!r} ({steps_per_write}) must '
             f'be a multiple of its lead_time chunk size ({group_chunk})'
         )
-    if self.checkpoint_duration % self.write_duration != np.timedelta64(0):
+    if self.checkpoint_duration % self.write_duration != np.timedelta64(0, 's'):
       raise ValueError(
           f'{self.checkpoint_duration=} must be a multiple of'
           f' {self.write_duration=}'
@@ -433,7 +433,9 @@ class InferenceRunner:
       # If using streaming dynamic queries, we fetch metadata to finalize specs.
       first_time = self.init_times[0].astype('datetime64[ns]')
       q_stream = self.dynamic_query_inputs.get_forecast(first_time)
-      q_data = q_stream.get_data(np.timedelta64(0), self.finest_output_freq)
+      q_data = q_stream.get_data(
+          np.timedelta64(0, 's'), self.finest_output_freq
+      )
       q_data = {k: v.isel(time=0, drop=True) for k, v in q_data.items()}
       c_types = data_specs.get_nested_coord_types(
           self._dynamic_queries_read_spec
@@ -455,7 +457,11 @@ class InferenceRunner:
     # dimension order stays (realization, init_time, lead_time, ...).
     subtrees = {}
     for ds_key, child in template.children.items():
-      lead_times = np.arange(0, self.output_duration, self.output_freqs[ds_key])
+      lead_times = np.arange(
+          np.timedelta64(0, 's'),
+          self.output_duration,
+          self.output_freqs[ds_key],
+      )
       subtrees[ds_key] = _datatree_expand_dims(
           child, lead_time=lead_times.astype('timedelta64[ns]')
       )
@@ -661,7 +667,8 @@ class InferenceRunner:
       )
       dynamic_inputs = xarray_utils.model_dynamic_inputs_from_xarray(
           dynamic_inputs_forecast.get_data(
-              np.timedelta64(0), self.model.timestep  # pyrefly: ignore[bad-argument-type]
+              np.timedelta64(0, 's'),
+              self.model.timestep,  # pyrefly: ignore[bad-argument-type]
           ),
           model=self.model,
       )

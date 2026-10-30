@@ -1113,7 +1113,7 @@ def unroll_for_template(
   )
   has_t0 = list({
       cx.coords.extract(c, coordinates.TimeDelta).deltas[0]
-      == np.timedelta64(0)
+      == np.timedelta64(0, 's')
       for c in jax.tree.leaves(combined_coords, is_leaf=cx.is_coord)
   })
   if len(has_t0) != 1:
