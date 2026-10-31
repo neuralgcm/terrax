@@ -32,7 +32,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from terrax.core import pytree_utils
 from terrax.core import typing
 import xarray
 
@@ -42,22 +41,14 @@ P = jax.sharding.PartitionSpec
 Schema = str
 DimensionName = str
 AxisPartition = str | tuple[str, ...] | None
-ArrayPartition = tuple[AxisPartition, ...]
 DimPartitions = dict[DimensionName, AxisPartition]
 
-ArrayPartitions = dict[Schema, ArrayPartition]
 FieldPartitions = dict[Schema, DimPartitions]
 
 # Axis partitions specify how to partition a single dimension of an array, which
 # can be either a single axis along the device mesh, specified as a `str`,
 # a `tuple[str, ...]` if the axis is partitioned acorss multiple device axes
 # or `None` if the dimension is not partitioned (i.e. replicated).
-
-# Array partitions specify an AxisPartition per axis.
-#
-# For example, if we have a 3D array and we want to partition it across
-# a device mesh `('x', 'y')`, along the first dimension, we would specify
-#   `array_partition = (('x', 'y'), None, None)`.
 
 # DimPartitions determines how each dimension of a field is split (partitioned)
 # across multiple devices.
@@ -207,20 +198,12 @@ def rearrange_spmd_mesh(
   return jax.sharding.Mesh(devices, retained_axes + spmd_mesh_axis_names)
 
 
-# TODO(dkochkov): drop array_partitions specification when partitions can be
-# specified using field_partitions.
-
-
 @dataclasses.dataclass(frozen=True)
 class Mesh:
-  """Holds the device mesh and array/field partitioning strategies.
+  """Holds the device mesh and field partitioning strategies.
 
   Attributes:
     spmd_mesh: Jax sharding mesh object.
-    array_partitions: Schemas for partitioning arrays. An array partition
-      specifies how to partition a an array of a specific rank. For example, to
-      partition a 3d array across a device mesh `('x', 'y')`, along the first
-      dimension, we would use a `(('x', 'y'), None, None)` schema.
     field_partitions: Schemas for partitioning cx.Field. Each schema provides
       partitioning rules for array axes specified by the dimension names. For
       example, schema `{'vertical': {'level': ('z', 'x', 'y'), 'layer': 'z'}}`
@@ -233,9 +216,6 @@ class Mesh:
   """
 
   spmd_mesh: jax.sharding.Mesh | None = None
-  array_partitions: dict[Schema, ArrayPartition] = dataclasses.field(
-      default_factory=dict
-  )
   field_partitions: dict[Schema, DimPartitions] = dataclasses.field(
       default_factory=dict
   )
@@ -246,13 +226,11 @@ class Mesh:
 
   def __hash__(self) -> int:
     # Convert dicts to frozenset of items to make them hashable.
-    array_partitions_hashable = frozenset(self.array_partitions.items())
     field_partitions_hashable = frozenset(
         (k, frozenset(v.items())) for k, v in self.field_partitions.items()
     )
     return hash((
         self.spmd_mesh,
-        array_partitions_hashable,
         field_partitions_hashable,
         self.memory_kind,
     ))
@@ -260,13 +238,6 @@ class Mesh:
   def _validate_partitions(self):
     """Validates that partitioning options are compatible with the mesh."""
     if self.spmd_mesh is not None:
-      for k, v in self.array_partitions.items():
-        partition_axes = jax.tree.leaves(v)
-        if not set(partition_axes).issubset(set(self.axis_names)):
-          raise ValueError(f'Spec {k, v} use axes not in {self.axis_names}')
-        if np.unique(partition_axes).size != len(partition_axes):
-          raise ValueError(f'Encountered duplicate in spec {k, v}')
-
       for _, dim_partitions in self.field_partitions.items():
         for k, v in dim_partitions.items():
           partition_axes = jax.tree.leaves(v)
@@ -310,14 +281,12 @@ class Mesh:
     """Applies `schema` sharding constraint to `inputs`.
 
     Args:
-      inputs: Pytree of `cx.Field` and/or array leaves to constrain. Scalar
-        leaves (Python numbers or 0-d arrays) cannot be partitioned and are
-        returned unchanged.
-      schema: Name of the partition schema to apply: a key in
-        `self.field_partitions` for `cx.Field` leaves or in
-        `self.array_partitions` for array leaves. A tuple of names applies the
-        constraints from last to first, e.g. `('b', 'a')` constrains `inputs` to
-        schema `a` and then to schema `b`. `None` applies no constraint.
+      inputs: Pytree of `cx.Field` leaves to constrain. Scalar leaves (Python
+        numbers or 0-d arrays) cannot be partitioned and are returned unchanged.
+      schema: Name of the partition schema in `self.field_partitions` to apply.
+        A tuple of names applies the constraints from last to first, e.g. `('b',
+        'a')` constrains `inputs` to schema `a` and then to schema `b`. `None`
+        applies no constraint.
 
     Returns:
       `inputs` with sharding constraint(s) applied.
@@ -333,22 +302,19 @@ class Mesh:
     is_field = lambda x: isinstance(x, cx.Field)
     is_scalar = lambda x: not is_field(x) and np.ndim(x) == 0
     all_leaves, tree_def = jax.tree.flatten(inputs, is_leaf=is_field)
-    array_leaves = [x for x in all_leaves if not (is_field(x) or is_scalar(x))]
-    if np.unique([x.ndim for x in array_leaves]).size > 1:
+    if non_field_leaves := [
+        x for x in all_leaves if not (is_field(x) or is_scalar(x))
+    ]:
       raise ValueError(
-          'All arrays in the pytree must have the same rank. Got:'
-          f' {[x.ndim for x in array_leaves]=}'
+          'All non-scalar leaves in the pytree must be `cx.Field`s. Got:'
+          f' {[type(x) for x in non_field_leaves]}'
       )
     if self.spmd_mesh is None:
       return inputs
-    leaves = []
-    for x in all_leaves:
-      if is_field(x):
-        leaves.append(self._with_sharding_constraint_field(x, schema))
-      elif is_scalar(x):
-        leaves.append(x)
-      else:
-        leaves.append(self._with_sharding_constraint_array(x, schema))
+    leaves = [
+        self._with_sharding_constraint_field(x, schema) if is_field(x) else x
+        for x in all_leaves
+    ]
     return jax.tree.unflatten(tree_def, leaves)
 
   def get_sharding(
@@ -380,24 +346,6 @@ class Mesh:
     return jax.sharding.NamedSharding(
         self.spmd_mesh, pspec, memory_kind=self.memory_kind
     )
-
-  def _with_sharding_constraint_array(
-      self, array: jax.Array, schema: str
-  ) -> jax.Array:
-    """Applies sharding constraint to `array`.
-
-    Args:
-      array: array to apply sharding constraint to.
-      schema: key in `self.array_partitions` indicating sharding schema.
-
-    Returns:
-      `inputs` with sharding constraint(s) applied.
-    """
-    p_specs = P(*self.array_partitions[schema])
-    sharding = jax.sharding.NamedSharding(
-        self.spmd_mesh, p_specs, memory_kind=self.memory_kind  # pyrefly: ignore[bad-argument-type]
-    )
-    return jax.lax.with_sharding_constraint(array, sharding)
 
   def _with_sharding_constraint_field(
       self, field: cx.Field, schema: str
@@ -477,70 +425,6 @@ def default_mesh() -> Mesh:
         'Please provide an explicit mesh.'
     )
   return Mesh()
-
-
-# TODO(dkochkov): Remove these temporary functions once we can rely on imposing
-# sharding constraints on coordax.Field leaves.
-def with_dycore_sharding(
-    mesh: Mesh | None,
-    inputs: typing.PyTreeState,
-) -> typing.PyTreeState:
-  """Applies even sharding variants to inputs depending on input shape."""
-
-  def f(y: jax.Array) -> jax.Array:
-    assert isinstance(mesh, Mesh)  # make pytype happy.
-    if y.ndim == 1 and y.dtype == jnp.uint32:
-      return y
-    elif y.ndim == 3 and y.shape[0] != 1:
-      return mesh.with_sharding_constraint(y, 'dycore_3d')
-    elif y.ndim == 3 and y.shape[0] == 1:
-      return mesh.with_sharding_constraint(y, 'dycore_3d_surface')
-    elif y.ndim == 2:
-      return mesh.with_sharding_constraint(y, 'dycore_2d')
-    else:
-      raise ValueError(f'Unsupported array shape: {y.shape}')
-
-  if mesh is None or mesh.spmd_mesh is None:
-    return inputs
-  return pytree_utils.tree_map_over_nonscalars(f, inputs)  # pyrefly: ignore[bad-argument-type]
-
-
-def with_physics_sharding(
-    mesh: Mesh | None,
-    inputs: typing.PyTreeState,
-) -> typing.PyTreeState:
-  """Applies horizontal sharding variants depending on input shape."""
-
-  def f(y: jax.Array) -> jax.Array:
-    assert isinstance(mesh, Mesh)  # make pytype happy.
-    if y.ndim == 1 and y.dtype == jnp.uint32:
-      return y
-    elif y.ndim == 3:
-      return mesh.with_sharding_constraint(y, 'physics_3d')
-    elif y.ndim == 2:
-      return mesh.with_sharding_constraint(y, 'physics_2d')
-    else:
-      raise ValueError(f'Unsupported array shape: {y.shape}')
-
-  if mesh is None or mesh.spmd_mesh is None:
-    return inputs
-  return pytree_utils.tree_map_over_nonscalars(f, inputs)  # pyrefly: ignore[bad-argument-type]
-
-
-def with_dycore_to_physics_sharding(
-    mesh: Mesh | None,
-    inputs: typing.PyTreeState,
-) -> typing.PyTreeState:
-  """Applies dycore sharding followed by physics sharding constraints."""
-  return with_physics_sharding(mesh, with_dycore_sharding(mesh, inputs))
-
-
-def with_physics_to_dycore_sharding(
-    mesh: Mesh | None,
-    inputs: typing.PyTreeState,
-) -> typing.PyTreeState:
-  """Applies physics sharding followed by dycore sharding constraints."""
-  return with_dycore_sharding(mesh, with_physics_sharding(mesh, inputs))
 
 
 #

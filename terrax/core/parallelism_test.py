@@ -56,25 +56,6 @@ class MeshTest(parameterized.TestCase):
         np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
     )
 
-    with self.subTest('valid_array_partitions'):
-      array_partitions = {
-          'vertical': (('z', 'x', 'y'), None, None),
-          'horizontal': (None, ('z', 'x'), 'y'),
-      }
-      parallelism.Mesh(spmd_mesh, array_partitions=array_partitions)
-
-    with self.subTest('invalid_array_partitions_unknown_name'):
-      array_partitions = {'unknownB': (('B', 'x', 'y'), None, 'z')}
-      with self.assertRaisesRegex(ValueError, re.escape(r'use axes not in')):
-        parallelism.Mesh(spmd_mesh, array_partitions=array_partitions)
-
-    with self.subTest('invalid_array_partitions_duplicate_axis'):
-      array_partitions = {'p': (('x', 'x', 'y'), None, 'z')}
-      with self.assertRaisesRegex(
-          ValueError, re.escape(r'Encountered duplicate')
-      ):
-        parallelism.Mesh(spmd_mesh, array_partitions=array_partitions)
-
     with self.subTest('valid_field_partitions'):
       field_partitions = {
           'vertical': {'level': ('z', 'x', 'y'), 'layer': 'z'},
@@ -110,30 +91,6 @@ class MeshTest(parameterized.TestCase):
         mesh = parallelism.Mesh()
         self.assertIsInstance(mesh, parallelism.Mesh)
 
-  def test_array_constraint(self):
-    spmd_mesh = jax.sharding.Mesh(
-        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
-    )
-    array_partitions = {
-        'vertical': (('z', 'x', 'y'), None, None),
-        'horizontal': (None, ('z', 'x'), 'y'),
-        'replicated': (None, None, None),
-    }
-    mesh = parallelism.Mesh(
-        spmd_mesh=spmd_mesh, array_partitions=array_partitions
-    )
-    shape = (16, 8, 14)
-    input_array = np.ones(shape)
-    array_vertical = mesh.with_sharding_constraint(input_array, 'vertical')
-    actual_shard_shape = array_vertical.sharding.shard_shape(shape)
-    self.assertEqual(actual_shard_shape, (16 // (2 * 2 * 2), 8, 14))
-    array_horizontal = mesh.with_sharding_constraint(input_array, 'horizontal')
-    actual_shard_shape = array_horizontal.sharding.shard_shape(shape)
-    self.assertEqual(actual_shard_shape, (16, 8 // (2 * 2), 14 // 2))
-    array_replicated = mesh.with_sharding_constraint(input_array, 'replicated')
-    actual_shard_shape = array_replicated.sharding.shard_shape(shape)
-    self.assertEqual(actual_shard_shape, shape)
-
   def test_field_constraint(self):
     spmd_mesh = jax.sharding.Mesh(
         np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
@@ -167,35 +124,25 @@ class MeshTest(parameterized.TestCase):
     actual_shard_shape = field_horizontal.data.sharding.shard_shape(shape)
     self.assertEqual(actual_shard_shape, (16, 8 // (2 * 2), 14 // 2))
 
-  def test_mixed_pytree_constraint(self):
+  def test_pytree_of_fields_constraint(self):
     spmd_mesh = jax.sharding.Mesh(
         np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
     )
-    array_partitions = {
-        'vertical': (('z', 'x', 'y'), None),
-    }
     field_partitions = {
         'vertical': {'level': ('z', 'x', 'y'), 'layer': 'z'},
     }
     mesh = parallelism.Mesh(
         spmd_mesh=spmd_mesh,
-        array_partitions=array_partitions,
         field_partitions=field_partitions,
     )
     input_pytree = {
-        'a': np.ones((16, 7)),
         'b': cx.field(np.ones((16, 7)), 'level', 'y'),
-        'c': np.zeros((32, 7)),
         'd': cx.field(np.zeros((2, 16, 7)), 'b', 'level', 'x'),
         'e': cx.field(np.arange(32), 'layer'),
     }
     sharded_pytree = mesh.with_sharding_constraint(input_pytree, 'vertical')
-    a_shard_shape = sharded_pytree['a'].sharding.shard_shape((16, 7))
-    self.assertEqual(a_shard_shape, (16 // (2 * 2 * 2), 7))
     b_shard_shape = sharded_pytree['b'].data.sharding.shard_shape((16, 7))
     self.assertEqual(b_shard_shape, (16 // (2 * 2 * 2), 7))
-    c_shard_shape = sharded_pytree['c'].sharding.shard_shape((32, 7))
-    self.assertEqual(c_shard_shape, (32 // (2 * 2 * 2), 7))
     d_shard_shape = sharded_pytree['d'].data.sharding.shard_shape((2, 16, 7))
     self.assertEqual(d_shard_shape, (2, 16 // (2 * 2 * 2), 7))
     e_shard_shape = sharded_pytree['e'].data.sharding.shard_shape((32,))
@@ -231,14 +178,17 @@ class MeshTest(parameterized.TestCase):
           mesh.with_sharding_constraint(input_pytree, 'vertical'), input_pytree
       )
 
-  def test_raises_if_arrays_have_different_ranks(self):
-    array_partitions = {'vertical': (('z', 'x', 'y'), None)}
-    mesh = parallelism.Mesh(array_partitions=array_partitions)
+  def test_raises_if_non_field_array_in_pytree(self):
+    field_partitions = {'vertical': {'level': ('z', 'x', 'y')}}
+    mesh = parallelism.Mesh(field_partitions=field_partitions)
     with self.assertRaisesRegex(
         ValueError,
-        re.escape('All arrays in the pytree must have the same rank.'),
+        re.escape('All non-scalar leaves in the pytree must be `cx.Field`s.'),
     ):
-      input_pytree = {'rank_2': np.ones((16, 7)), 'rank_3': np.ones((16, 7, 9))}
+      input_pytree = {
+          'field': cx.field(np.ones((16, 7)), 'level', 'y'),
+          'raw_array': np.ones((16, 7)),
+      }
       mesh.with_sharding_constraint(input_pytree, 'vertical')
 
 
@@ -336,7 +286,7 @@ class CoupledModuleMock(nnx.Module):
 
 
 class HelperFunctionsTest(parameterized.TestCase):
-  """Tests helper functions for dycore and physics constraints on arrays."""
+  """Tests helper functions for Mesh and module sharding."""
 
   def test_rearrange_spmd_simple_rename(self):
     devices = np.array(jax.devices()).reshape((1, 2, 2, 2))
@@ -374,75 +324,6 @@ class HelperFunctionsTest(parameterized.TestCase):
     )
     self.assertEqual(actual, expected)
 
-  def test_dycore_sharding(self):
-    spmd_mesh = jax.sharding.Mesh(
-        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
-    )
-    array_partitions = {
-        'dycore_3d': ('z', 'x', 'y'),
-        'dycore_3d_surface': (None, 'x', 'y'),
-        'dycore_2d': ('x', 'y'),
-    }
-    mesh = parallelism.Mesh(
-        spmd_mesh=spmd_mesh, array_partitions=array_partitions
-    )
-    inputs = {
-        'volume': np.ones((8, 32, 16)),
-        'surface': np.ones((1, 32, 16)),
-        '2d_surface': np.ones((32, 16)),
-        'rng': jax.random.PRNGKey(0),
-    }
-    with mesh.spmd_mesh:
-      sharded_inputs = parallelism.with_dycore_sharding(mesh, inputs)
-      volume_shard_shape = sharded_inputs['volume'].sharding.shard_shape(
-          (8, 32, 16)
-      )
-      self.assertEqual(volume_shard_shape, (8 // 2, 32 // 2, 16 // 2))
-      surface_shard_shape = sharded_inputs['surface'].sharding.shard_shape(
-          (1, 32, 16)
-      )
-      self.assertEqual(surface_shard_shape, (1, 32 // 2, 16 // 2))
-      two_d_shard_shape = sharded_inputs['2d_surface'].sharding.shard_shape(
-          (32, 16)
-      )
-      self.assertEqual(two_d_shard_shape, (32 // 2, 16 // 2))
-      rng_shard_shape = sharded_inputs['rng'].sharding.shard_shape((2,))
-      self.assertEqual(rng_shard_shape, (2,))
-
-  def test_physics_sharding(self):
-    spmd_mesh = jax.sharding.Mesh(
-        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
-    )
-    array_partitions = {
-        'physics_3d': (None, ('x', 'z'), 'y'),
-        'physics_2d': (('x', 'z'), 'y'),
-    }
-    mesh = parallelism.Mesh(
-        spmd_mesh=spmd_mesh, array_partitions=array_partitions
-    )
-    inputs = {
-        'volume': np.ones((8, 32, 16)),
-        'surface': np.ones((1, 32, 16)),
-        '2d_surface': np.ones((32, 16)),
-        'rng': jax.random.PRNGKey(0),
-    }
-    with mesh.spmd_mesh:
-      sharded_inputs = parallelism.with_physics_sharding(mesh, inputs)
-      volume_shard_shape = sharded_inputs['volume'].sharding.shard_shape(
-          (8, 32, 16)
-      )
-      self.assertEqual(volume_shard_shape, (8, 32 // (2 * 2), 16 // 2))
-      surface_shard_shape = sharded_inputs['surface'].sharding.shard_shape(
-          (1, 32, 16)
-      )
-      self.assertEqual(surface_shard_shape, (1, 32 // (2 * 2), 16 // 2))
-      two_d_shard_shape = sharded_inputs['2d_surface'].sharding.shard_shape(
-          (32, 16)
-      )
-      self.assertEqual(two_d_shard_shape, (32 // (2 * 2), 16 // 2))
-      rng_shard_shape = sharded_inputs['rng'].sharding.shard_shape((2,))
-      self.assertEqual(rng_shard_shape, (2,))
-
   def test_update_mesh_properties_roundtrip(self):
     spmd_mesh = jax.sharding.Mesh(
         np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
@@ -473,10 +354,9 @@ class HelperFunctionsTest(parameterized.TestCase):
       base_cfg = fdl.Config(parallelism.Mesh)
       active_mesh = parallelism.Mesh(
           spmd_mesh=spmd_mesh,
-          array_partitions={'vertical': ('z', None)},
           field_partitions={'horizontal': {'lon': 'x'}},
       )
-      all_attrs = ('spmd_mesh', 'array_partitions', 'field_partitions')
+      all_attrs = ('spmd_mesh', 'field_partitions')
       updated_cfg = parallelism.update_mesh_properties(
           base_cfg, mesh=active_mesh, attrs_to_update=all_attrs
       )
