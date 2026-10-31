@@ -74,13 +74,15 @@ class ModalNeuralDivCurlParameterization(nnx.Module):
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     inputs = copy.copy(inputs)  # avoid mutating inputs.
-    inputs = parallelism.with_dycore_sharding(self.mesh, inputs)
+    inputs = self.mesh.with_sharding_constraint(inputs, 'dycore')
     features = self.features_module(inputs)
     inputs.pop('time')  # we use inputs to model outputs, but do not need time.
-    features = parallelism.with_dycore_to_physics_sharding(self.mesh, features)
+    features = self.mesh.with_sharding_constraint(
+        features, ('physics', 'dycore')
+    )
     tendencies = self.parameterization_mapping(features)
-    tendencies = parallelism.with_physics_to_dycore_sharding(
-        self.mesh, tendencies
+    tendencies = self.mesh.with_sharding_constraint(
+        tendencies, ('dycore', 'physics')
     )
     tendencies = self.tendency_transform(tendencies)
     modal_tendencies = self.to_div_curl(tendencies)
@@ -88,7 +90,7 @@ class ModalNeuralDivCurlParameterization(nnx.Module):
     modal_tendencies = pytree_utils.replace_with_matching_or_default(
         inputs, modal_tendencies, default=0.0
     )
-    modal_tendencies = parallelism.with_dycore_sharding(
-        self.mesh, modal_tendencies
+    modal_tendencies = self.mesh.with_sharding_constraint(
+        modal_tendencies, 'dycore'
     )
     return modal_tendencies

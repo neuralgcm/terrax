@@ -89,14 +89,14 @@ class StandardVariablesObservationOperator(
         below_ground_extrapolation=self.below_ground_extrapolation,
         pressure_interpolation_space=self.pressure_interpolation_space,
     )
-    interpolated = parallelism.with_physics_sharding(self.mesh, interpolated)
+    interpolated = self.mesh.with_sharding_constraint(interpolated, 'physics')
     if self.observation_correction is not None:
-      inputs = parallelism.with_dycore_sharding(self.mesh, inputs)
+      inputs = self.mesh.with_sharding_constraint(inputs, 'dycore')
       correction = self.observation_correction(inputs | {'time': time})
       correction = pytree_utils.replace_with_matching_or_default(
           interpolated, correction
       )
-      correction = parallelism.with_physics_sharding(self.mesh, correction)
+      correction = self.mesh.with_sharding_constraint(correction, 'physics')
       add_fn = lambda x, y: x + y if y is not None else x
       interpolated = {
           k: add_fn(v, correction.get(k, None))

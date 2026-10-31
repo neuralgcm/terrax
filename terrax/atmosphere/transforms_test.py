@@ -23,6 +23,7 @@ import numpy as np
 from terrax.atmosphere import transforms as atmos_transforms
 from terrax.core import coordinates
 from terrax.core import diagnostics
+from terrax.core import parallelism
 from terrax.core import pytree_utils
 from terrax.core import spherical_harmonics
 from terrax.core import transforms
@@ -120,6 +121,69 @@ class AtmosphereTransformsTest(parameterized.TestCase):
           'lsp': cx.field(np.ones(nodal_grid.shape), nodal_grid),
       }
       self._test_feature_module(features_no_grads, inputs)
+
+  def test_to_modal_with_div_curl_sharded(self):
+    spmd_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
+    )
+    mesh = parallelism.Mesh(
+        spmd_mesh=spmd_mesh,
+        field_partitions={
+            'dycore': {
+                'longitude': 'x',
+                'latitude': 'y',
+                'level': 'z',
+                'longitude_wavenumber': 'x',
+                'total_wavenumber': 'y',
+            },
+            'physics': {
+                'longitude': ('x', 'z'),
+                'latitude': 'y',
+                'level': None,
+            },
+        },
+    )
+    nodal_grid = coordinates.LonLatGrid.T21(
+        mesh=mesh, partition_schema_key='dycore'
+    )
+    modal_grid = coordinates.SphericalHarmonicGrid.T21(
+        mesh=mesh, partition_schema_key='dycore'
+    )
+    ylm_map = spherical_harmonics.FixedYlmMapping(
+        nodal_grid, modal_grid, mesh=mesh, partition_schema_key='dycore'
+    )
+    sigma = coordinates.SigmaLevels.equidistant(4)
+    shape_3d = sigma.shape + nodal_grid.shape
+    inputs = {
+        'u': cx.field(np.ones(shape_3d), sigma, nodal_grid),
+        'v': cx.field(np.ones(shape_3d), sigma, nodal_grid),
+        'temperature': cx.field(np.ones(shape_3d), sigma, nodal_grid),
+        'lsp': cx.field(np.ones(nodal_grid.shape), nodal_grid),
+    }
+    transform = atmos_transforms.ToModalWithDivCurl(
+        ylm_map, u_key='u', v_key='v'
+    )
+    jit_transform = jax.jit(lambda x: transform(x))
+    for name, fn in [('eager', transform), ('jit', jit_transform)]:
+      with self.subTest(name):
+        outputs = fn(dict(inputs))
+        self.assertCountEqual(
+            outputs.keys(), ['divergence', 'vorticity', 'temperature', 'lsp']
+        )
+        for key in ['divergence', 'vorticity', 'temperature']:
+          self.assertEqual(
+              cx.get_coordinate(outputs[key]),
+              cx.coords.compose(sigma, modal_grid),
+          )
+          shard_shape = outputs[key].data.sharding.shard_shape(
+              outputs[key].shape
+          )
+          # `sigma` is not partitioned; wavenumbers are split over `x` and `y`.
+          expected_shape = sigma.shape + (
+              modal_grid.shape[0] // 2,
+              modal_grid.shape[1] // 2,
+          )
+          self.assertEqual(shard_shape, expected_shape)
 
   def test_pressure_features(self):
     sigma = coordinates.SigmaLevels.equidistant(8)
@@ -222,5 +286,6 @@ class AtmosphereTransformsTest(parameterized.TestCase):
 
 
 if __name__ == '__main__':
+  chex.set_n_cpu_devices(8)
   jax.config.update('jax_traceback_filtering', 'off')
   absltest.main()

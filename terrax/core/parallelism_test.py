@@ -201,6 +201,36 @@ class MeshTest(parameterized.TestCase):
     e_shard_shape = sharded_pytree['e'].data.sharding.shard_shape((32,))
     self.assertEqual(e_shard_shape, (32 // 2,))
 
+  def test_scalar_leaves_pass_through(self):
+    spmd_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
+    )
+    field_partitions = {'vertical': {'level': ('z', 'x', 'y')}}
+    input_pytree = {
+        'field': cx.field(np.ones((16, 7)), 'level', 'y'),
+        'python_scalar': 0.0,
+        'array_scalar': np.asarray(1.0),
+    }
+    with self.subTest('with_spmd_mesh'):
+      mesh = parallelism.Mesh(
+          spmd_mesh=spmd_mesh, field_partitions=field_partitions
+      )
+      sharded_pytree = mesh.with_sharding_constraint(input_pytree, 'vertical')
+      shard_shape = sharded_pytree['field'].data.sharding.shard_shape((16, 7))
+      self.assertEqual(shard_shape, (16 // (2 * 2 * 2), 7))
+      self.assertIs(
+          sharded_pytree['python_scalar'], input_pytree['python_scalar']
+      )
+      self.assertIs(
+          sharded_pytree['array_scalar'], input_pytree['array_scalar']
+      )
+
+    with self.subTest('without_spmd_mesh'):
+      mesh = parallelism.Mesh(field_partitions=field_partitions)
+      self.assertIs(
+          mesh.with_sharding_constraint(input_pytree, 'vertical'), input_pytree
+      )
+
   def test_raises_if_arrays_have_different_ranks(self):
     array_partitions = {'vertical': (('z', 'x', 'y'), None)}
     mesh = parallelism.Mesh(array_partitions=array_partitions)

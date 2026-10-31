@@ -307,7 +307,21 @@ class Mesh:
   def with_sharding_constraint(
       self, inputs: typing.PyTreeState, schema: str | tuple[str, ...] | None
   ) -> typing.PyTreeState:
-    """Applies `schema` sharding constraint to `inputs`."""
+    """Applies `schema` sharding constraint to `inputs`.
+
+    Args:
+      inputs: Pytree of `cx.Field` and/or array leaves to constrain. Scalar
+        leaves (Python numbers or 0-d arrays) cannot be partitioned and are
+        returned unchanged.
+      schema: Name of the partition schema to apply: a key in
+        `self.field_partitions` for `cx.Field` leaves or in
+        `self.array_partitions` for array leaves. A tuple of names applies the
+        constraints from last to first, e.g. `('b', 'a')` constrains `inputs` to
+        schema `a` and then to schema `b`. `None` applies no constraint.
+
+    Returns:
+      `inputs` with sharding constraint(s) applied.
+    """
     if schema is None:
       return inputs
     if isinstance(schema, tuple):
@@ -317,8 +331,9 @@ class Mesh:
       return self.with_sharding_constraint(constrained, schema[0])
 
     is_field = lambda x: isinstance(x, cx.Field)
+    is_scalar = lambda x: not is_field(x) and np.ndim(x) == 0
     all_leaves, tree_def = jax.tree.flatten(inputs, is_leaf=is_field)
-    array_leaves = [x for x in all_leaves if not is_field(x)]
+    array_leaves = [x for x in all_leaves if not (is_field(x) or is_scalar(x))]
     if np.unique([x.ndim for x in array_leaves]).size > 1:
       raise ValueError(
           'All arrays in the pytree must have the same rank. Got:'
@@ -330,6 +345,8 @@ class Mesh:
     for x in all_leaves:
       if is_field(x):
         leaves.append(self._with_sharding_constraint_field(x, schema))
+      elif is_scalar(x):
+        leaves.append(x)
       else:
         leaves.append(self._with_sharding_constraint_array(x, schema))
     return jax.tree.unflatten(tree_def, leaves)

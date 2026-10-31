@@ -26,7 +26,6 @@ from flax import nnx
 import jax.numpy as jnp
 from terrax.core import coordinates
 from terrax.core import diagnostics
-from terrax.core import parallelism
 from terrax.core import spherical_harmonics
 from terrax.core import transforms
 from terrax.core import typing
@@ -50,20 +49,20 @@ class ToModalWithDivCurl(transforms.PytreeTransformABC):
       )
     sec_lat = 1 / grid.cos_lat
     u, v = inputs.pop(self.u_key), inputs.pop(self.v_key)
-    u, v = parallelism.with_physics_to_dycore_sharding(mesh, (u, v))
+    u, v = mesh.with_sharding_constraint((u, v), ('dycore', 'physics'))
     # here u,v stand for velocity / cos(lat), but the cos(lat) is cancelled in
     # divergence and curl operators below.
     inputs[self.u_key] = u * sec_lat
     inputs[self.v_key] = v * sec_lat
-    inputs = parallelism.with_dycore_sharding(mesh, inputs)
+    inputs = mesh.with_sharding_constraint(inputs, 'dycore')
     modal_outputs = self.ylm_map.to_modal(inputs)
-    modal_outputs = parallelism.with_dycore_sharding(mesh, modal_outputs)
+    modal_outputs = mesh.with_sharding_constraint(modal_outputs, 'dycore')
     u, v = modal_outputs.pop(self.u_key), modal_outputs.pop(self.v_key)
-    modal_outputs['divergence'] = parallelism.with_dycore_sharding(
-        mesh, self.ylm_map.div_cos_lat(u, v)
+    modal_outputs['divergence'] = mesh.with_sharding_constraint(
+        self.ylm_map.div_cos_lat(u, v), 'dycore'
     )
-    modal_outputs['vorticity'] = parallelism.with_dycore_sharding(
-        mesh, self.ylm_map.curl_cos_lat(u, v)
+    modal_outputs['vorticity'] = mesh.with_sharding_constraint(
+        self.ylm_map.curl_cos_lat(u, v), 'dycore'
     )
     return modal_outputs
 
@@ -181,9 +180,8 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
       modal_features[typing.KeyWithCosLatFactor(prefix + k, 0)] = inputs[k]
 
     # Computing gradient features and adjusting cos_lat factors.
-    modal_features = parallelism.with_dycore_sharding(
-        self.ylm_map.mesh, modal_features
-    )
+    mesh = self.ylm_map.mesh
+    modal_features = mesh.with_sharding_constraint(modal_features, 'dycore')
     diff_operator_features = self.compute_gradients_transform(modal_features)
     # Computing all features in nodal space.
     features = {}
@@ -192,7 +190,7 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
       lat_power = k.factor_order
       sec_lat_scale = 1 / self.ylm_map.cos_lat(value) ** lat_power
       features[k.name] = value * sec_lat_scale
-    features = parallelism.with_dycore_sharding(self.ylm_map.mesh, features)
+    features = mesh.with_sharding_constraint(features, 'dycore')
     return features
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -260,9 +258,8 @@ class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
         modal_features[typing.KeyWithCosLatFactor(k, 0)] = v
 
     # Computing gradient features and adjusting cos_lat factors.
-    modal_features = parallelism.with_dycore_sharding(
-        self.ylm_map.mesh, modal_features
-    )
+    mesh = self.ylm_map.mesh
+    modal_features = mesh.with_sharding_constraint(modal_features, 'dycore')
     if self.compute_grads_transform is not None:
       diff_operator_features = self.compute_grads_transform(modal_features)
     else:
@@ -274,7 +271,7 @@ class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
       lat_power = k.factor_order
       sec_lat_scale = 1 / self.ylm_map.cos_lat(value) ** lat_power
       features[k.name] = value * sec_lat_scale
-    features = parallelism.with_dycore_sharding(self.ylm_map.mesh, features)
+    features = mesh.with_sharding_constraint(features, 'dycore')
     return features
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
