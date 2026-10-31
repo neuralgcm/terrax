@@ -256,6 +256,17 @@ class GeneralizedLeadTimeScalerTest(parameterized.TestCase):
       scaler.scales(field)
 
 
+class WavenumberScalerTest(parameterized.TestCase):
+
+  @parameterized.parameters(1.0, 0.5)
+  def test_wavenumber_scaler_power(self, power):
+    ylm_grid = coordinates.SphericalHarmonicGrid.T21()
+    field = cx.field(np.ones(ylm_grid.shape), ylm_grid)
+    scaler = scaling.WavenumberScaler(power=power)
+    expected = (ylm_grid.fields['mask'].data.sum() / (4 * np.pi)) ** power
+    cx.testing.assert_fields_allclose(scaler.scales(field), cx.field(expected))
+
+
 class SigmoidWavenumberScalerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(

@@ -237,17 +237,21 @@ class PressureLevelAtmosphericMassScaler(ScaleFactor):
 
 @dataclasses.dataclass
 class WavenumberScaler(ScaleFactor):
-  """ScaleFactor that returns fixed scale equal to "number of ylm_modes" / 4pi.
+  """ScaleFactor that returns `(number_of_ylm_modes / 4pi) ** power`.
 
-  For fields with `SphericalHarmonicGrid` dimension, this scaler rescales the
-  statistics by the number of spherical harmonic modes divided by 4pi. This
-  rescaling modifies the statistics from computing per-mode mean that is
-  resolution-dependent to spatial mean that is resolution-invariant.
+  For fields with `SphericalHarmonicGrid` dimensions, this scaler rescales the
+  statistics by `(N_modes / 4pi) ** power`. For quadratic statistics `power=1`,
+  this converts the per-mode mean into the spatial mean via Parseval's theorem;
+  for amplitude / L1 / CRPS statistics, `power=0.5` scales by
+  `sqrt(N_modes / 4pi)` to match the `1 / sqrt(N_modes)` per-mode amplitude
+  scaling across grid resolutions.
 
   Attributes:
+    power: Exponent applied to `N_modes / 4pi`.
     skip_missing: If True, fields without a grid will return a scale of 1.0.
   """
 
+  power: float = 1.0
   skip_missing: bool = True
 
   def scales(
@@ -267,7 +271,9 @@ class WavenumberScaler(ScaleFactor):
         field.coordinate, coordinates.SphericalHarmonicGrid
     )
     with jax.ensure_compile_time_eval():
-      return cx.field(ylm_grid.fields['mask'].data.sum() / (4 * np.pi))
+      return cx.field(
+          (ylm_grid.fields['mask'].data.sum() / (4 * np.pi)) ** self.power
+      )
 
 
 @dataclasses.dataclass
