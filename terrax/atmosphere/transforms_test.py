@@ -129,14 +129,14 @@ class AtmosphereTransformsTest(parameterized.TestCase):
     mesh = parallelism.Mesh(
         spmd_mesh=spmd_mesh,
         field_partitions={
-            'dycore': {
+            'vertical': {
                 'longitude': 'x',
                 'latitude': 'y',
                 'level': 'z',
                 'longitude_wavenumber': 'x',
                 'total_wavenumber': 'y',
             },
-            'physics': {
+            'horizontal': {
                 'longitude': ('x', 'z'),
                 'latitude': 'y',
                 'level': None,
@@ -144,13 +144,13 @@ class AtmosphereTransformsTest(parameterized.TestCase):
         },
     )
     nodal_grid = coordinates.LonLatGrid.T21(
-        mesh=mesh, partition_schema_key='dycore'
+        mesh=mesh, partition_schema_key='vertical'
     )
     modal_grid = coordinates.SphericalHarmonicGrid.T21(
-        mesh=mesh, partition_schema_key='dycore'
+        mesh=mesh, partition_schema_key='vertical'
     )
     ylm_map = spherical_harmonics.FixedYlmMapping(
-        nodal_grid, modal_grid, mesh=mesh, partition_schema_key='dycore'
+        nodal_grid, modal_grid, mesh=mesh, partition_schema_key='vertical'
     )
     sigma = coordinates.SigmaLevels.equidistant(4)
     shape_3d = sigma.shape + nodal_grid.shape

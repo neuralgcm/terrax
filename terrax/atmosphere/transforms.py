@@ -49,20 +49,20 @@ class ToModalWithDivCurl(transforms.PytreeTransformABC):
       )
     sec_lat = 1 / grid.cos_lat
     u, v = inputs.pop(self.u_key), inputs.pop(self.v_key)
-    u, v = mesh.with_sharding_constraint((u, v), ('dycore', 'physics'))
+    u, v = mesh.with_sharding_constraint((u, v), ('vertical', 'horizontal'))
     # here u,v stand for velocity / cos(lat), but the cos(lat) is cancelled in
     # divergence and curl operators below.
     inputs[self.u_key] = u * sec_lat
     inputs[self.v_key] = v * sec_lat
-    inputs = mesh.with_sharding_constraint(inputs, 'dycore')
+    inputs = mesh.with_sharding_constraint(inputs, 'vertical')
     modal_outputs = self.ylm_map.to_modal(inputs)
-    modal_outputs = mesh.with_sharding_constraint(modal_outputs, 'dycore')
+    modal_outputs = mesh.with_sharding_constraint(modal_outputs, 'vertical')
     u, v = modal_outputs.pop(self.u_key), modal_outputs.pop(self.v_key)
     modal_outputs['divergence'] = mesh.with_sharding_constraint(
-        self.ylm_map.div_cos_lat(u, v), 'dycore'
+        self.ylm_map.div_cos_lat(u, v), 'vertical'
     )
     modal_outputs['vorticity'] = mesh.with_sharding_constraint(
-        self.ylm_map.curl_cos_lat(u, v), 'dycore'
+        self.ylm_map.curl_cos_lat(u, v), 'vertical'
     )
     return modal_outputs
 
@@ -181,7 +181,7 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
 
     # Computing gradient features and adjusting cos_lat factors.
     mesh = self.ylm_map.mesh
-    modal_features = mesh.with_sharding_constraint(modal_features, 'dycore')
+    modal_features = mesh.with_sharding_constraint(modal_features, 'vertical')
     diff_operator_features = self.compute_gradients_transform(modal_features)
     # Computing all features in nodal space.
     features = {}
@@ -190,7 +190,7 @@ class VelocityAndPrognosticsWithModalGradients(transforms.PytreeTransformABC):
       lat_power = k.factor_order
       sec_lat_scale = 1 / self.ylm_map.cos_lat(value) ** lat_power
       features[k.name] = value * sec_lat_scale
-    features = mesh.with_sharding_constraint(features, 'dycore')
+    features = mesh.with_sharding_constraint(features, 'vertical')
     return features
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
@@ -259,7 +259,7 @@ class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
 
     # Computing gradient features and adjusting cos_lat factors.
     mesh = self.ylm_map.mesh
-    modal_features = mesh.with_sharding_constraint(modal_features, 'dycore')
+    modal_features = mesh.with_sharding_constraint(modal_features, 'vertical')
     if self.compute_grads_transform is not None:
       diff_operator_features = self.compute_grads_transform(modal_features)
     else:
@@ -271,7 +271,7 @@ class PrognosticsWithVelocityAndGrads(transforms.PytreeTransformABC):
       lat_power = k.factor_order
       sec_lat_scale = 1 / self.ylm_map.cos_lat(value) ** lat_power
       features[k.name] = value * sec_lat_scale
-    features = mesh.with_sharding_constraint(features, 'dycore')
+    features = mesh.with_sharding_constraint(features, 'vertical')
     return features
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:

@@ -106,11 +106,11 @@ class CheckpointingTest(parameterized.TestCase):
   def test_save_and_load_with_spmd_mesh(self):
     path = os.path.join(self.create_tempdir(), 'checkpoint')
     model_cfg = build_model.as_buildable()
-    model_cfg.mesh.field_partitions = {'physics': {'longitude': 'batch'}}
+    model_cfg.mesh.field_partitions = {'horizontal': {'longitude': 'batch'}}
     spmd_mesh = jax.sharding.Mesh(jax.devices()[:1], ('batch',))
     train_mesh = parallelism.Mesh(
         spmd_mesh=spmd_mesh,
-        field_partitions={'physics': {'longitude': 'batch'}},
+        field_partitions={'horizontal': {'longitude': 'batch'}},
     )
     sharded_model = api.Model.from_fiddle_config(
         model_cfg, mesh=parallelism.Mesh(spmd_mesh=spmd_mesh)
@@ -125,7 +125,9 @@ class CheckpointingTest(parameterized.TestCase):
     unsharded_restored = checkpointing.load_model_checkpoint(path, mesh=None)
     self.assertEqual(
         unsharded_restored.mesh,
-        parallelism.Mesh(field_partitions={'physics': {'longitude': 'batch'}}),
+        parallelism.Mesh(
+            field_partitions={'horizontal': {'longitude': 'batch'}}
+        ),
     )
     self.assertEqual(unsharded_restored.fiddle_config, model_cfg)
     single_device_sharding = jax.sharding.SingleDeviceSharding(

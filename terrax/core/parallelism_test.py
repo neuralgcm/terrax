@@ -450,7 +450,7 @@ class HelperFunctionsTest(parameterized.TestCase):
     with self.subTest('default_spmd_mesh_only_preserves_schemas'):
       base_cfg = fdl.Config(
           parallelism.Mesh,
-          field_partitions={'physics': {'lon': 'x'}},
+          field_partitions={'horizontal': {'lon': 'x'}},
       )
       ref_mesh = parallelism.Mesh(spmd_mesh=spmd_mesh)
       updated_cfg = parallelism.update_mesh_properties(base_cfg, mesh=ref_mesh)
@@ -458,7 +458,7 @@ class HelperFunctionsTest(parameterized.TestCase):
           fdl.build(updated_cfg),
           parallelism.Mesh(
               spmd_mesh=spmd_mesh,
-              field_partitions={'physics': {'lon': 'x'}},
+              field_partitions={'horizontal': {'lon': 'x'}},
           ),
       )
 
@@ -466,7 +466,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       self.assertEqual(stripped_cfg, base_cfg)
       self.assertEqual(
           fdl.build(stripped_cfg),
-          parallelism.Mesh(field_partitions={'physics': {'lon': 'x'}}),
+          parallelism.Mesh(field_partitions={'horizontal': {'lon': 'x'}}),
       )
 
     with self.subTest('custom_attrs_to_update'):
@@ -474,7 +474,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       active_mesh = parallelism.Mesh(
           spmd_mesh=spmd_mesh,
           array_partitions={'vertical': ('z', None)},
-          field_partitions={'physics': {'lon': 'x'}},
+          field_partitions={'horizontal': {'lon': 'x'}},
       )
       all_attrs = ('spmd_mesh', 'array_partitions', 'field_partitions')
       updated_cfg = parallelism.update_mesh_properties(
@@ -488,10 +488,10 @@ class HelperFunctionsTest(parameterized.TestCase):
 
     with self.subTest('tag_based_mapping_updates'):
       dycore_cfg = fdl.Config(
-          parallelism.Mesh, field_partitions={'dycore': {'level': 'z'}}
+          parallelism.Mesh, field_partitions={'vertical': {'level': 'z'}}
       )
       physics_cfg = fdl.Config(
-          parallelism.Mesh, field_partitions={'physics': {'lon': 'x'}}
+          parallelism.Mesh, field_partitions={'horizontal': {'lon': 'x'}}
       )
       tagged_cfg = fdl.Config(
           dict, dycore_mesh=dycore_cfg, physics_mesh=physics_cfg
@@ -509,7 +509,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       self.assertEqual(built_tagged['dycore_mesh'].spmd_mesh, spmd_mesh)
       self.assertEqual(
           built_tagged['dycore_mesh'].field_partitions,
-          {'dycore': {'level': 'z'}},
+          {'vertical': {'level': 'z'}},
       )
       self.assertIsNone(built_tagged['physics_mesh'].spmd_mesh)
 
@@ -526,7 +526,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       self.assertEqual(built_composed['dycore_mesh'].spmd_mesh, spmd_mesh)
       self.assertEqual(
           built_composed['dycore_mesh'].field_partitions,
-          {'dycore': {'level': 'z'}},
+          {'vertical': {'level': 'z'}},
       )
       self.assertEqual(built_composed['physics_mesh'], custom_mesh)
 
@@ -654,7 +654,7 @@ class HelperFunctionsTest(parameterized.TestCase):
     mesh = parallelism.Mesh(
         spmd_mesh=spmd_mesh,
         field_partitions={
-            'physics': {'lon': 'x', 'lat': 'y'},
+            'horizontal': {'lon': 'x', 'lat': 'y'},
             'lon_only': {'lon': 'x'},
         },
     )
@@ -680,7 +680,7 @@ class HelperFunctionsTest(parameterized.TestCase):
           module,
           parallelism.shard_module_states(
               module,
-              sim_state_partition_schema='physics',
+              sim_state_partition_schema='horizontal',
               check_no_conflict=True,
           ),
       )
@@ -701,7 +701,7 @@ class HelperFunctionsTest(parameterized.TestCase):
           module,
           parallelism.shard_module_states(
               module,
-              sim_state_partition_schema='physics',
+              sim_state_partition_schema='horizontal',
               param_partition_schema='lon_only',
               param_partition_spec=jax.sharding.PartitionSpec(None, 'y'),
           ),
@@ -723,7 +723,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       )
       with self.assertRaisesRegex(ValueError, 'not found in field_partitions'):
         parallelism.shard_module_states(
-            module, sim_state_partition_schema='physics'
+            module, sim_state_partition_schema='horizontal'
         )
 
     with self.subTest('check_no_conflict_catches_metadata_mismatch'):
@@ -754,7 +754,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       ):
         parallelism.shard_module_states(
             annotated,
-            param_partition_schema='physics',
+            param_partition_schema='horizontal',
             check_no_conflict=True,
         )
 
@@ -771,7 +771,7 @@ class HelperFunctionsTest(parameterized.TestCase):
       # variable metadata.
       overridden = parallelism.shard_module_states(
           annotated,
-          param_partition_schema='physics',
+          param_partition_schema='horizontal',
           param_partition_spec=jax.sharding.PartitionSpec(),
       )
       self.assertEqual(

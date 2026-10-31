@@ -254,11 +254,11 @@ class TrainerTest(parameterized.TestCase):
 
   def _create_data_loader(self, all_data):
     spmd_mesh = trainer.create_spmd_mesh(1, 1, 1, 1)
-    training_mesh = trainer.create_training_mesh(spmd_mesh, {'physics': {}})
+    training_mesh = trainer.create_training_mesh(spmd_mesh, {'horizontal': {}})
     return data_loading.DataLoader(
         all_data=all_data,
         parallelism_mesh=training_mesh,
-        loading_partition_schema='physics',
+        loading_partition_schema='horizontal',
     )
 
   def _create_evaluators(self, dims_to_reduce, scale_by=()):

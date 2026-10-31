@@ -89,14 +89,16 @@ class StandardVariablesObservationOperator(
         below_ground_extrapolation=self.below_ground_extrapolation,
         pressure_interpolation_space=self.pressure_interpolation_space,
     )
-    interpolated = self.mesh.with_sharding_constraint(interpolated, 'physics')
+    interpolated = self.mesh.with_sharding_constraint(
+        interpolated, 'horizontal'
+    )
     if self.observation_correction is not None:
-      inputs = self.mesh.with_sharding_constraint(inputs, 'dycore')
+      inputs = self.mesh.with_sharding_constraint(inputs, 'vertical')
       correction = self.observation_correction(inputs | {'time': time})
       correction = pytree_utils.replace_with_matching_or_default(
           interpolated, correction
       )
-      correction = self.mesh.with_sharding_constraint(correction, 'physics')
+      correction = self.mesh.with_sharding_constraint(correction, 'horizontal')
       add_fn = lambda x, y: x + y if y is not None else x
       interpolated = {
           k: add_fn(v, correction.get(k, None))

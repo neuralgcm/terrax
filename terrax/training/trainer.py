@@ -327,9 +327,9 @@ def _compute_aggregation(
   queries = data_specs.construct_query(targets_slice, query_spec)
   targets_only_slice = data_loading.select_targets(targets_slice, query_spec)
   prediction = process_fn(process_obs, observe_fn(model, queries))
-  prediction = training_mesh.with_sharding_constraint(prediction, 'physics')
+  prediction = training_mesh.with_sharding_constraint(prediction, 'horizontal')
   target = process_fn(process_obs, targets_only_slice)
-  target = training_mesh.with_sharding_constraint(target, 'physics')
+  target = training_mesh.with_sharding_constraint(target, 'horizontal')
 
   new_agg_states = []
   for current_agg_state, evaluator in zip(current_agg_states, evaluator_slices):
@@ -1242,7 +1242,7 @@ class RolloutTrainer:
       model.advance()
       model_state = nnx.state(model, typing.SimulationVariable)
       model_state = self.training_mesh.with_sharding_constraint(
-          model_state, 'physics'
+          model_state, 'horizontal'
       )
       add_name = lambda x: checkpoint_name(x, 'sim_state')
       model_state = jax.tree.map(add_name, model_state)
@@ -1252,7 +1252,7 @@ class RolloutTrainer:
       predictions = model.observe(queries)
       data_specs.validate_observation(queries, predictions)
       predictions = self.training_mesh.with_sharding_constraint(
-          predictions, 'physics'
+          predictions, 'horizontal'
       )
       add_name = lambda x: checkpoint_name(x, 'predictions')
       predictions = jax.tree.map(add_name, predictions)
@@ -1400,10 +1400,10 @@ class RolloutTrainer:
       targets_only = data_loading.select_targets(t0_targets, query_spec)
       prediction = process_fn(process_obs, observe_fn(model, queries))
       prediction = self.training_mesh.with_sharding_constraint(
-          prediction, 'physics'
+          prediction, 'horizontal'
       )
       target = process_fn(process_obs, targets_only)
-      target = self.training_mesh.with_sharding_constraint(target, 'physics')
+      target = self.training_mesh.with_sharding_constraint(target, 'horizontal')
 
       # Update this level's aggregation state for each evaluator group.
       for group_idx, evaluators in enumerate(nested_evaluators_groups):
@@ -1671,7 +1671,7 @@ class RolloutTrainer:
       )
       eb_model_state = nnx.state(eb_model, typing.SimulationVariable)
       eb_model_state = self.training_mesh.with_sharding_constraint(
-          eb_model_state, 'physics'
+          eb_model_state, 'horizontal'
       )
       nnx.update(eb_model, eb_model_state)
 
@@ -1712,7 +1712,7 @@ class RolloutTrainer:
         step_fn(model)  # advances model by 1 step.
         model_state = nnx.state(model, typing.SimulationVariable)
         model_state = self.training_mesh.with_sharding_constraint(
-            model_state, 'physics'
+            model_state, 'horizontal'
         )
         nnx.update(model, model_state)
         return (idx + 1, (agg,))
@@ -2232,7 +2232,7 @@ class RolloutTrainer:
         parallelism.shard_module_states(
             self.model,
             mesh=self.training_mesh,
-            sim_state_partition_schema='physics',
+            sim_state_partition_schema='horizontal',
             param_partition_spec=jax.sharding.PartitionSpec(),
             check_no_conflict=True,
         ),

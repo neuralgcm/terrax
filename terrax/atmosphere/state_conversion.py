@@ -276,7 +276,7 @@ def primitive_equations_to_uvtz(
   surface_pressure, temperature, geopotential, nodal_inputs = (
       ylm_map.mesh.with_sharding_constraint(
           (surface_pressure, temperature, geopotential, nodal_inputs),
-          ('physics', 'dycore'),
+          ('horizontal', 'vertical'),
       )
   )
 

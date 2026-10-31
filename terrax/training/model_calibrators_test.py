@@ -603,7 +603,7 @@ class ModelCalibratorsTest(absltest.TestCase):
   def test_load_model_component_params_sharded_onto_model_mesh(self):
     spmd_mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ('batch',))
     mesh = parallelism.Mesh(
-        spmd_mesh=spmd_mesh, field_partitions={'physics': {}}
+        spmd_mesh=spmd_mesh, field_partitions={'horizontal': {}}
     )
     ckpt_dir = self.create_tempdir().full_path
     saved_model = MockModelParams(
