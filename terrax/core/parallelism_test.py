@@ -191,6 +191,56 @@ class MeshTest(parameterized.TestCase):
       }
       mesh.with_sharding_constraint(input_pytree, 'vertical')
 
+  def test_cmap_and_cpmap_with_shard_map(self):
+    spmd_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
+    )
+    field_partitions = {
+        'spatial': {'level': 'z', 'lon': 'x', 'lat': 'y'},
+    }
+    mesh = parallelism.Mesh(
+        spmd_mesh=spmd_mesh, field_partitions=field_partitions
+    )
+    pspec_xy = jax.sharding.PartitionSpec('x', 'y')
+
+    @jax.shard_map(mesh=spmd_mesh, in_specs=pspec_xy, out_specs=pspec_xy)
+    def sharded_scale(arr):
+      return arr * 2.0
+
+    mapped_scale = mesh.cpmap(sharded_scale, 'spatial')
+    for mode, scale_fn in [
+        ('eager', mapped_scale),
+        ('jit', jax.jit(mapped_scale)),
+    ]:
+      with self.subTest(f'preserves_mapped_axis_sharding_{mode}'):
+        f = cx.field(
+            jnp.arange(4 * 4 * 4, dtype=jnp.float32).reshape(4, 4, 4),
+            'level',
+            'lon',
+            'lat',
+        )
+        f = mesh.with_sharding_constraint(f, 'spatial')
+        out = scale_fn(f.untag('lon', 'lat')).tag('lon', 'lat')
+        self.assertEqual(out.dims, ('level', 'lon', 'lat'))
+        self.assertEqual(out.data.sharding.shard_shape(out.shape), (2, 2, 2))
+        np.testing.assert_allclose(out.data, f.data * 2.0)
+
+      with self.subTest(f'pads_and_slices_indivisible_axis_{mode}'):
+        f_odd = cx.field(
+            jnp.arange(5 * 4 * 4, dtype=jnp.float32).reshape(5, 4, 4),
+            'level',
+            'lon',
+            'lat',
+        )
+        out_odd = scale_fn(f_odd.untag('lon', 'lat')).tag('lon', 'lat')
+        self.assertEqual(out_odd.shape, (5, 4, 4))
+        self.assertEqual(out_odd.dims, ('level', 'lon', 'lat'))
+        np.testing.assert_allclose(out_odd.data, f_odd.data * 2.0)
+
+    with self.subTest('unknown_schema_raises'):
+      with self.assertRaisesRegex(ValueError, 'not found in field_partitions'):
+        mesh.cpmap(sharded_scale, 'unknown')
+
 
 class _DycoreMeshTag(fdl.Tag):
   """Tag for dycore mesh in tests."""
@@ -726,8 +776,9 @@ class HelperFunctionsTest(parameterized.TestCase):
             coupled_with_root_mesh, fallback_mesh=None
         ),
     )
+    coupled_b = coupled_with_root_mesh.comp_b
     self.assertEqual(
-        coupled_with_root_mesh.comp_b.nested_without_mesh.orography.get_value().data.sharding,
+        coupled_b.nested_without_mesh.orography.get_value().data.sharding,
         sharding_b,
     )
     self.assertEqual(

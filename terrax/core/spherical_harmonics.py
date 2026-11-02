@@ -209,11 +209,11 @@ class FixedYlmMapping:
       )
     return grid
 
-  def to_modal_array(self, x: typing.cx.Field) -> typing.cx.Field:
+  def to_modal_array(self, x: typing.Array) -> typing.Array:
     """Converts a nodal array to a modal array."""
     return self.dinosaur_grid.to_modal(x)
 
-  def to_nodal_array(self, x: typing.cx.Field) -> typing.cx.Field:
+  def to_nodal_array(self, x: typing.Array) -> typing.Array:
     """Converts a modal array to a nodal array."""
     return self.dinosaur_grid.to_nodal(x)
 
@@ -231,7 +231,10 @@ class FixedYlmMapping:
     """Converts a nodal field(s) to a modal field(s)."""
     if isinstance(x, dict):
       return {k: self.to_modal(v) for k, v in x.items()}
-    modal = cx.cpmap(self.to_modal_array)(x.untag(self.lon_lat_grid))
+    to_modal_fn = self.mesh.cpmap(
+        self.to_modal_array, self.partition_schema_key
+    )
+    modal = to_modal_fn(x.untag(self.lon_lat_grid))
     return modal.tag(self.ylm_grid)
 
   @overload
@@ -248,7 +251,10 @@ class FixedYlmMapping:
     """Converts a modal field(s) to a nodal field(s)."""
     if isinstance(x, dict):
       return {k: self.to_nodal(v) for k, v in x.items()}
-    nodal = cx.cpmap(self.to_nodal_array)(x.untag(self.ylm_grid))
+    to_nodal_fn = self.mesh.cpmap(
+        self.to_nodal_array, self.partition_schema_key
+    )
+    nodal = to_nodal_fn(x.untag(self.ylm_grid))
     return nodal.tag(self.lon_lat_grid)
 
   def cos_lat(self, x: cx.Field) -> cx.Field:
@@ -259,30 +265,41 @@ class FixedYlmMapping:
 
   def laplacian(self, x: cx.Field) -> cx.Field:
     """Returns the Laplacian of `x`."""
-    y = cx.cpmap(self.dinosaur_grid.laplacian)(x.untag(self.ylm_grid))
+    laplacian_fn = self.mesh.cpmap(
+        self.dinosaur_grid.laplacian, self.partition_schema_key
+    )
+    y = laplacian_fn(x.untag(self.ylm_grid))
     return y.tag(self.ylm_grid)
 
   def inverse_laplacian(self, x: cx.Field) -> cx.Field:
     """Returns the inverse Laplacian of `x`."""
-    return cx.cpmap(self.dinosaur_grid.inverse_laplacian)(
-        x.untag(self.ylm_grid)
-    ).tag(self.ylm_grid)
+    inv_laplacian_fn = self.mesh.cpmap(
+        self.dinosaur_grid.inverse_laplacian, self.partition_schema_key
+    )
+    return inv_laplacian_fn(x.untag(self.ylm_grid)).tag(self.ylm_grid)
 
   def d_dlon(self, x: cx.Field) -> cx.Field:
     """Returns the longitudinal derivative of `x`."""
-    result = cx.cpmap(self.dinosaur_grid.d_dlon)(x.untag(self.ylm_grid))
+    d_dlon_fn = self.mesh.cpmap(
+        self.dinosaur_grid.d_dlon, self.partition_schema_key
+    )
+    result = d_dlon_fn(x.untag(self.ylm_grid))
     return result.tag(self.ylm_grid)
 
   def cos_lat_d_dlat(self, x: cx.Field) -> cx.Field:
     """Returns the cos(lat)-weighted latitudinal derivative of `x`."""
-    y = cx.cpmap(self.dinosaur_grid.cos_lat_d_dlat)(x.untag(self.ylm_grid))
+    cos_lat_d_dlat_fn = self.mesh.cpmap(
+        self.dinosaur_grid.cos_lat_d_dlat, self.partition_schema_key
+    )
+    y = cos_lat_d_dlat_fn(x.untag(self.ylm_grid))
     return y.tag(self.ylm_grid)
 
   def sec_lat_d_dlat_cos2(self, x: cx.Field) -> cx.Field:
     """Returns `secθ ∂/∂θ(cos²θ x)`."""
-    y = cx.cpmap(self.dinosaur_grid.sec_lat_d_dlat_cos2)(
-        x.untag(self.ylm_grid)
+    sec_lat_fn = self.mesh.cpmap(
+        self.dinosaur_grid.sec_lat_d_dlat_cos2, self.partition_schema_key
     )
+    y = sec_lat_fn(x.untag(self.ylm_grid))
     return y.tag(self.ylm_grid)
 
   def clip_wavenumbers(self, x: cx.Field, n: int = 1) -> cx.Field:
@@ -294,13 +311,17 @@ class FixedYlmMapping:
   ) -> tuple[cx.Field, cx.Field]:
     """Returns the cos(lat) gradient of `x`."""
     grad_fn = lambda x: self.dinosaur_grid.cos_lat_grad(x, clip=clip)
-    u, v = cx.cpmap(grad_fn)(x.untag(self.ylm_grid))
+    u, v = self.mesh.cpmap(grad_fn, self.partition_schema_key)(
+        x.untag(self.ylm_grid)
+    )
     return u.tag(self.ylm_grid), v.tag(self.ylm_grid)
 
   def k_cross(self, u: cx.Field, v: cx.Field) -> tuple[cx.Field, cx.Field]:
     """Returns the k-cross of `(u, v)`."""
     k_cross_fn = lambda u, v: self.dinosaur_grid.k_cross((u, v))
-    out_u, out_v = cx.cpmap(k_cross_fn)(*cx.untag((u, v), self.ylm_grid))
+    out_u, out_v = self.mesh.cpmap(k_cross_fn, self.partition_schema_key)(
+        *cx.untag((u, v), self.ylm_grid)
+    )
     return out_u.tag(self.ylm_grid), out_v.tag(self.ylm_grid)
 
   def div_cos_lat(
@@ -308,7 +329,9 @@ class FixedYlmMapping:
   ) -> cx.Field:
     """Returns the cos(lat)-weighted divergence of `(u, v)`."""
     div_fn = lambda u, v: self.dinosaur_grid.div_cos_lat((u, v), clip=clip)
-    result = cx.cpmap(div_fn)(*cx.untag((u, v), self.ylm_grid))
+    result = self.mesh.cpmap(div_fn, self.partition_schema_key)(
+        *cx.untag((u, v), self.ylm_grid)
+    )
     return result.tag(self.ylm_grid)
 
   def curl_cos_lat(
@@ -316,17 +339,17 @@ class FixedYlmMapping:
   ) -> cx.Field:
     """Returns the cos(lat)-weighted curl of `(u, v)`."""
     curl_fn = lambda u, v: self.dinosaur_grid.curl_cos_lat((u, v), clip=clip)
-    result = cx.cpmap(curl_fn)(*cx.untag((u, v), self.ylm_grid))
+    result = self.mesh.cpmap(curl_fn, self.partition_schema_key)(
+        *cx.untag((u, v), self.ylm_grid)
+    )
     return result.tag(self.ylm_grid)
 
   def integrate(self, x: cx.Field) -> cx.Field:
     """Returns the integral of `x` over the sphere."""
-    return cx.cpmap(self.dinosaur_grid.integrate)(x.untag(self.lon_lat_grid))
-
-
-# TODO(dkochkov): Remove this alias once all new models have been updated to use
-# the updated name.
-SphericalHarmonicsTransform = FixedYlmMapping
+    integrate_fn = self.mesh.cpmap(
+        self.dinosaur_grid.integrate, self.partition_schema_key
+    )
+    return integrate_fn(x.untag(self.lon_lat_grid))
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

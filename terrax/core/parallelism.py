@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextvars
 import copy
 import dataclasses
@@ -101,7 +101,8 @@ class CoordinateShard(cx.Coordinate):
 
   @property
   def dims(self) -> tuple[str, ...]:
-    return self.coordinate.dims  # sharding only affects the shape.  # pyrefly: ignore[bad-return]
+    # pyrefly: ignore[bad-return]
+    return self.coordinate.dims  # sharding only affects the shape.
 
   @property
   def shape(self) -> tuple[int, ...]:
@@ -112,7 +113,8 @@ class CoordinateShard(cx.Coordinate):
       axes = self.dimension_partitions.get(dim, None)
       if not isinstance(axes, tuple):
         axes = (axes,)
-      n_shards = math.prod(self.spmd_mesh_shape.get(axis, 1) for axis in axes)  # pyrefly: ignore[no-matching-overload]
+      # pyrefly: ignore[no-matching-overload]
+      n_shards = math.prod(self.spmd_mesh_shape.get(axis, 1) for axis in axes)
       size, reminder = divmod(full_size, n_shards)
       if reminder:
         raise ValueError(
@@ -360,7 +362,131 @@ class Mesh:
       Field with sharding constraint applied.
     """
     sharding = self.get_sharding(field.dims, schema)
-    return jax.lax.with_sharding_constraint(field, sharding)  # pyrefly: ignore[bad-argument-type]
+    # pyrefly: ignore[bad-argument-type]
+    return jax.lax.with_sharding_constraint(field, sharding)
+
+  def cmap(
+      self,
+      fun: Callable[..., Any],
+      schema: Schema | None = None,
+      out_axes: Any = 'trailing',
+      *,
+      vmap: Callable[..., Any] = jax.vmap,
+  ) -> Callable[..., Any]:
+    """SPMD-aware `cx.cmap` that propagates `spmd_axis_name` from `schema`.
+
+    When vectorizing over named dimensions of `cx.Field` inputs that wrap
+    `jax.shard_map` primitives on `self.spmd_mesh`, standard `jax.vmap` without
+    `spmd_axis_name` maps over those dimensions with `PartitionSpec(None)`,
+    causing inputs to be replicated across the mapped mesh axes. This method
+    looks up each mapped dimension name in `self.field_partitions[schema]` and
+    passes the corresponding mesh axis as `spmd_axis_name` to `vmap`. If a
+    mapped dimension's size is not divisible by the number of shards along that
+    mesh axis, inputs are zero-padded prior to `vmap` and sliced back on output.
+
+    Args:
+      fun: Function to vectorize over named dimensions of `cx.Field` inputs.
+      schema: Partitioning schema name in `self.field_partitions`, or `None` to
+        use standard `cx.cmap` without `spmd_axis_name`.
+      out_axes: Strategy for choosing named axis positions in the outputs.
+      vmap: Underlying vectorizing transform to use (defaults to `jax.vmap`).
+
+    Returns:
+      A coordinate-vectorized version of `fun`.
+    """
+    if self.spmd_mesh is None or schema is None:
+      return cx.cmap(fun, out_axes=out_axes, vmap=vmap)
+    if schema not in self.field_partitions:
+      raise ValueError(
+          f'Schema {schema!r} not found in field_partitions.'
+          f' Available schemas: {list(self.field_partitions.keys())}'
+      )
+    spmd_mesh = self.spmd_mesh
+    dim_partitions = self.field_partitions[schema]
+
+    def vmap_with_spmd(
+        fun: Callable[..., Any],
+        in_axes: tuple[Sequence[int | None]],  # pylint: disable=g-one-element-tuple
+        out_axes: int,
+        axis_name: str,
+        **kwargs,
+    ) -> Callable[..., Any]:
+      spmd_axis = dim_partitions.get(axis_name)
+      if spmd_axis is None:
+        return vmap(
+            fun,
+            in_axes=in_axes,
+            out_axes=out_axes,
+            axis_name=axis_name,
+            **kwargs,
+        )
+      # Construct `vmap` with `spmd_axis_name` and wrap it to pad/slice inputs
+      # when the mapped axis size is not evenly divisible by `n_shards`.
+      vmapped_spmd = vmap(
+          fun,
+          in_axes=in_axes,
+          out_axes=out_axes,
+          axis_name=axis_name,
+          spmd_axis_name=spmd_axis,
+          **kwargs,
+      )
+      axes = spmd_axis if isinstance(spmd_axis, tuple) else (spmd_axis,)
+      n_shards = math.prod(spmd_mesh.shape[ax] for ax in axes)
+      if n_shards <= 1:
+        return vmapped_spmd
+
+      def vmapped_with_pad_and_trim(leaf_data: Sequence[Any]) -> Any:
+        # In coordax.cmap `fun` is converted to a leaf-inputs function and is
+        # then mapped over named dimensions. Here we generate a mapped version
+        # of that with intermediate pad and trim steps to handle non-divisible
+        # shard sizes.
+
+        # cmap passes (list_of_axes_per_leaf,) to vmap, so we unpack it here.
+        (in_axes_list,) = in_axes
+        axis_sizes = {
+            x.shape[ax]
+            for x, ax in zip(leaf_data, in_axes_list)
+            if ax is not None
+        }
+        if len(axis_sizes) != 1:
+          raise ValueError(
+              f'Expected a single mapped axis size, got {axis_sizes=}'
+          )
+        (axis_size,) = axis_sizes
+        if axis_size % n_shards == 0:
+          return vmapped_spmd(leaf_data)  # no need to pad/slice.
+        rem = n_shards - (axis_size % n_shards)
+
+        def _pad(x: Any, ax: int | None) -> Any:
+          if ax is None:
+            return x
+          ax_pos = ax if ax >= 0 else x.ndim + ax
+          pad_width = [(0, 0)] * x.ndim
+          pad_width[ax_pos] = (0, rem)
+          return jnp.pad(x, pad_width)
+
+        padded_leaves = [_pad(x, ax) for x, ax in zip(leaf_data, in_axes_list)]
+        out = vmapped_spmd(padded_leaves)
+
+        def _trim(y: jax.Array) -> jax.Array:
+          out_pos = out_axes if out_axes >= 0 else y.ndim + out_axes
+          return jax.lax.slice_in_dim(y, 0, axis_size, axis=out_pos)
+
+        return jax.tree.map(_trim, out)
+
+      return vmapped_with_pad_and_trim
+
+    return cx.cmap(fun, out_axes=out_axes, vmap=vmap_with_spmd)
+
+  def cpmap(
+      self,
+      fun: Callable[..., Any],
+      schema: Schema | None = None,
+      *,
+      vmap: Callable[..., Any] = jax.vmap,
+  ) -> Callable[..., Any]:
+    """Coordinate-preserving SPMD-aware `cx.cpmap` using `schema`."""
+    return self.cmap(fun, schema=schema, out_axes='same_as_input', vmap=vmap)
 
   def unshard(
       self, field_shards: dict[jax.Device, cx.Field], schema: str

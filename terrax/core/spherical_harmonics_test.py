@@ -27,7 +27,7 @@ from terrax.core import typing
 
 
 class SphericalTransformsTest(parameterized.TestCase):
-  """Tests SphericalHarmonicsTransform methods."""
+  """Tests FixedYlmMapping methods."""
 
   @parameterized.parameters(
       dict(
@@ -54,7 +54,7 @@ class SphericalTransformsTest(parameterized.TestCase):
       ylm_grid: coordinates.SphericalHarmonicGrid,
       lon_lat_grid: coordinates.LonLatGrid,
   ):
-    """Tests that SphericalHarmonicsTransform is equivalent to dinosaur."""
+    """Tests that FixedYlmMapping is equivalent to dinosaur."""
     ylm_map = spherical_harmonics.FixedYlmMapping(
         lon_lat_grid=lon_lat_grid,
         ylm_grid=ylm_grid,
