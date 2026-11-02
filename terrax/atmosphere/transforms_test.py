@@ -133,6 +133,7 @@ class AtmosphereTransformsTest(parameterized.TestCase):
                 'longitude': 'x',
                 'latitude': 'y',
                 'level': 'z',
+                'sigma': 'z',
                 'longitude_wavenumber': 'x',
                 'total_wavenumber': 'y',
             },
@@ -140,6 +141,7 @@ class AtmosphereTransformsTest(parameterized.TestCase):
                 'longitude': ('x', 'z'),
                 'latitude': 'y',
                 'level': None,
+                'sigma': None,
             },
         },
     )
@@ -163,7 +165,9 @@ class AtmosphereTransformsTest(parameterized.TestCase):
     transform = atmos_transforms.ToModalWithDivCurl(
         ylm_map, u_key='u', v_key='v'
     )
-    jit_transform = jax.jit(lambda x: transform(x))
+    jit_transform = jax.jit(
+        lambda x: transform(x)  # pylint: disable=unnecessary-lambda
+    )
     for name, fn in [('eager', transform), ('jit', jit_transform)]:
       with self.subTest(name):
         outputs = fn(dict(inputs))
@@ -178,8 +182,9 @@ class AtmosphereTransformsTest(parameterized.TestCase):
           shard_shape = outputs[key].data.sharding.shard_shape(
               outputs[key].shape
           )
-          # `sigma` is not partitioned; wavenumbers are split over `x` and `y`.
-          expected_shape = sigma.shape + (
+          # `sigma` is partitioned over `z`; wavenumbers over `x` and `y`.
+          expected_shape = (
+              sigma.shape[0] // 2,
               modal_grid.shape[0] // 2,
               modal_grid.shape[1] // 2,
           )

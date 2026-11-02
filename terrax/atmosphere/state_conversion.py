@@ -262,23 +262,26 @@ def primitive_equations_to_uvtz(
     tracers interpolated to vertical `levels`.
   """
   inputs = inputs.copy()  # avoid mutating inputs.
+  inputs = ylm_map.mesh.with_sharding_constraint(inputs, 'vertical')
   vorticity, divergence = inputs.pop('vorticity'), inputs.pop('divergence')
   u, v = spherical_harmonics.vor_div_to_uv_nodal(vorticity, divergence, ylm_map)
   log_surface_pressure = inputs.pop('log_surface_pressure')
   surface_pressure = cx.cpmap(jnp.exp)(ylm_map.to_nodal(log_surface_pressure))
 
   nodal_inputs = ylm_map.to_nodal(inputs)  # includes temperature and tracers.
-  geopotential = get_geopotential(
-      nodal_inputs, orography, sim_units, surface_pressure=surface_pressure
-  )
-  temperature = nodal_inputs.pop('temperature')
-
-  surface_pressure, temperature, geopotential, nodal_inputs = (
+  u, v, surface_pressure, nodal_inputs = (
       ylm_map.mesh.with_sharding_constraint(
-          (surface_pressure, temperature, geopotential, nodal_inputs),
+          (u, v, surface_pressure, nodal_inputs),
           ('horizontal', 'vertical'),
       )
   )
+  geopotential = get_geopotential(
+      nodal_inputs, orography, sim_units, surface_pressure=surface_pressure
+  )
+  geopotential = ylm_map.mesh.with_sharding_constraint(
+      geopotential, 'horizontal'
+  )
+  temperature = nodal_inputs.pop('temperature')
 
   regrid_constant = interpolators.LinearOnPressure(
       levels,
@@ -312,4 +315,5 @@ def primitive_equations_to_uvtz(
     )
   if include_surface_pressure:
     outputs['surface_pressure'] = surface_pressure
+  outputs = ylm_map.mesh.with_sharding_constraint(outputs, 'horizontal')
   return outputs

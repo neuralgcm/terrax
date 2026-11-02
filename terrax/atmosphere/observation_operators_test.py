@@ -16,6 +16,7 @@
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import chex
 import coordax as cx
 from flax import nnx
 import jax
@@ -25,6 +26,7 @@ from terrax.atmosphere import observation_operators
 from terrax.atmosphere import state_conversion
 from terrax.core import coordinates
 from terrax.core import orographies
+from terrax.core import parallelism
 from terrax.core import spherical_harmonics
 from terrax.core import units
 
@@ -191,7 +193,89 @@ class ObservationOperatorsTest(parameterized.TestCase):
           sim_units=self.sim_units,
       )
 
+  def test_primitive_equations_to_uvtz_sharded(self):
+    spmd_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()).reshape((2, 2, 2)), axis_names=['z', 'x', 'y']
+    )
+    mesh = parallelism.Mesh(
+        spmd_mesh=spmd_mesh,
+        field_partitions={
+            'vertical': {
+                'longitude': 'x',
+                'latitude': 'y',
+                'level': 'z',
+                'sigma': 'z',
+                'pressure': 'z',
+                'longitude_wavenumber': 'x',
+                'total_wavenumber': 'y',
+            },
+            'horizontal': {
+                'longitude': ('x', 'z'),
+                'latitude': 'y',
+                'level': None,
+                'sigma': None,
+                'pressure': None,
+            },
+        },
+    )
+    nodal_grid = coordinates.LonLatGrid.T21(
+        mesh=mesh, partition_schema_key='vertical'
+    )
+    modal_grid = coordinates.SphericalHarmonicGrid.T21(
+        mesh=mesh, partition_schema_key='vertical'
+    )
+    ylm_map = spherical_harmonics.FixedYlmMapping(
+        nodal_grid, modal_grid, mesh=mesh, partition_schema_key='vertical'
+    )
+    orography = orographies.ModalOrography(ylm_map=ylm_map, rngs=nnx.Rngs(0))
+    sigma = coordinates.SigmaLevels.equidistant(4)
+    pressure = coordinates.PressureLevels([500, 850, 1000])
+    source_coords = cx.coords.compose(sigma, modal_grid)
+    zero_like = lambda c: cx.field(np.zeros(c.shape), c)
+    inputs = {
+        'divergence': zero_like(source_coords),
+        'vorticity': zero_like(source_coords),
+        'specific_humidity': zero_like(source_coords),
+        'temperature': cx.field(
+            np.full(source_coords.shape, 250.0), source_coords
+        ),
+        'log_surface_pressure': zero_like(modal_grid),
+    }
+    convert_fn = jax.jit(
+        lambda x: state_conversion.primitive_equations_to_uvtz(
+            inputs=x,
+            ylm_map=ylm_map,
+            levels=pressure,
+            orography=orography,
+            sim_units=self.sim_units,
+            include_surface_pressure=True,
+            below_ground_extrapolation='lapse_rate',
+        )
+    )
+    outputs = convert_fn(inputs)
+    expected_3d_shard_shape = pressure.shape + (
+        nodal_grid.shape[0] // 4,
+        nodal_grid.shape[1] // 2,
+    )
+    for key in [
+        'u_component_of_wind',
+        'v_component_of_wind',
+        'temperature',
+        'geopotential',
+        'specific_humidity',
+    ]:
+      shard_shape = outputs[key].data.sharding.shard_shape(outputs[key].shape)
+      self.assertEqual(shard_shape, expected_3d_shard_shape)
+    ps_shard_shape = outputs['surface_pressure'].data.sharding.shard_shape(
+        outputs['surface_pressure'].shape
+    )
+    self.assertEqual(
+        ps_shard_shape,
+        (nodal_grid.shape[0] // 4, nodal_grid.shape[1] // 2),
+    )
+
 
 if __name__ == '__main__':
+  chex.set_n_cpu_devices(8)
   jax.config.parse_flags_with_absl()
   absltest.main()
