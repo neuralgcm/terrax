@@ -16,6 +16,7 @@ import functools
 import operator
 import os
 import pathlib
+import warnings
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -522,10 +523,20 @@ class RunnerTest(parameterized.TestCase):
         unroll_duration=12 * one_h,
         checkpoint_duration=24 * one_h,
     )
-    runner.setup()
-    runner.run(0)
-
-    actual = xarray.open_datatree(output_path, engine='zarr')
+    with warnings.catch_warnings(record=True) as caught_warnings:
+      warnings.simplefilter('always', RuntimeWarning)
+      runner.setup()
+      runner.run(0)
+      actual = xarray.open_datatree(output_path, engine='zarr')
+      group_ds = xarray.open_zarr(f'{output_path}/state', consolidated=True)
+    consolidated_warnings = [
+        w
+        for w in caught_warnings
+        if issubclass(w.category, RuntimeWarning)
+        and 'consolidated metadata' in str(w.message)
+    ]
+    self.assertEmpty(consolidated_warnings)
+    self.assertEqual(set(group_ds.data_vars), {'foo', 'bar'})
     state = actual['state'].to_dataset()
     self.assertEqual(set(state.data_vars), {'foo', 'bar'})
     if has_query_data:
@@ -706,9 +717,13 @@ class OutputQueryTest(parameterized.TestCase):
         dynamic_query_inputs=dynamic_query_inputs,
     )
     runner.setup()
-    actual = xarray.open_datatree(output_path, engine='zarr')
+    actual = xarray.open_datatree(
+        output_path, engine='zarr', consolidated=True
+    )
     self.assertEqual(set(actual['a'].data_vars), {'foo', 'buz'})
     self.assertEqual(set(actual['b'].data_vars), expected_b_vars)
+    group_a = xarray.open_zarr(f'{output_path}/a', consolidated=True)
+    self.assertEqual(set(group_a.data_vars), {'foo', 'buz'})
 
 
 class SplitQueriesByFrequencyTest(absltest.TestCase):

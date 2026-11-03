@@ -39,6 +39,7 @@ from terrax.inference import dynamic_inputs as dynamic_inputs_lib
 from terrax.inference import streaming
 from terrax.inference import timing
 import xarray
+import zarr
 
 # pylint: disable=logging-fstring-interpolation
 
@@ -498,6 +499,9 @@ class InferenceRunner:
         zarr_format=3,
         consolidated=False,
     )
+    for ds_key in template.children:
+      zarr.consolidate_metadata(self.output_path, path=ds_key)
+    zarr.consolidate_metadata(self.output_path)
 
     # Add directory for inference checkpoints. The existance of this directory
     # is used as a marker to indicate that setup() has been called.
@@ -863,6 +867,7 @@ class InferenceRunner:
           mode='r+',
           region=group_region,
           compute=False,
+          consolidated=True,
       )
       delayed_computations.append(delayed)
 
