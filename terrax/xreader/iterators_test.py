@@ -144,6 +144,36 @@ class IteratorsTest(parameterized.TestCase):
     actual = sorted([item for item in data], key=lambda x: x['time'][0].item())
     assert_xarray_trees_identical(actual, expected)
 
+  def test_training_iterator_strided_stencil(self):
+    source = xarray.Dataset(
+        {'x': ('time', -np.arange(100))}, coords={'time': np.arange(100)}
+    )
+    stencil = xreader.Stencil(start=0, stop=12, step=4)
+    sample_origins = np.array([10, 20, 30])
+    data = xreader.training_iterator(
+        source,
+        stencil,
+        sample_origins,
+        buffer_size_in_bytes=100 * 8,
+        seed=0,
+    )
+    expected = [
+        xarray.Dataset(
+            {'x': ('time', np.array([-10, -14, -18]))},
+            coords={'time': np.array([10, 14, 18])},
+        ),
+        xarray.Dataset(
+            {'x': ('time', np.array([-20, -24, -28]))},
+            coords={'time': np.array([20, 24, 28])},
+        ),
+        xarray.Dataset(
+            {'x': ('time', np.array([-30, -34, -38]))},
+            coords={'time': np.array([30, 34, 38])},
+        ),
+    ]
+    actual = sorted([item for item in data], key=lambda x: x['time'][0].item())
+    assert_xarray_trees_identical(actual, expected)
+
   @parameterized.named_parameters(
       {'testcase_name': 'only_window_shuffle', 'buffer_size_in_bytes': 100 * 8},
       {'testcase_name': 'only_global_shuffle', 'buffer_size_in_bytes': 0},

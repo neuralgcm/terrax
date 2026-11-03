@@ -281,7 +281,7 @@ def group_slices(
     block = slice(block_start, block_stop)
 
     sub_slices = [
-        slice(s.start - block_start, s.stop - block_start)
+        slice(s.start - block_start, s.stop - block_start, s.step)
         for s in slices_to_consolidate
     ]
     groups.append((block, sub_slices))
