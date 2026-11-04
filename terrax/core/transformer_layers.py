@@ -1915,16 +1915,21 @@ class EpdTransformer(nnx.Module, pytree=False):
   Like `standard_layers.Epd`, inputs are encoded, updated residually by each
   process block (`x = x + block(x)`) and decoded. Process blocks are
   `TransformerLayer`s, e.g. `TransformerBlocks`, `WindowTransformerBlocks` or
-  `LatentPoolingTransformer`. Following other layers in `standard_layers.py`,
-  `encode`, `process_blocks` and `decode` operate on arrays with a leading
-  channel axis `[C, spatial...]`, while the projection of positional encodings
-  and the optional pre-decode normalization act on the channel axis of each
-  token.
+  `LatentPoolingTransformer`. Optional `latents` (e.g. tokens on another
+  coordinate that the process blocks cross-attend to) are passed to every
+  process block, optionally after being encoded by `latents_encode`. Following
+  other layers in `standard_layers.py`, `encode`, `process_blocks` and `decode`
+  operate on arrays with a leading channel axis `[C, spatial...]`, while the
+  projection of positional encodings and the optional pre-decode normalization
+  act on the channel axis of each token.
 
   Attributes:
     encode: Layer mapping inputs to the latent representation.
     decode: Layer mapping the latent representation to outputs.
     process_blocks: Transformer layers applied residually to the latents.
+    latents_encode: Optional layer mapping `latents` to the channel size of the
+      latent representation. If None, `latents` are passed to the process
+      blocks as is.
     pos_encoding_proj: Optional linear projection of positional encodings added
       to the encoded inputs (https://arxiv.org/abs/1706.03762, Sec. 3.5).
     pre_decode_norm: Optional normalization of latents applied before decoding,
@@ -1937,6 +1942,9 @@ class EpdTransformer(nnx.Module, pytree=False):
   encode: standard_layers.UnaryLayer = nnx.data(kw_only=True)
   decode: standard_layers.UnaryLayer = nnx.data(kw_only=True)
   process_blocks: Sequence[TransformerLayer] = nnx.data(kw_only=True)
+  latents_encode: standard_layers.UnaryLayer | None = nnx.data(
+      default=None, kw_only=True
+  )
   pos_encoding_proj: nnx.Linear | None = nnx.data(default=None, kw_only=True)
   pre_decode_norm: nnx.Module | None = nnx.data(default=None, kw_only=True)
   post_encode_activation: Callable[[Array], Array] | None = nnx.static(
@@ -1969,6 +1977,8 @@ class EpdTransformer(nnx.Module, pytree=False):
       encode_factory: standard_layers.UnaryLayerFactory,
       process_factory: Callable[..., TransformerLayer],
       decode_factory: standard_layers.UnaryLayerFactory,
+      latents_size: int | None = None,
+      latents_encode_factory: standard_layers.UnaryLayerFactory | None = None,
       pos_encoding_size: int | None = None,
       use_additive_pos_encoding: bool = False,
       pre_decode_normalization_factory: NormalizationFactory | None = None,
@@ -1988,6 +1998,12 @@ class EpdTransformer(nnx.Module, pytree=False):
       process_factory: Factory for process blocks, called as
         `process_factory(latent_size, latent_size, rngs=rngs)`.
       decode_factory: Factory for the decoder `UnaryLayer`.
+      latents_size: Optional number of channels of the `latents` passed to
+        `__call__`. If set, latents are encoded to `latent_size` channels before
+        the process blocks; otherwise they must already have `latent_size`
+        channels.
+      latents_encode_factory: Factory for the latents encoder, used when
+        `latents_size` is set. Defaults to `encode_factory`.
       pos_encoding_size: Size of positional encodings. Required when
         `use_additive_pos_encoding` is True.
       use_additive_pos_encoding: Whether to add a linear projection of the
@@ -2008,6 +2024,13 @@ class EpdTransformer(nnx.Module, pytree=False):
         process_factory(latent_size, latent_size, rngs=rngs)
         for _ in range(num_process_blocks)
     ])
+    if latents_size is None:
+      latents_encode = None
+    else:
+      latents_encode_factory = latents_encode_factory or encode_factory
+      latents_encode = latents_encode_factory(
+          latents_size, latent_size, rngs=rngs
+      )
     if not use_additive_pos_encoding:
       pos_encoding_proj = None
     elif pos_encoding_size is None:
@@ -2024,6 +2047,7 @@ class EpdTransformer(nnx.Module, pytree=False):
         encode=encode,
         decode=decode,
         process_blocks=process_blocks,
+        latents_encode=latents_encode,
         pos_encoding_proj=pos_encoding_proj,
         pre_decode_norm=pre_decode_norm,
         post_encode_activation=post_encode_activation,
@@ -2051,6 +2075,10 @@ class EpdTransformer(nnx.Module, pytree=False):
       encoded = encoded + _apply_to_channel_axis(
           self.pos_encoding_proj, inputs_pos_encoding
       )
+    if self.latents_encode is not None:
+      if latents is None:
+        raise ValueError('latents are required when latents_encode is set.')
+      latents = self.latents_encode(jnp.asarray(latents))
     current = encoded
     for process_block in self.process_blocks:
       current = current + process_block(

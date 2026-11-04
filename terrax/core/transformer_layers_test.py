@@ -304,6 +304,57 @@ class TransformerLayersTest(parameterized.TestCase):
         float(np.linalg.norm(grad_model.pre_decode_norm.scale.value)), 0.0
     )
 
+  def test_epd_transformer_encodes_latents(self):
+    """Tests EpdTransformer cross-attending to latents with their own size."""
+    num_levels, num_latent_levels, pos_encoding_size = 16, 13, 8
+    input_size, output_size, latent_size, latents_size = 6, 4, 12, 3
+    embedding_factory = functools.partial(
+        standard_layers.ConvLevel, kernel_size=1
+    )
+    process_factory = functools.partial(
+        transformer_layers.TransformerBlocks.build_using_factories,
+        intermediate_sizes=(latent_size,),
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        relative_bias_factory=functools.partial(
+            standard_layers.Mlp.uniform, hidden_size=4, hidden_layers=1
+        ),
+        pos_encoding_size=pos_encoding_size,
+        pre_normalization_factory=nnx.LayerNorm,
+        gating=None,
+    )
+    epd = transformer_layers.EpdTransformer.build_using_factories(
+        input_size=input_size,
+        output_size=output_size,
+        latent_size=latent_size,
+        num_process_blocks=2,
+        encode_factory=embedding_factory,
+        process_factory=process_factory,
+        decode_factory=embedding_factory,
+        latents_size=latents_size,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(epd))
+    self.assertIsInstance(epd.latents_encode, standard_layers.ConvLevel)
+    x = jax.random.normal(jax.random.key(0), (input_size, num_levels))
+    z = jax.random.normal(jax.random.key(1), (latents_size, num_latent_levels))
+    x_pe = jax.random.normal(jax.random.key(2), (pos_encoding_size, num_levels))
+    z_pe = jax.random.normal(
+        jax.random.key(3), (pos_encoding_size, num_latent_levels)
+    )
+    out = epd(x, z, x_pe, z_pe)
+    self.assertEqual(out.shape, (output_size, num_levels))
+    with self.assertRaisesRegex(ValueError, 'latents are required'):
+      epd(x, inputs_pos_encoding=x_pe)
+
+    def loss_fn(model):
+      return jax.numpy.sum(model(x, z, x_pe, z_pe) ** 2)
+
+    grads = nnx.grad(loss_fn)(epd)
+    self.assertGreater(
+        float(np.linalg.norm(grads.latents_encode.kernel.value)), 0.0
+    )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='no_shifts_even_window_shape_no_gating',
