@@ -251,6 +251,26 @@ class TransformerLayersTest(parameterized.TestCase):
     out = net(inputs, inputs_pos_encoding=ylm_pe, mask=mask)
     self.assertEqual(out.shape, (output_size, *self.grid.shape))
 
+  def test_spherical_harmonic_lon_lat_encodings_select_modes(self):
+    """Tests that encodings are the harmonics with l_min <= l < l_max."""
+    ylm_map = spherical_harmonics.YlmMapper().ylm_map(self.grid)
+    l_min, l_max = 1, 4
+    pe = transformer_layers.spherical_harmonic_lon_lat_encodings(
+        ylm_map, l_max, l_min
+    )
+    self.assertEqual(pe.shape, (l_max**2 - l_min**2,) + self.grid.shape)
+    # Each encoding is a single spherical harmonic with a selected wavenumber.
+    modal = np.asarray(jax.vmap(ylm_map.to_modal_array)(pe))
+    total_wavenumber = ylm_map.ylm_grid.fields['total_wavenumber'].data
+    modes = set()
+    for coeffs in modal:
+      m_idx, l_idx = np.unravel_index(np.argmax(np.abs(coeffs)), coeffs.shape)
+      self.assertBetween(total_wavenumber[l_idx], l_min, l_max - 1)
+      modes.add((m_idx, l_idx))
+    self.assertLen(modes, l_max**2 - l_min**2)
+    with self.assertRaisesRegex(ValueError, 'does not resolve'):
+      transformer_layers.spherical_harmonic_lon_lat_encodings(ylm_map, 10**3)
+
   def test_spherical_positional_encoder(self):
     """Tests output_shape of SphericalPositionalEncoder."""
     ylm_mapper = spherical_harmonics.YlmMapper()

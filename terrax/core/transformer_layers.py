@@ -841,7 +841,23 @@ class TransformerBlocks(TransformerBase):
 
 @nnx.dataclass
 class WindowTransformerBlocks(TransformerBase):
-  """Transformer blocks that apply attention within windows."""
+  """Transformer blocks that apply attention within (shifted) windows.
+
+  Attention is restricted to non-overlapping spatial windows; when
+  `shift_windows` is True, windows of odd layers are shifted by half a window
+  to exchange information across window boundaries, following the Swin
+  Transformer (https://arxiv.org/abs/2103.14030). Ghost cells needed to tile
+  the domain with windows are provided by boundary conditions.
+
+  Attributes:
+    inputs_bc: Boundary condition used to pad/trim inputs (queries).
+    kv_bc: Boundary condition used to pad/trim latents (keys/values).
+    inputs_window_shape: Shape of windows for inputs (queries).
+    kv_window_shape: Shape of windows for latents (keys/values).
+    relative_bias_net: Network mapping differences of windowed positional
+      encodings to per-head attention biases.
+    shift_windows: Whether to shift windows in alternating layers.
+  """
 
   inputs_bc: boundaries.BoundaryCondition = nnx.data(kw_only=True)
   kv_bc: boundaries.BoundaryCondition = nnx.data(kw_only=True)
@@ -910,13 +926,34 @@ class WindowTransformerBlocks(TransformerBase):
       spatial_shape: tuple[int, ...],
       window_shape: tuple[int, ...],
       shifts: tuple[int, ...] | None = None,
-  ) -> tuple[tuple[int, ...], ...]:
+  ) -> tuple[tuple[int, int], ...]:
     """Calculates padding sizes for windowing with optional shifts."""
     if shifts is None:
       shifts = tuple(0 for _ in window_shape)
     return tuple(
         (s % w, (w * math.ceil((x + s) / w) - (x + s)) % w)
         for x, w, s in zip(spatial_shape, window_shape, shifts)
+    )
+
+  def _window_shifts(
+      self, layer_idx: int
+  ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Returns window shifts of (queries, keys/values) for layer `layer_idx`.
+
+    Odd layers of shifted-window transformers attend over windows shifted by
+    half a window, so that information is exchanged across window boundaries.
+
+    Args:
+      layer_idx: Index of the attention layer.
+    """
+    if self.shift_windows and layer_idx % 2 == 1:
+      return (
+          tuple(w // 2 for w in self.inputs_window_shape),
+          tuple(w // 2 for w in self.kv_window_shape),
+      )
+    return (
+        tuple(0 for _ in self.inputs_window_shape),
+        tuple(0 for _ in self.kv_window_shape),
     )
 
   def _to_windows(
@@ -943,19 +980,14 @@ class WindowTransformerBlocks(TransformerBase):
       Windowed array [num_windows, window_volume, C]
     """
     pad_sizes = self._pad_sizes(array.shape[1:], window_shape, shifts)
-
-    @nnx.vmap(in_axes=(None, 0))  # vmap over channel dimension.
-    def pad(bc, x):
-      return bc.pad_array(x, pad_sizes)
-
-    padded_array = pad(bc, array)
+    if any(s != (0, 0) for s in pad_sizes):
+      array = jax.vmap(lambda x: bc.pad_array(x, pad_sizes))(array)
     space_pattern, window_pattern, shape_kwargs = self._window_rearrange_args(
-        padded_array.shape, window_shape
+        array.shape, window_shape
     )
-    result = einops.rearrange(
-        padded_array, f'{space_pattern} -> {window_pattern}', **shape_kwargs
+    return einops.rearrange(
+        array, f'{space_pattern} -> {window_pattern}', **shape_kwargs
     )
-    return result
 
   def _from_windows(
       self,
@@ -992,12 +1024,40 @@ class WindowTransformerBlocks(TransformerBase):
     spatial = einops.rearrange(
         array, f'{window_pattern} -> {space_pattern}', **shape_kwargs
     )
+    if any(s != (0, 0) for s in pad_sizes):
+      spatial = jax.vmap(lambda x: bc.trim_array(x, pad_sizes))(spatial)
+    return spatial
 
-    @nnx.vmap(in_axes=(None, 0))  # vmap over channel dimension.
-    def trim(bc, x):
-      return bc.trim_array(x, pad_sizes)
+  def _rewindow(
+      self,
+      array: typing.Array,
+      window_shape: tuple[int, ...],
+      bc: boundaries.BoundaryCondition,
+      spatial_shape: tuple[int, ...],
+      from_shifts: tuple[int, ...] | None = None,
+      to_shifts: tuple[int, ...] | None = None,
+  ) -> typing.Array:
+    """Re-windows a windowed `array` from `from_shifts` to `to_shifts`.
 
-    return trim(bc, spatial)
+    This is achieved by moving to spatial format (trimming ghost cells of the
+    `from_shifts` windowing) and back to windows with `to_shifts` (padding the
+    ghost cells required by the new windowing).
+
+    Args:
+      array: Windowed array [num_windows, window_volume, C].
+      window_shape: Shape of the windows.
+      bc: Boundary condition describing how to pad/trim ghost cells.
+      spatial_shape: Spatial shape of the array without padding.
+      from_shifts: Window shifts of the input `array`.
+      to_shifts: Window shifts of the returned array.
+
+    Returns:
+      Windowed array [num_windows, window_volume, C] with `to_shifts`.
+    """
+    spatial = self._from_windows(
+        array, window_shape, bc, spatial_shape=spatial_shape, shifts=from_shifts
+    )
+    return self._to_windows(spatial, window_shape, bc, shifts=to_shifts)
 
   def _attention_bias(
       self,
@@ -1107,109 +1167,54 @@ class WindowTransformerBlocks(TransformerBase):
       kv_pos_encoding = query_pos_encoding
 
     q_shape, kv_shape = query_pos_encoding.shape, kv_pos_encoding.shape
-    # Transform positional encodings to window format.
-    if layer_idx % 2 == 0 or not self.shift_windows:
-      q_shifts = tuple(0 for _ in self.inputs_window_shape)  # no window shifts.
-      q_pe_windows = self._to_windows(
-          query_pos_encoding,
-          self.inputs_window_shape,
-          self.inputs_bc,
+    # `query`, `key`, `value` and `mask` arrive in unshifted windowed format;
+    # in shifted layers they are re-windowed with shifts before attention.
+    q_shifts, kv_shifts = self._window_shifts(layer_idx)
+    q_pe_windows = self._to_windows(
+        query_pos_encoding, self.inputs_window_shape, self.inputs_bc, q_shifts
+    )
+    kv_pe_windows = self._to_windows(
+        kv_pos_encoding, self.kv_window_shape, self.kv_bc, kv_shifts
+    )
+    attention_bias = self._attention_bias(q_pe_windows, kv_pe_windows)
+    if any(q_shifts) or any(kv_shifts):
+      rewindow_kv = functools.partial(
+          self._rewindow,
+          window_shape=self.kv_window_shape,
+          bc=self.kv_bc,
+          spatial_shape=kv_shape[1:],
+          to_shifts=kv_shifts,
       )
-      kv_pe_windows = self._to_windows(
-          kv_pos_encoding,
-          self.kv_window_shape,
-          self.kv_bc,
-      )
-      attention_bias = self._attention_bias(q_pe_windows, kv_pe_windows)
-      if mask is not None:
-        mask = self.mask_to_attention_shape(mask)
-      result = attention(
-          query, key, value, mask=mask, attention_bias=attention_bias
-      )
-    else:  # if shift_windows is True and odd layer - apply shift to windows.
-      q_shifts = tuple(w // 2 for w in self.inputs_window_shape)
-      q_pe_windows = self._to_windows(
-          query_pos_encoding,
-          self.inputs_window_shape,
-          self.inputs_bc,
-          shifts=q_shifts,
-      )
-      kv_shifts = tuple(w // 2 for w in self.kv_window_shape)
-      kv_pe_windows = self._to_windows(
-          kv_pos_encoding,
-          self.kv_window_shape,
-          self.kv_bc,
-          shifts=kv_shifts,
-      )
-      attention_bias = self._attention_bias(q_pe_windows, kv_pe_windows)
-      # To obtain proper shifted windows we move to spatial and back to windows.
-      # _to_windows and _from_windows manage padding and trimming arising from
-      # the addition of the shift argument. The same process is applied to other
-      # tensors that are subject to windowing.
-      query = self._from_windows(
+      query = self._rewindow(
           query,
           self.inputs_window_shape,
           self.inputs_bc,
           spatial_shape=q_shape[1:],
+          to_shifts=q_shifts,
       )
-      query = self._to_windows(
-          query,
+      mask = None if mask is None else rewindow_kv(mask)
+      key = None if key is None else rewindow_kv(key)
+      value = None if value is None else rewindow_kv(value)
+    if mask is not None:
+      mask = self.mask_to_attention_shape(mask)
+    result = attention(
+        query, key, value, mask=mask, attention_bias=attention_bias
+    )
+    # The result must be returned in unshifted windowed format with valid ghost
+    # cells. Re-windowing is required if windows were shifted, or if unshifted
+    # windowing pads ghost cells (whose values are stale after attention).
+    unshifted_pads = self._pad_sizes(q_shape[1:], self.inputs_window_shape)
+    needs_ghost_cell_refresh = any(q_shifts) or any(
+        s != (0, 0) for s in unshifted_pads
+    )
+    if needs_ghost_cell_refresh:
+      result = self._rewindow(
+          result,
           self.inputs_window_shape,
           self.inputs_bc,
-          shifts=q_shifts,
-      )  # move back to windows, but with a shift.
-      if mask is not None:
-        # adding shifting, see comment above similar transform on query above.
-        mask = self._from_windows(
-            mask,
-            self.kv_window_shape,
-            self.kv_bc,
-            spatial_shape=kv_shape[1:],
-        )
-        mask = self._to_windows(
-            mask,
-            self.kv_window_shape,
-            self.kv_bc,
-            shifts=kv_shifts,
-        )
-        mask = self.mask_to_attention_shape(mask)
-      if key is not None:
-        # adding shifting, see comment above similar transform on query above.
-        key = self._from_windows(
-            key, self.kv_window_shape, self.kv_bc, spatial_shape=kv_shape[1:]
-        )
-        key = self._to_windows(
-            key,
-            self.kv_window_shape,
-            self.kv_bc,
-            shifts=kv_shifts,
-        )
-      if value is not None:
-        # adding shifting, see comment above similar transform on query above.
-        value = self._from_windows(
-            value, self.kv_window_shape, self.kv_bc, spatial_shape=kv_shape[1:]
-        )
-        value = self._to_windows(
-            value,
-            self.kv_window_shape,
-            self.kv_bc,
-            shifts=kv_shifts,
-        )
-      result = attention(
-          query, key, value, mask=mask, attention_bias=attention_bias
+          spatial_shape=q_shape[1:],
+          from_shifts=q_shifts,
       )
-    # Result should be in a windowed format without shifts with valid unused
-    # ghost cells. This is achieved by moving to spatial and back to windowed
-    # format. If windowing is not used, this either refreshes the ghost cells
-    # or becomes a no-op if no cells were needed.
-    result = self._from_windows(
-        result,
-        self.inputs_window_shape,
-        self.inputs_bc,
-        spatial_shape=q_shape[1:],
-        shifts=q_shifts,
-    )
-    result = self._to_windows(result, self.inputs_window_shape, self.inputs_bc)
     return result
 
   @classmethod
@@ -1314,20 +1319,30 @@ def spherical_harmonic_lon_lat_encodings(
     l_max: int,
     l_min: int = 0,
 ):
-  """Spherical harmonic positional encodings for lon-lat grids."""
+  """Spherical harmonic positional encodings for lon-lat grids.
 
-  def _get_ylm(l, m):
-    zeros = np.zeros(ylm_map.ylm_grid.shape)
-    # TODO(dkochkov): use sel semantic once it is added to coordax.
-    zeros[2 * abs(m) + int(m < 0), l] = 1
-    return ylm_map.to_nodal_array(zeros)  # pyrefly: ignore[bad-argument-type]
-
-  pe_maps = []
-  for l in range(l_min, l_max):
-    for m in range(-l, l + 1):
-      pe_maps.append(_get_ylm(l, m))
-
-  return jnp.stack(pe_maps, axis=0)
+  Returns the nodal representation of every spherical harmonic with total
+  wavenumber `l_min <= l < l_max` (`l_max**2 - l_min**2` channels). Modes are
+  selected via the `mask` and `total_wavenumber` fields of the modal grid, so
+  the result does not depend on the layout of modal coefficients.
+  """
+  fields = ylm_map.ylm_grid.fields
+  total_wavenumber = fields['total_wavenumber'].data
+  selected = (
+      fields['mask'].data
+      & (total_wavenumber >= l_min)
+      & (total_wavenumber < l_max)
+  )
+  n_modes = int(np.count_nonzero(selected))
+  if n_modes != l_max**2 - l_min**2:
+    raise ValueError(
+        f'{ylm_map.ylm_grid} does not resolve all spherical harmonics with '
+        f'total wavenumbers in [{l_min}, {l_max}).'
+    )
+  # One-hot modal coefficients of each selected mode: [n_modes, M, L].
+  modal_basis = np.zeros((n_modes, *selected.shape), np.float32)
+  modal_basis[(np.arange(n_modes), *np.nonzero(selected))] = 1.0
+  return jax.vmap(ylm_map.to_nodal_array)(modal_basis)  # pyrefly: ignore[bad-argument-type]
 
 
 class PositionalEncoder(Protocol):
