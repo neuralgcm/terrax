@@ -140,6 +140,18 @@ class TransformerLayersTest(parameterized.TestCase):
     out = net(inputs, latents=latents)
     self.assertEqual(out.shape, (output_size, n_levels))
 
+  def test_default_qkv_features_follow_layer_input_sizes(self):
+    """Tests that qkv_features default to the input size of each layer."""
+    net = transformer_layers.TransformerBlocks.build_using_factories(
+        6,
+        4,
+        intermediate_sizes=[8],
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEqual([a.qkv_features for a in net.attentions], [6, 8])
+
   @parameterized.named_parameters(
       dict(
           testcase_name='no_shifts_even_window_shape_no_gating',

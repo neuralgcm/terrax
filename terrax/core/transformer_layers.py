@@ -664,18 +664,16 @@ class TransformerBase(nnx.Module, abc.ABC):
     post_norms = []
     possible_gating = []
     for i, (d_in, d_out) in enumerate(zip(input_sizes, output_sizes)):
-      if qkv_features is None:
-        if d_in % num_heads != 0:
-          raise ValueError(
-              f'{d_in=} at layer={i} is not divisible by {num_heads=}'
-              ' which is required if qkv_features is not specified.'
-          )
-        qkv_features = d_in
+      if qkv_features is None and d_in % num_heads != 0:
+        raise ValueError(
+            f'{d_in=} at layer={i} is not divisible by {num_heads=}'
+            ' which is required if qkv_features is not specified.'
+        )
       attentions.append(
           MultiHeadAttention(
               num_heads=num_heads,
               in_features=d_in,
-              qkv_features=qkv_features,
+              qkv_features=d_in if qkv_features is None else qkv_features,
               out_features=d_out,
               use_bias=use_bias_in_attention,
               kernel_init=w_init,
