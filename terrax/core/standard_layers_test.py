@@ -323,6 +323,14 @@ class StandardLayersTest(parameterized.TestCase):
           dilation=2,
           use_bias=True,
       ),
+      dict(
+          input_size=4,
+          input_lonlat_shape=(16, 8),
+          output_size=3,
+          kernel_size=(1, 1),  # no padding required.
+          dilation=1,
+          use_bias=True,
+      ),
   )
   def test_conv_lon_lat(
       self,
@@ -342,6 +350,8 @@ class StandardLayersTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     self.assertEmpty(nnx.find_duplicates(conv_layer))
+    self.assertEqual(conv_layer.input_size, input_size)
+    self.assertEqual(conv_layer.output_size, output_size)
     params = nnx.state(conv_layer, nnx.Param)
 
     with self.subTest('output_shape'):
@@ -452,6 +462,8 @@ class StandardLayersTest(parameterized.TestCase):
         dilation=1,
         rngs=nnx.Rngs(0),
     )
+    self.assertEqual(cnn_lon_lat.input_size, 3)
+    self.assertEqual(cnn_lon_lat.output_size, 2)
 
     with self.subTest('output_shape'):
       inputs = jnp.ones((3, 32, 64))

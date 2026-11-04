@@ -441,6 +441,8 @@ class ConvLonLat(nnx.Module):
       dilation: int = 1,
       rngs: nnx.Rngs,
   ):
+    self.input_size = input_size
+    self.output_size = output_size
     self.conv_layer = nnx.Conv(
         in_features=input_size,
         out_features=output_size,
@@ -464,11 +466,16 @@ class ConvLonLat(nnx.Module):
     def trim(bc, x):
       return bc.trim_array(x, self.pad_width)
 
-    inputs = pad(self.bc, inputs)
+    # 1x1 kernels need no ghost cells; skipping pad/trim avoids a no-op copy.
+    needs_padding = any(w != (0, 0) for w in self.pad_width)
+    if needs_padding:
+      inputs = pad(self.bc, inputs)
     inputs = jnp.moveaxis(inputs, 0, -1)
     outputs = self.conv_layer(inputs)
     outputs = jnp.moveaxis(outputs, -1, 0)
-    return trim(self.bc, outputs)
+    if needs_padding:
+      outputs = trim(self.bc, outputs)
+    return outputs
 
 
 @nnx.dataclass
@@ -589,6 +596,14 @@ class CnnLonLat(nnx.Module, pytree=False):
   conv_layers: Sequence[ConvLonLat] = nnx.data()
   activation: Callable[[jax.Array], jax.Array]
   activation_final: Callable[[jax.Array], jax.Array] = lambda x: x
+
+  @property
+  def input_size(self) -> int:
+    return self.conv_layers[0].input_size
+
+  @property
+  def output_size(self) -> int:
+    return self.conv_layers[-1].output_size
 
   @classmethod
   def build_using_factories(
