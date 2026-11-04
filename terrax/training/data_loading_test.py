@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from absl.testing import absltest
+import chex
 import coordax as cx
 import jax
 import jax.numpy as jnp
@@ -756,6 +757,74 @@ class DataLoaderTest(absltest.TestCase):
         expected_x = expected_rollout_sample['slow']['x'].data[i]
         np.testing.assert_allclose(retrieved['slow']['x'].data, expected_x)
 
+  def test_model_parallel_mixed_spatial_and_scalar_datasets(self):
+    # Verifies that a dataset without any of `shardable_dims` is replicated
+    # across the mesh without raising a sharding error.
+    # Fix the batch axis to size 2 and spread the remaining devices along `x`,
+    # so the test is independent of the number of available devices (e.g. 4
+    # under blaze vs. 8 under the open-source pytest `conftest.py`).
+    devices = jax.local_devices()
+    jax_mesh = jax.sharding.Mesh(
+        np.array(devices).reshape(2, -1), ('batch', 'x')
+    )
+    mesh = parallelism.Mesh(
+        spmd_mesh=jax_mesh,
+        field_partitions={
+            'horizontal': {
+                'batch': 'batch',
+                'level': None,
+                'longitude': 'x',
+                'latitude': None,
+            }
+        },
+    )
+    grid = coordinates.LonLatGrid.T21()
+    lon, lat = grid.fields['longitude'].data, grid.fields['latitude'].data
+    dt = np.timedelta64(6, 'h')
+    times = pd.Timestamp('2000-01-01') + np.arange(0, 20) * dt
+    rng = np.random.RandomState(0)
+    gridded_ds = xarray.Dataset(
+        {'u': (('time', 'longitude', 'latitude'), rng.randn(20, 64, 32))},
+        coords={
+            'time': pd.to_datetime(times),
+            'longitude': lon,
+            'latitude': lat,
+        },
+    )
+    scalar_ds = xarray.Dataset(
+        {'rmm1': (('time',), rng.randn(20))},
+        coords={'time': pd.to_datetime(times)},
+    )
+    all_data = {'gridded': gridded_ds, 'scalar': scalar_ds}
+    td = coordinates.TimeDelta(np.arange(0, 3) * dt)
+    specs = {
+        'gridded': {'u': cx.coords.compose(td, grid)},
+        'scalar': {'rmm1': td},
+    }
+    loader = data_loading.DataLoader(
+        all_data=all_data,
+        parallelism_mesh=mesh,
+        loading_partition_schema='horizontal',
+        shardable_dims=('level', 'longitude', 'latitude'),
+    )
+    eval_iter = loader.build_eval_inputs(
+        specs,
+        {},
+        batch_size_per_device=1,
+        batch_count=2,
+        time_sample_offset=np.timedelta64(24, 'h'),
+        dataset_time_slice=None,
+    )
+    batch, _ = next(iter(eval_iter))
+    self.assertEqual(
+        batch['gridded']['u'].coordinate,
+        cx.coords.compose(cx.SizedAxis('batch', 2), td, grid),
+    )
+    self.assertEqual(
+        batch['scalar']['rmm1'].coordinate,
+        cx.coords.compose(cx.SizedAxis('batch', 2), td),
+    )
+
 
 class TestTimedeltaSelectors(absltest.TestCase):
 
@@ -805,4 +874,6 @@ class TestTimedeltaSelectors(absltest.TestCase):
 
 
 if __name__ == '__main__':
+  chex.set_n_cpu_devices(8)
+  jax.config.update('jax_traceback_filtering', 'off')
   absltest.main()

@@ -960,36 +960,44 @@ class DataLoader:
     mesh = self.parallelism_mesh
     assert isinstance(mesh, parallelism.Mesh)  # guaranteed by spmd_mesh check.
     partitions = mesh.field_partitions[self.loading_partition_schema]  # pyrefly: ignore[bad-index]
-    if batch_size_per_device is not None:
-      spec_names = ('batch',) + self.shardable_dims
+    # Dataset dims that may be split across devices. `batch` is not a dataset
+    # dim (it is synthesized by batching below), hence it is prepended apart.
+    shard_dims = self.shardable_dims
+    if batch_axis is not None:
+      batch_spec = (partitions['batch'],)
+      batch_shape = (batch_axis.size,)  # pyrefly: ignore[missing-attribute]
     else:
-      spec_names = self.shardable_dims
+      batch_spec, batch_shape = (), ()
 
-    spec = jax.sharding.PartitionSpec(*(partitions[k] for k in spec_names))
-    sharding = jax.sharding.NamedSharding(spmd_mesh, spec)
-
-    spatial_dims = self.shardable_dims
-
-    # Stores datasets groupped by resolution and dataset key.
-    # This makes it easier to keep track of resolution-specific index maps.
+    # Group datasets by the sizes of `shard_dims`, so that the per-device index
+    # slices (which depend on the shape only) are computed once per group. Size
+    # 0 marks a dim absent from the dataset (e.g. `level` in surface data; a dim
+    # that is present is never empty) and keeps `res_key` sortable for the
+    # canonical keys below.
     datasets_by_res = collections.defaultdict(dict)
     for name, ds in dataset_dict.items():
-      res_key = tuple(ds.sizes.get(k, 1) for k in spatial_dims)
+      res_key = tuple(ds.sizes.get(k, 0) for k in shard_dims)
       datasets_by_res[res_key][name] = ds
 
-    # Stores shard indices for each device and resolution.
+    # For each device and resolution group, the slices of the global array that
+    # the device holds (batch slice first when batching, then one per entry of
+    # `shard_dims`). Below, devices with identical slices across all groups are
+    # served by a single shard pipeline, which `isel`s the datasets with these
+    # slices. Absent dims are kept as replicated size-1 placeholders (a
+    # placeholder cannot be split across a mesh axis) so that slices stay
+    # aligned with `shard_dims`; `isel(..., missing_dims='ignore')` drops them.
     device_to_indices_by_res = collections.defaultdict(dict)
     for res_key in datasets_by_res:
-      sizes = {k: v for k, v in zip(spatial_dims, res_key)}
-      # Use .get(k, 1) for dims that may not exist in a particular dataset.
-      if batch_axis is not None:
-        global_shape = (
-            batch_axis.size,  # pyrefly: ignore[missing-attribute]
-            *(sizes.get(k, 1) for k in spatial_dims),
-        )
-      else:
-        global_shape = tuple(sizes.get(k, 1) for k in spatial_dims)
-
+      spec = jax.sharding.PartitionSpec(
+          *batch_spec,
+          *(
+              partitions[k] if size else None
+              for k, size in zip(shard_dims, res_key)
+          ),
+      )
+      global_shape = (*batch_shape, *(size or 1 for size in res_key))
+      sharding = jax.sharding.NamedSharding(spmd_mesh, spec)
+      # Addressable devices only: each host reads just the shards it owns.
       indices_map = sharding.addressable_devices_indices_map(global_shape)
       for device, index in indices_map.items():
         device_to_indices_by_res[device][res_key] = index
@@ -1022,22 +1030,17 @@ class DataLoader:
         # Batch slice is consistent across resolutions for a given device group.
         batch_slice = list(indices_by_res.values())[0][0]
         shard_index = slice_to_shard(batch_slice)
-        spatial_slice_start_idx = 1
       else:
         shard_index = 0
-        spatial_slice_start_idx = 0
 
       shard_dataset = {}
       for res_key, fixed_res_datasets in datasets_by_res.items():
-        indices_tuple = indices_by_res[res_key]
-        spatial_indices_slices = indices_tuple[
-            spatial_slice_start_idx:
-        ]  # skip the batch index.
-        spatial_indices = dict(zip(spatial_dims, spatial_indices_slices))
+        # Drop the leading batch slice; the rest is aligned with `shard_dims`.
+        dim_slices = indices_by_res[res_key][len(batch_shape) :]
+        indexers = dict(zip(shard_dims, dim_slices))
         for name, ds in fixed_res_datasets.items():
-          # we ignore missing dims because some datasets may not have all
-          # dimensions e.g. surface data may be missing level dim.
-          shard_dataset[name] = ds.isel(spatial_indices, missing_dims='ignore')
+          # Placeholder slices of dims absent from `ds` are ignored.
+          shard_dataset[name] = ds.isel(indexers, missing_dims='ignore')
       shard_data.append(read_shard(shard_dataset, shard_index))
 
     if batch_size_per_device is not None:
