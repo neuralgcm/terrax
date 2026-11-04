@@ -322,6 +322,10 @@ def residual_gating(skip, x):
   return skip + x
 
 
+def identity(x: Array) -> Array:
+  return x
+
+
 NormalizationFactory = Callable[..., nnx.Module]
 # Examples include: nnx.LayerNorm, DyT.
 
@@ -359,8 +363,10 @@ class TransformerBase(nnx.Module, abc.ABC):
     n_layers: The number of transformer blocks (attention + dense layers).
     attentions: Sequence of `MultiHeadAttention` modules.
     dense_layers: Sequence of `UnaryLayer`s applied after attention layers.
-    layer_norms: Optional sequence of `nnx.LayerNorm` modules, applied before
-      attention and dense layers.
+    pre_norms: Optional sequence of `2 * n_layers` normalization layers applied
+      before each attention and dense layer (`identity` to skip).
+    post_norms: Optional sequence of `2 * n_layers` normalization layers applied
+      after each attention and dense layer (`identity` to skip).
     gating: A single gating function or a sequence of gating functions applied
       to residual connections. Defaults to a no skip connections.
     activation: Activation function to be applied to inputs of dense layers.
@@ -371,8 +377,14 @@ class TransformerBase(nnx.Module, abc.ABC):
   n_layers: int = nnx.static(init=False)
   attentions: Sequence[MultiHeadAttention] = nnx.data()
   dense_layers: Sequence[standard_layers.UnaryLayer] = nnx.data()
-  pre_norms: Sequence[nnx.Module] | None = nnx.data(default=None)
-  post_norms: Sequence[nnx.Module] | None = nnx.data(default=None)
+  # Normalization sequences may mix modules with plain callables (e.g.
+  # `identity` for skipped norms); `nnx.List` keeps callables as static entries.
+  pre_norms: Sequence[nnx.Module | Callable[[Array], Array]] | None = nnx.data(
+      default=None
+  )
+  post_norms: Sequence[nnx.Module | Callable[[Array], Array]] | None = nnx.data(
+      default=None
+  )
   gating: Sequence[Gating] | Gating = nnx.data(
       kw_only=True, default=lambda skip, x: x
   )
@@ -396,6 +408,14 @@ class TransformerBase(nnx.Module, abc.ABC):
           f'{type(self)} got {self.gating=} that is not a sequence of '
           f'2 * {n_layers} == {2 * n_layers} gating functions/layers.'
       )
+    # `nnx.List` registers module entries as nodes of the NNX graph while
+    # keeping plain callables (e.g. `identity`) as static entries.
+    self.attentions = nnx.List(self.attentions)
+    self.dense_layers = nnx.List(self.dense_layers)
+    if self.pre_norms is not None:
+      self.pre_norms = nnx.List(self.pre_norms)
+    if self.post_norms is not None:
+      self.post_norms = nnx.List(self.post_norms)
 
   @abc.abstractmethod
   def rearrange_inputs(self, inputs: typing.Array) -> typing.Array:
@@ -534,6 +554,12 @@ class TransformerBase(nnx.Module, abc.ABC):
     are passed to attention mechanisms. An optional mask can be used to prevent
     attention to certain positions.
 
+    Each block applies `pre_norm -> attention -> gating -> post_norm` followed
+    by `pre_norm -> dense -> gating -> post_norm`. With residual gating, using
+    only `pre_norms` corresponds to the Pre-LN transformer of Xiong et al. 2020
+    (https://arxiv.org/abs/2002.04745), while using only `post_norms` matches
+    the original Post-LN layout of https://arxiv.org/abs/1706.03762.
+
     Args:
       inputs: Input array of shape [C, spatial_axes...].
       latents: Optional latent array with leading channel dimension.
@@ -548,8 +574,8 @@ class TransformerBase(nnx.Module, abc.ABC):
     z = None if latents is None else self.rearrange_latents(latents)
     mask = None if mask is None else self.rearrange_mask(mask)
     x_pos_enc, z_pos_enc = inputs_pos_encoding, latents_pos_encoding
-    pre_norms = self.pre_norms or [lambda x: x] * 2 * self.n_layers
-    post_norms = self.post_norms or [lambda x: x] * 2 * self.n_layers
+    pre_norms = self.pre_norms or [identity] * (2 * self.n_layers)
+    post_norms = self.post_norms or [identity] * (2 * self.n_layers)
     gates = (
         self.gating
         if isinstance(self.gating, Sequence)
@@ -572,7 +598,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       )
       x = gates[2 * i](x, self.activation(x_attn))
       x = post_norms[2 * i](x)
-      x_dense = dense(pre_norms[2 * i + 1](x))
+      x_dense = dense(jnp.asarray(pre_norms[2 * i + 1](x)))
       x = gates[2 * i + 1](x, x_dense)
       x = post_norms[2 * i + 1](x)
 
@@ -637,7 +663,6 @@ class TransformerBase(nnx.Module, abc.ABC):
     pre_norms = []
     post_norms = []
     possible_gating = []
-    identity = lambda x: x
     for i, (d_in, d_out) in enumerate(zip(input_sizes, output_sizes)):
       if qkv_features is None:
         if d_in % num_heads != 0:
@@ -824,6 +849,21 @@ class WindowTransformerBlocks(TransformerBase):
   kv_window_shape: tuple[int, ...] = nnx.static(kw_only=True)
   relative_bias_net: standard_layers.UnaryLayer = nnx.data(kw_only=True)
   shift_windows: bool = nnx.static(default=False, kw_only=True)
+
+  def __post_init__(self):
+    super().__post_init__()
+    # NNX identifies modules by object identity, so a boundary condition
+    # instance that is reachable through several attributes becomes a single
+    # shared node of the module graph. This happens routinely: `kv_bc` defaults
+    # to `inputs_bc`, and a factory built with `functools.partial(...,
+    # inputs_bc=bc)` hands the same instance to every process block. Shared
+    # nodes make the graph definition depend on how the module was constructed
+    # (directly vs. `build_using_factories`), are reported by
+    # `nnx.find_duplicates`, and are treated as aliases of one another when
+    # state is split, merged or vmapped. Boundary conditions hold no parameters,
+    # so cloning them here makes every instance unique at no cost.
+    self.inputs_bc = nnx.clone(self.inputs_bc)
+    self.kv_bc = nnx.clone(self.kv_bc)
 
   def _window_rearrange_args(
       self,
@@ -1352,6 +1392,9 @@ class EpdTransformer(nnx.Module, pytree=False):
       default=None
   )
   final_activation: Callable[[Array], Array] | None = nnx.static(default=None)
+
+  def __post_init__(self):
+    self.process_blocks = nnx.List(self.process_blocks)
 
   @property
   def input_size(self) -> int:
