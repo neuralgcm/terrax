@@ -1759,16 +1759,167 @@ def _apply_to_channel_axis(
 
 
 @nnx.dataclass
+class LatentPoolingTransformer(nnx.Module, pytree=False):
+  """Applies a transformer to tokens softly pooled into a few latent tokens.
+
+  Inputs `[C, spatial...]` are flattened into `L` tokens and processed as
+
+      z = pool(x)                       # [C, Z], position-dependent pooling
+      z = pool_transformer(z, x)        # optional: latents attend to tokens
+      z = transformer(z)                # latent transformer
+      out = unpool(z)                   # [C, L], position-dependent unpooling
+      out = unpool_transformer(out, z)  # optional: tokens attend to latents
+
+  Pooling and unpooling weights are softmaxes of linear maps of the positional
+  encodings (over tokens for pooling, over latents for unpooling), i.e. learned
+  resampling matrices that depend on positions only. They are therefore shared
+  across vectorized dimensions (e.g. all columns of a grid) and `transformer`
+  operates on `Z` latent tokens regardless of `L`, reducing the attention cost
+  from `O(L^2)` to `O(Z^2 + L * Z)`.
+
+  With `pool_transformer` and `unpool_transformer` (cross-attention blocks,
+  e.g. single-layer `TransformerBlocks` that receive the tokens as `latents`)
+  the module becomes a Perceiver IO style bottleneck
+  (https://arxiv.org/abs/2107.14795): latents initialized by soft pooling
+  attend to the input tokens (encoder cross-attention), are processed by
+  `transformer`, and the output tokens attend to the processed latents
+  (decoder cross-attention). Without them the bottleneck is independent of the
+  token content. The module returns `unpool(...)` without a residual connection
+  and is intended to be used as a residual process block, e.g. in
+  `EpdTransformer`.
+
+  Attributes:
+    transformer: Transformer layer applied to latent tokens `[C, Z]`.
+    pool_proj: Linear map from positional encodings to pooling logits.
+    unpool_proj: Linear map from positional encodings to unpooling logits.
+    pool_transformer: Optional transformer layer applied to the pooled latents
+      with the input tokens as `latents` (keys/values).
+    unpool_transformer: Optional transformer layer applied to the unpooled
+      tokens with the latent tokens as `latents` (keys/values).
+  """
+
+  transformer: TransformerLayer = nnx.data(kw_only=True)
+  pool_proj: nnx.Linear = nnx.data(kw_only=True)
+  unpool_proj: nnx.Linear = nnx.data(kw_only=True)
+  pool_transformer: TransformerLayer | None = nnx.data(
+      default=None, kw_only=True
+  )
+  unpool_transformer: TransformerLayer | None = nnx.data(
+      default=None, kw_only=True
+  )
+
+  @property
+  def num_latents(self) -> int:
+    return self.pool_proj.out_features
+
+  @classmethod
+  def build_using_factories(
+      cls,
+      input_size: int,
+      output_size: int,
+      *,
+      transformer_factory: Callable[..., TransformerLayer],
+      num_latents: int,
+      pos_encoding_size: int,
+      pool_transformer_factory: Callable[..., TransformerLayer] | None = None,
+      unpool_transformer_factory: Callable[..., TransformerLayer] | None = None,
+      rngs: nnx.Rngs,
+  ) -> LatentPoolingTransformer:
+    """Constructs a LatentPoolingTransformer from transformer factories.
+
+    Args:
+      input_size: Number of input channels.
+      output_size: Number of output channels.
+      transformer_factory: Factory for the latent transformer, called as
+        `transformer_factory(input_size, output_size, rngs=rngs)`.
+      num_latents: Number of latent tokens.
+      pos_encoding_size: Size of positional encodings.
+      pool_transformer_factory: Optional factory for the cross-attention of
+        latents to tokens, called as
+        `pool_transformer_factory(input_size, input_size, rngs=rngs)`.
+      unpool_transformer_factory: Optional factory for the cross-attention of
+        tokens to latents, called as
+        `unpool_transformer_factory(output_size, output_size, rngs=rngs)`.
+      rngs: Random number generators for parameter initialization.
+    """
+    pool_transformer, unpool_transformer = None, None
+    if pool_transformer_factory is not None:
+      pool_transformer = pool_transformer_factory(
+          input_size, input_size, rngs=rngs
+      )
+    if unpool_transformer_factory is not None:
+      unpool_transformer = unpool_transformer_factory(
+          output_size, output_size, rngs=rngs
+      )
+    return cls(
+        transformer=transformer_factory(input_size, output_size, rngs=rngs),
+        pool_proj=nnx.Linear(pos_encoding_size, num_latents, rngs=rngs),
+        unpool_proj=nnx.Linear(pos_encoding_size, num_latents, rngs=rngs),
+        pool_transformer=pool_transformer,
+        unpool_transformer=unpool_transformer,
+    )
+
+  def __call__(
+      self,
+      inputs: typing.Array,
+      latents: typing.Array | None = None,
+      inputs_pos_encoding: typing.Array | None = None,
+      latents_pos_encoding: typing.Array | None = None,
+      mask: typing.Array | None = None,
+  ) -> typing.Array:
+    """Applies `transformer` to pooled `inputs` and unpools the result.
+
+    Args:
+      inputs: Input array of shape [C, spatial...].
+      latents: Optional latents passed through to `transformer`.
+      inputs_pos_encoding: Positional encodings of shape [P, spatial...].
+      latents_pos_encoding: Optional encodings passed through to `transformer`.
+      mask: Not supported; must be None.
+
+    Returns:
+      Array of shape [C_out, spatial...].
+    """
+    if inputs_pos_encoding is None:
+      raise ValueError('inputs_pos_encoding is required for latent pooling.')
+    if mask is not None:
+      raise ValueError('LatentPoolingTransformer does not support masks.')
+    spatial_shape = inputs.shape[1:]
+    if inputs_pos_encoding.shape[1:] != spatial_shape:
+      raise ValueError(
+          f'Spatial shapes of {inputs.shape=} and {inputs_pos_encoding.shape=}'
+          ' do not match.'
+      )
+    # Flatten spatial axes into tokens: [C, spatial...] -> [C, L].
+    x = jnp.reshape(jnp.asarray(inputs), (inputs.shape[0], -1))
+    pe = jnp.reshape(
+        jnp.asarray(inputs_pos_encoding), (inputs_pos_encoding.shape[0], -1)
+    )
+    # Pooling weights are normalized over tokens, unpooling ones over latents.
+    w_pool = jax.nn.softmax(self.pool_proj(pe.T), axis=0)  # [L, Z]
+    w_unpool = jax.nn.softmax(self.unpool_proj(pe.T), axis=-1)  # [L, Z]
+    z = jnp.einsum('cl,lz->cz', x, w_pool)
+    z_pe = jnp.einsum('pl,lz->pz', pe, w_pool)
+    if self.pool_transformer is not None:
+      z = self.pool_transformer(z, x, z_pe, pe)
+    z = self.transformer(z, latents, z_pe, latents_pos_encoding, None)
+    out = jnp.einsum('cz,lz->cl', z, w_unpool)
+    if self.unpool_transformer is not None:
+      out = self.unpool_transformer(out, z, pe, z_pe)
+    return jnp.reshape(out, (out.shape[0], *spatial_shape))
+
+
+@nnx.dataclass
 class EpdTransformer(nnx.Module, pytree=False):
   """EPD layer with transformer process blocks.
 
   Like `standard_layers.Epd`, inputs are encoded, updated residually by each
   process block (`x = x + block(x)`) and decoded. Process blocks are
-  `TransformerLayer`s, e.g. `TransformerBlocks` or `WindowTransformerBlocks`.
-  Following other layers in `standard_layers.py`, `encode`, `process_blocks`
-  and `decode` operate on arrays with a leading channel axis `[C, spatial...]`,
-  while the projection of positional encodings and the optional pre-decode
-  normalization act on the channel axis of each token.
+  `TransformerLayer`s, e.g. `TransformerBlocks`, `WindowTransformerBlocks` or
+  `LatentPoolingTransformer`. Following other layers in `standard_layers.py`,
+  `encode`, `process_blocks` and `decode` operate on arrays with a leading
+  channel axis `[C, spatial...]`, while the projection of positional encodings
+  and the optional pre-decode normalization act on the channel axis of each
+  token.
 
   Attributes:
     encode: Layer mapping inputs to the latent representation.

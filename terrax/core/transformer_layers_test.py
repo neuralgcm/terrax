@@ -542,6 +542,121 @@ class TransformerLayersTest(parameterized.TestCase):
           positions, 3, min_scale=1.0, max_scale=100.0
       )
 
+  @parameterized.named_parameters(
+      dict(testcase_name='soft_pooling', cross_attention=False),
+      dict(testcase_name='perceiver_style', cross_attention=True),
+  )
+  def test_latent_pooling_transformer_over_spatial_grid(
+      self, cross_attention: bool
+  ):
+    """Tests LatentPoolingTransformer on inputs with 2 spatial dimensions."""
+    channels, num_latents, pos_encoding_size = 6, 5, 3
+    spatial_shape = (4, 7)
+    transformer_factory = functools.partial(
+        transformer_layers.TransformerBlocks.build_using_factories,
+        intermediate_sizes=(channels,),
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        gating=None,
+    )
+    cross_attention_factory = None
+    if cross_attention:
+      cross_attention_factory = functools.partial(
+          transformer_layers.TransformerBlocks.build_using_factories,
+          intermediate_sizes=(),
+          num_heads=2,
+          dense_factory=self.dense_factory,
+          gating=None,
+      )
+    net = transformer_layers.LatentPoolingTransformer.build_using_factories(
+        channels,
+        channels,
+        transformer_factory=transformer_factory,
+        num_latents=num_latents,
+        pos_encoding_size=pos_encoding_size,
+        pool_transformer_factory=cross_attention_factory,
+        unpool_transformer_factory=cross_attention_factory,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(net))
+    self.assertEqual(net.num_latents, num_latents)
+    self.assertEqual(net.pool_transformer is not None, cross_attention)
+    self.assertEqual(net.unpool_transformer is not None, cross_attention)
+    x = jax.random.normal(jax.random.key(0), (channels, *spatial_shape))
+    pe = jax.random.normal(
+        jax.random.key(1), (pos_encoding_size, *spatial_shape)
+    )
+    out = net(x, inputs_pos_encoding=pe)
+    self.assertEqual(out.shape, (channels, *spatial_shape))
+    with self.assertRaisesRegex(ValueError, 'does not support masks'):
+      net(x, inputs_pos_encoding=pe, mask=np.ones((1, *spatial_shape)))
+    with self.assertRaisesRegex(ValueError, 'inputs_pos_encoding is required'):
+      net(x)
+    with self.assertRaisesRegex(ValueError, 'do not match'):
+      net(x, inputs_pos_encoding=pe[:, :2])
+
+  def test_epd_transformer_with_latent_pooling(self):
+    """Tests EpdTransformer with latent pooling blocks and relative bias."""
+    num_levels, num_latents, pos_encoding_size = 16, 4, 8
+    input_size, output_size, latent_size = 6, 4, 12
+    transformer_factory = functools.partial(
+        transformer_layers.TransformerBlocks.build_using_factories,
+        intermediate_sizes=(latent_size,),
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        relative_bias_factory=functools.partial(
+            standard_layers.Mlp.uniform, hidden_size=4, hidden_layers=1
+        ),
+        pos_encoding_size=pos_encoding_size,
+        pre_normalization_factory=nnx.LayerNorm,
+        normalize_qk=True,
+        gating=None,
+    )
+    process_factory = functools.partial(
+        transformer_layers.LatentPoolingTransformer.build_using_factories,
+        transformer_factory=transformer_factory,
+        num_latents=num_latents,
+        pos_encoding_size=pos_encoding_size,
+    )
+    epd = transformer_layers.EpdTransformer.build_using_factories(
+        input_size=input_size,
+        output_size=output_size,
+        latent_size=latent_size,
+        num_process_blocks=2,
+        encode_factory=functools.partial(
+            standard_layers.ConvLevel, kernel_size=1
+        ),
+        process_factory=process_factory,
+        decode_factory=functools.partial(
+            standard_layers.ConvLevel, kernel_size=1
+        ),
+        pos_encoding_size=pos_encoding_size,
+        use_additive_pos_encoding=True,
+        pre_decode_normalization_factory=nnx.LayerNorm,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(epd))
+    for block in epd.process_blocks:
+      self.assertIsInstance(block, transformer_layers.LatentPoolingTransformer)
+      self.assertEqual(block.num_latents, num_latents)
+    x = jax.random.normal(jax.random.key(0), (input_size, num_levels))
+    pe = jax.random.normal(jax.random.key(1), (pos_encoding_size, num_levels))
+    out = epd(x, inputs_pos_encoding=pe)
+    self.assertEqual(out.shape, (output_size, num_levels))
+
+    def loss_fn(model, inp):
+      return jax.numpy.sum(model(inp, inputs_pos_encoding=pe) ** 2)
+
+    grad_model, grad_x = nnx.grad(loss_fn, argnums=(0, 1))(epd, x)
+    self.assertGreater(float(np.linalg.norm(grad_x)), 0.0)
+    grad_block = grad_model.process_blocks[0]
+    self.assertGreater(
+        float(np.linalg.norm(grad_block.pool_proj.kernel.value)), 0.0
+    )
+    self.assertGreater(
+        float(np.linalg.norm(grad_block.unpool_proj.kernel.value)), 0.0
+    )
+
   def test_pytree_no_duplicates(self):
     dummy_att = transformer_layers.MultiHeadAttention(
         num_heads=2,
