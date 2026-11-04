@@ -19,7 +19,7 @@ import abc
 import functools
 import itertools
 import math
-from typing import Callable, Protocol, Self, Sequence, TypeAlias
+from typing import Any, Callable, Protocol, Self, Sequence, TypeAlias
 
 import coordax as cx
 import einops
@@ -354,8 +354,9 @@ class TransformerBase(nnx.Module, abc.ABC):
     2. `attention_key_source`, `attention_value_source` define how key and value
        source arrays are computed from all available inputs.
     3. `apply_attention` that defines how a given MultiHeadAttention module
-       should be applied to provided `q, k, v` input, supplemented by positional
-       encodings, attention mask and index of the attention block.
+       should be applied to provided `q, k, v` input, supplemented by the
+       relative position bias, positional encodings, attention mask and index
+       of the attention block.
 
   Attributes:
     input_size: The number of input channels.
@@ -370,6 +371,9 @@ class TransformerBase(nnx.Module, abc.ABC):
     gating: A single gating function or a sequence of gating functions applied
       to residual connections. Defaults to a no skip connections.
     activation: Activation function to be applied to inputs of dense layers.
+    relative_bias_net: Optional network mapping differences of positional
+      encodings `[..., P]` to per-head attention biases `[..., NUM_HEADS]`
+      (continuous relative position bias), shared by all attention layers.
   """
 
   input_size: int = nnx.static(init=False)
@@ -390,6 +394,9 @@ class TransformerBase(nnx.Module, abc.ABC):
   )
   activation: Callable[[typing.Array], typing.Array] = nnx.static(
       kw_only=True, default=jax.nn.gelu
+  )
+  relative_bias_net: standard_layers.UnaryLayer | None = nnx.data(
+      default=None, kw_only=True
   )
 
   def __post_init__(self):
@@ -432,6 +439,67 @@ class TransformerBase(nnx.Module, abc.ABC):
     # mask shape: [B, KV_LEN, 1];
     # attention mask shape: ~[B, NUM_HEADS, Q_LEN, KV_LEN].
     return jnp.expand_dims(jnp.squeeze(mask, axis=-1), axis=(1, 2))
+
+  def _attention_bias(
+      self,
+      query_pos_encoding: typing.Array,
+      kv_pos_encoding: typing.Array,
+  ) -> typing.Array:
+    """Computes relative position bias from rearranged positional encodings.
+
+    The bias is predicted by `relative_bias_net` from pairwise differences of
+    positional encodings, i.e. a continuous relative position bias in the
+    spirit of Swin Transformer V2 (https://arxiv.org/abs/2111.09883). Since it
+    depends on positional encodings only, it is shared across vectorized
+    dimensions (e.g. all columns of a grid).
+
+    Args:
+      query_pos_encoding: Encodings of queries in sequence format [..., Lq, P].
+      kv_pos_encoding: Encodings of keys/values in sequence format
+        [..., Lkv, P].
+
+    Returns:
+      Bias of shape [..., NUM_HEADS, Lq, Lkv] that broadcasts against attention
+      logits.
+    """
+    assert self.relative_bias_net is not None
+    q_pe = jnp.expand_dims(query_pos_encoding, axis=-2)  # [..., Lq, 1, P]
+    kv_pe = jnp.expand_dims(kv_pos_encoding, axis=-3)  # [..., 1, Lkv, P]
+    pe_pairs = jnp.asarray(q_pe - kv_pe)  # [..., Lq, Lkv, P]
+    bias = self.relative_bias_net(pe_pairs)  # [..., Lq, Lkv, NUM_HEADS]
+    return jnp.moveaxis(bias, -1, -3)
+
+  def attention_biases(
+      self,
+      inputs_pos_encoding: typing.Array | None,
+      latents_pos_encoding: typing.Array | None,
+  ) -> Sequence[typing.Array | None]:
+    """Returns the relative position bias of each attention layer.
+
+    Biases depend on positional encodings only and are hence computed once per
+    forward pass rather than in every layer. The default implementation shares
+    a single bias between all layers; subclasses whose attention pattern varies
+    between layers (e.g. shifted windows) override this method.
+
+    Args:
+      inputs_pos_encoding: Positional encodings of inputs [P, spatial...].
+      latents_pos_encoding: Positional encodings of latents (keys/values).
+
+    Returns:
+      A sequence of `n_layers` biases that broadcast against attention logits,
+      or of Nones if `relative_bias_net` is not set.
+    """
+    if self.relative_bias_net is None:
+      return [None] * self.n_layers
+    if inputs_pos_encoding is None or latents_pos_encoding is None:
+      raise ValueError(
+          'inputs_pos_encoding is required when relative_bias_net is set.'
+      )
+    bias = self._attention_bias(
+        self.rearrange_inputs(inputs_pos_encoding),
+        self.rearrange_latents(latents_pos_encoding),
+    )
+    return [bias] * self.n_layers
 
   @abc.abstractmethod
   def rearrange_latents(self, latents: typing.Array) -> typing.Array:
@@ -514,14 +582,15 @@ class TransformerBase(nnx.Module, abc.ABC):
       key: typing.Array | None,
       value: typing.Array | None,
       mask: typing.Array | None,
+      attention_bias: typing.Array | None,
       query_pos_encoding: typing.Array | None,
       kv_pos_encoding: typing.Array | None,
       layer_idx: int,
   ) -> typing.Array:
     """Applies the `attention` to the given query, key, and value.
 
-    Subclasses implement the specific attention strategy, potentially adding
-    positional biases or performing windowing.
+    Subclasses implement the specific attention strategy, e.g. performing
+    windowing.
 
     Args:
       attention: The `MultiHeadAttention` module to apply.
@@ -529,6 +598,8 @@ class TransformerBase(nnx.Module, abc.ABC):
       key: Key tensor in sequence format [B, Lkv, C], or None.
       value: Value tensor in sequence format [B, Lkv, C], or None.
       mask: Attention mask, or None.
+      attention_bias: Relative position bias of this layer computed by
+        `attention_biases`, or None.
       query_pos_encoding: Positional encodings for `query`.
       kv_pos_encoding: Positional encodings for `key`/`value`.
       layer_idx: Index of the current attention layer.
@@ -564,7 +635,9 @@ class TransformerBase(nnx.Module, abc.ABC):
       inputs: Input array of shape [C, spatial_axes...].
       latents: Optional latent array with leading channel dimension.
       inputs_pos_encoding: Optional positional encodings for inputs.
-      latents_pos_encoding: Optional positional encodings for latents.
+      latents_pos_encoding: Optional positional encodings for latents. If None,
+        latents are assumed to be co-located with the inputs and share
+        `inputs_pos_encoding`.
       mask: Optional attention mask.
 
     Returns:
@@ -573,7 +646,11 @@ class TransformerBase(nnx.Module, abc.ABC):
     x = self.rearrange_inputs(inputs)
     z = None if latents is None else self.rearrange_latents(latents)
     mask = None if mask is None else self.rearrange_mask(mask)
-    x_pos_enc, z_pos_enc = inputs_pos_encoding, latents_pos_encoding
+    x_pos_enc = inputs_pos_encoding
+    z_pos_enc = latents_pos_encoding
+    if z_pos_enc is None:
+      z_pos_enc = x_pos_enc
+    attention_biases = self.attention_biases(x_pos_enc, z_pos_enc)
     pre_norms = self.pre_norms or [identity] * (2 * self.n_layers)
     post_norms = self.post_norms or [identity] * (2 * self.n_layers)
     gates = (
@@ -591,9 +668,10 @@ class TransformerBase(nnx.Module, abc.ABC):
           query=x_norm,
           key=keys,
           value=values,
+          mask=mask,
+          attention_bias=attention_biases[i],
           query_pos_encoding=x_pos_enc,
           kv_pos_encoding=z_pos_enc,
-          mask=mask,
           layer_idx=i,
       )
       x = gates[2 * i](x, self.activation(x_attn))
@@ -618,18 +696,21 @@ class TransformerBase(nnx.Module, abc.ABC):
       post_normalization_factory: NormalizationFactory | None = None,
       gating: Sequence[Gating] | Gating | None = lambda skip, x: x,
       dense_factory: standard_layers.UnaryLayerFactory,
+      relative_bias_factory: standard_layers.UnaryLayerFactory | None = None,
+      pos_encoding_size: int | None = None,
       normalize_qk: bool = False,
       normalize_v: bool = False,
       apply_final_norm: bool = False,
       w_init=nnx.initializers.he_normal(),
       b_init=nnx.initializers.zeros,
       rngs: nnx.Rngs,
-  ):
+  ) -> dict[str, Any]:
     """Prepares arguments for `TransformerBase` constructor.
 
     This method constructs the sequences of attention layers, dense layers,
-    layer norms, and gating configurations based on the provided factories
-    and parameters. It's primarily a helper for `build_using_factories`.
+    layer norms, gating configurations and the relative position bias network
+    based on the provided factories and parameters. It's primarily a helper
+    for `build_using_factories`.
 
     Args:
       input_size: Number of input channels.
@@ -643,6 +724,12 @@ class TransformerBase(nnx.Module, abc.ABC):
       gating: Gating function(s). Defaults to no gating. If None, a "where
         possible" gating strategy is used.
       dense_factory: Factory for dense layers post-attention.
+      relative_bias_factory: Optional factory for the relative position bias
+        network, called as `relative_bias_factory(pos_encoding_size, num_heads,
+        rngs=rngs)`. The network maps differences of positional encodings
+        `[..., pos_encoding_size]` to per-head biases `[..., num_heads]`.
+      pos_encoding_size: Size of positional encodings. Required when
+        `relative_bias_factory` is provided.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
       apply_final_norm: whether to include final post_norm layer.
@@ -651,8 +738,8 @@ class TransformerBase(nnx.Module, abc.ABC):
       rngs: JAX PRNG keys.
 
     Returns:
-      A tuple with (attentions, dense_layers, pre_norms, post_norms, gating)
-      suitable for initializing a `TransformerBase` instance.
+      Keyword arguments `attentions`, `dense_layers`, `pre_norms`, `post_norms`,
+      `gating` and `relative_bias_net` for the `TransformerBase` constructor.
     """
     if output_size is None:
       output_size = input_size
@@ -701,7 +788,24 @@ class TransformerBase(nnx.Module, abc.ABC):
     post_norms = post_norms if post_normalization_factory is not None else None
     if gating is None:
       gating = possible_gating
-    return (attentions, dense_layers, pre_norms, post_norms, gating)
+    if relative_bias_factory is None:
+      relative_bias_net = None
+    elif pos_encoding_size is None:
+      raise ValueError(
+          'pos_encoding_size is required when relative_bias_factory is set.'
+      )
+    else:
+      relative_bias_net = relative_bias_factory(
+          pos_encoding_size, num_heads, rngs=rngs
+      )
+    return dict(
+        attentions=attentions,
+        dense_layers=dense_layers,
+        pre_norms=pre_norms,
+        post_norms=post_norms,
+        gating=gating,
+        relative_bias_net=relative_bias_net,
+    )
 
   @classmethod
   def build_using_factories(
@@ -719,6 +823,8 @@ class TransformerBase(nnx.Module, abc.ABC):
       activation: Callable[[typing.Array], typing.Array] = jax.nn.gelu,
       gating: Sequence[Gating] | Gating | None = lambda skip, x: x,
       dense_factory: standard_layers.UnaryLayerFactory,
+      relative_bias_factory: standard_layers.UnaryLayerFactory | None = None,
+      pos_encoding_size: int | None = None,
       normalize_qk: bool = False,
       normalize_v: bool = False,
       w_init=nnx.initializers.he_normal(),
@@ -740,40 +846,37 @@ class TransformerBase(nnx.Module, abc.ABC):
       activation: activation function to be applied to the output of attention.
       gating: sequence of 2n+1 or single gating function. Default is no gating.
       dense_factory: factory for generating dense layers that follow attention.
+      relative_bias_factory: optional factory for the relative position bias
+        network, see `build_args_using_factories`.
+      pos_encoding_size: size of positional encodings, required when
+        `relative_bias_factory` is set.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
       w_init: kernel initializer for the MultiHeadAttention modules.
       b_init: bias initializer for the MultiHeadAttention modules.
       rngs: random number generator for parameter initialization.
     """
-    attentions, dense_layers, pre_norms, post_norms, gating = (
-        cls.build_args_using_factories(
-            input_size=input_size,
-            output_size=output_size,
-            intermediate_sizes=intermediate_sizes,
-            num_heads=num_heads,
-            qkv_features=qkv_features,
-            use_bias_in_attention=use_bias_in_attention,
-            pre_normalization_factory=pre_normalization_factory,
-            post_normalization_factory=post_normalization_factory,
-            apply_final_norm=apply_final_norm,
-            gating=gating,
-            dense_factory=dense_factory,
-            normalize_qk=normalize_qk,
-            normalize_v=normalize_v,
-            w_init=w_init,
-            b_init=b_init,
-            rngs=rngs,
-        )
-    )
-    return cls(
-        attentions=attentions,
-        dense_layers=dense_layers,
-        pre_norms=pre_norms,
-        post_norms=post_norms,
+    args = cls.build_args_using_factories(
+        input_size=input_size,
+        output_size=output_size,
+        intermediate_sizes=intermediate_sizes,
+        num_heads=num_heads,
+        qkv_features=qkv_features,
+        use_bias_in_attention=use_bias_in_attention,
+        pre_normalization_factory=pre_normalization_factory,
+        post_normalization_factory=post_normalization_factory,
+        apply_final_norm=apply_final_norm,
         gating=gating,
-        activation=activation,
+        dense_factory=dense_factory,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=pos_encoding_size,
+        normalize_qk=normalize_qk,
+        normalize_v=normalize_v,
+        w_init=w_init,
+        b_init=b_init,
+        rngs=rngs,
     )
+    return cls(**args, activation=activation)
 
   def __init_subclass__(cls, **kwargs):
     super().__init_subclass__(pytree=False, **kwargs)
@@ -829,13 +932,16 @@ class TransformerBlocks(TransformerBase):
       key: typing.Array | None,
       value: typing.Array | None,
       mask: typing.Array | None,
+      attention_bias: typing.Array | None,
       query_pos_encoding: typing.Array | None,
       kv_pos_encoding: typing.Array | None,
       layer_idx: int,
   ) -> typing.Array:
     """Applies attention to query, key, value inputs."""
     del layer_idx, query_pos_encoding, kv_pos_encoding  # unused.
-    return attention(query, key, value, mask=mask)
+    return attention(
+        query, key, value, mask=mask, attention_bias=attention_bias
+    )
 
 
 @nnx.dataclass
@@ -853,8 +959,6 @@ class WindowTransformerBlocks(TransformerBase):
     kv_bc: Boundary condition used to pad/trim latents (keys/values).
     inputs_window_shape: Shape of windows for inputs (queries).
     kv_window_shape: Shape of windows for latents (keys/values).
-    relative_bias_net: Network mapping differences of windowed positional
-      encodings to per-head attention biases.
     shift_windows: Whether to shift windows in alternating layers.
   """
 
@@ -862,7 +966,6 @@ class WindowTransformerBlocks(TransformerBase):
   kv_bc: boundaries.BoundaryCondition = nnx.data(kw_only=True)
   inputs_window_shape: tuple[int, ...] = nnx.static(kw_only=True)
   kv_window_shape: tuple[int, ...] = nnx.static(kw_only=True)
-  relative_bias_net: standard_layers.UnaryLayer = nnx.data(kw_only=True)
   shift_windows: bool = nnx.static(default=False, kw_only=True)
 
   def __post_init__(self):
@@ -1058,29 +1161,51 @@ class WindowTransformerBlocks(TransformerBase):
     )
     return self._to_windows(spatial, window_shape, bc, shifts=to_shifts)
 
-  def _attention_bias(
+  def attention_biases(
       self,
-      q_pe_windows: typing.Array,
-      k_pe_windows: typing.Array,
-  ) -> typing.Array | None:
-    """Generates the relative position bias values."""
+      inputs_pos_encoding: typing.Array | None,
+      latents_pos_encoding: typing.Array | None,
+  ) -> Sequence[typing.Array | None]:
+    """Returns relative position biases of windowed attention for each layer.
+
+    Positional encodings are windowed with the shifts of each layer, hence all
+    unshifted layers share one bias and all shifted layers another.
+
+    Args:
+      inputs_pos_encoding: Positional encodings of inputs [P, spatial...].
+      latents_pos_encoding: Positional encodings of latents (keys/values).
+
+    Returns:
+      A sequence of `n_layers` biases [num_windows, NUM_HEADS, Lq_win, Lkv_win]
+      or of Nones if `relative_bias_net` is not set.
+    """
     if self.relative_bias_net is None:
-      return None
-    # windows have shapes: [B, WINDOW_SIZE, D], D == positional encoding size.
-    compute_diffs = lambda x, y: (x[:, None] - y[None, :])
-    compute_diffs = jax.vmap(jax.vmap(compute_diffs, in_axes=-1, out_axes=-1))
-    pe_window_pairs = compute_diffs(q_pe_windows, k_pe_windows)
-    # pe_window_pairs is [B, Q_WINDOW_SIZE, KV_WINDOW_SIZE, D]
+      return [None] * self.n_layers
+    if inputs_pos_encoding is None or latents_pos_encoding is None:
+      raise ValueError(
+          'inputs_pos_encoding is required when relative_bias_net is set.'
+      )
 
-    @nnx.vmap(in_axes=(None, 0), out_axes=0)  # over B
-    @nnx.vmap(in_axes=(None, 0), out_axes=0)  # over Q_WINDOW_SIZE
-    @nnx.vmap(in_axes=(None, 0), out_axes=0)  # over KV_WINDOW_SIZE
-    def get_attention_bias(net, x):
-      return net(x)
+    def bias_for_layer(layer_idx: int) -> typing.Array:
+      q_shifts, kv_shifts = self._window_shifts(layer_idx)
+      q_pe_windows = self._to_windows(
+          inputs_pos_encoding,
+          self.inputs_window_shape,
+          self.inputs_bc,
+          q_shifts,
+      )
+      kv_pe_windows = self._to_windows(
+          latents_pos_encoding, self.kv_window_shape, self.kv_bc, kv_shifts
+      )
+      return self._attention_bias(q_pe_windows, kv_pe_windows)
 
-    bias = get_attention_bias(self.relative_bias_net, pe_window_pairs)
-    # dot_attention requires shape (B, NUM_HEADS, Q_WINDOW_SIZE, KV_WINDOW_SIZE)
-    return bias.transpose(0, 3, 1, 2)
+    unshifted_bias = bias_for_layer(0)
+    if not self.shift_windows or self.n_layers == 1:
+      return [unshifted_bias] * self.n_layers
+    shifted_bias = bias_for_layer(1)
+    return [
+        shifted_bias if i % 2 else unshifted_bias for i in range(self.n_layers)
+    ]
 
   def rearrange_inputs(self, inputs: typing.Array) -> typing.Array:
     return self._to_windows(inputs, self.inputs_window_shape, self.inputs_bc)
@@ -1122,6 +1247,7 @@ class WindowTransformerBlocks(TransformerBase):
       key: typing.Array | None,
       value: typing.Array | None,
       mask: typing.Array | None,
+      attention_bias: typing.Array | None,
       query_pos_encoding: typing.Array | None,
       kv_pos_encoding: typing.Array | None,
       layer_idx: int,
@@ -1129,9 +1255,7 @@ class WindowTransformerBlocks(TransformerBase):
     """Applies `attention` module to input q,k,v,mask over windows.
 
     This method manages the application of the attention mechanism, including
-    handling optional window shifting (e.g., for SWIN transformers) and
-    computing relative positional biases based on windowed positional
-    encodings.
+    handling optional window shifting (e.g., for SWIN transformers).
 
     Throughout this method, an invariant is maintained: `query`, `key`,
     `value`, and `mask` (if not None) are expected to be in and are returned
@@ -1140,8 +1264,7 @@ class WindowTransformerBlocks(TransformerBase):
     un-padding when data is temporarily brought out of windowed format,
     for example, during window shifting operations. Positional encodings
     (`query_pos_encoding`, `kv_pos_encoding`) are provided in their original
-    spatial format and are converted to windowed format internally as needed
-    for calculating attention biases.
+    spatial format and determine the spatial shapes used for re-windowing.
 
     Args:
       attention: The MultiHeadAttention module to apply.
@@ -1149,33 +1272,25 @@ class WindowTransformerBlocks(TransformerBase):
       key: Key tensor in windowed format [B, Lkv_win, C], or None.
       value: Value tensor in windowed format [B, Lkv_win, C], or None.
       mask: Attention mask in windowed format, or None.
+      attention_bias: Relative position bias of this layer in windowed format
+        (see `attention_biases`), or None.
       query_pos_encoding: Positional encodings for `query` in original spatial
-        format [C, spatial_dims...].
+        format [P, spatial_dims...].
       kv_pos_encoding: Positional encodings for `key`/`value` in original
-        spatial format [C, spatial_dims...], or None (uses query_pos_encoding).
+        spatial format [P, spatial_dims...].
       layer_idx: Index of the current attention layer, used for window shifting.
 
     Returns:
       The output of the attention module, in windowed format.
     """
-    if query_pos_encoding is None:
+    if query_pos_encoding is None or kv_pos_encoding is None:
       raise ValueError(
-          'query_pos_encoding is required for WindowTransformerBlocks.'
+          'positional encodings are required for WindowTransformerBlocks.'
       )
-    if kv_pos_encoding is None:
-      kv_pos_encoding = query_pos_encoding
-
     q_shape, kv_shape = query_pos_encoding.shape, kv_pos_encoding.shape
     # `query`, `key`, `value` and `mask` arrive in unshifted windowed format;
     # in shifted layers they are re-windowed with shifts before attention.
     q_shifts, kv_shifts = self._window_shifts(layer_idx)
-    q_pe_windows = self._to_windows(
-        query_pos_encoding, self.inputs_window_shape, self.inputs_bc, q_shifts
-    )
-    kv_pe_windows = self._to_windows(
-        kv_pos_encoding, self.kv_window_shape, self.kv_bc, kv_shifts
-    )
-    attention_bias = self._attention_bias(q_pe_windows, kv_pe_windows)
     if any(q_shifts) or any(kv_shifts):
       rewindow_kv = functools.partial(
           self._rewindow,
@@ -1226,7 +1341,8 @@ class WindowTransformerBlocks(TransformerBase):
       kv_bc: boundaries.BoundaryCondition | None = None,
       inputs_window_shape: tuple[int, ...],
       kv_window_shape: tuple[int, ...] | None = None,
-      relative_bias_net: standard_layers.UnaryLayer,
+      relative_bias_factory: standard_layers.UnaryLayerFactory | None = None,
+      pos_encoding_size: int | None = None,
       shift_windows: bool = False,
       intermediate_sizes: tuple[int, ...],
       num_heads: int,
@@ -1254,8 +1370,10 @@ class WindowTransformerBlocks(TransformerBase):
       inputs_window_shape: Shape of windows for inputs (query).
       kv_window_shape: Shape of windows for key/value. Defaults to
         `inputs_window_shape`.
-      relative_bias_net: Network for computing relative positional bias from
-        positional encodings.
+      relative_bias_factory: Optional factory for the relative position bias
+        network, see `TransformerBase.build_args_using_factories`.
+      pos_encoding_size: Size of positional encodings, required when
+        `relative_bias_factory` is provided.
       shift_windows: If True, windows are shifted in alternating layers.
       intermediate_sizes: tuple of intermediate channel numbers.
       num_heads: number of attention heads to use.
@@ -1273,42 +1391,37 @@ class WindowTransformerBlocks(TransformerBase):
       b_init: bias initializer for the MultiHeadAttention modules.
       rngs: random number generator for parameter initialization.
     """
-    attentions, dense_layers, pre_norms, post_norms, gating = (
-        TransformerBase.build_args_using_factories(
-            input_size=input_size,
-            output_size=output_size,
-            intermediate_sizes=intermediate_sizes,
-            num_heads=num_heads,
-            qkv_features=qkv_features,
-            use_bias_in_attention=use_bias_in_attention,
-            pre_normalization_factory=pre_normalization_factory,
-            post_normalization_factory=post_normalization_factory,
-            apply_final_norm=apply_final_norm,
-            gating=gating,
-            dense_factory=dense_factory,
-            normalize_qk=normalize_qk,
-            normalize_v=normalize_v,
-            w_init=w_init,
-            b_init=b_init,
-            rngs=rngs,
-        )
+    args = TransformerBase.build_args_using_factories(
+        input_size=input_size,
+        output_size=output_size,
+        intermediate_sizes=intermediate_sizes,
+        num_heads=num_heads,
+        qkv_features=qkv_features,
+        use_bias_in_attention=use_bias_in_attention,
+        pre_normalization_factory=pre_normalization_factory,
+        post_normalization_factory=post_normalization_factory,
+        apply_final_norm=apply_final_norm,
+        gating=gating,
+        dense_factory=dense_factory,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=pos_encoding_size,
+        normalize_qk=normalize_qk,
+        normalize_v=normalize_v,
+        w_init=w_init,
+        b_init=b_init,
+        rngs=rngs,
     )
     if kv_window_shape is None:
       kv_window_shape = inputs_window_shape
     if kv_bc is None:
       kv_bc = inputs_bc
     return cls(
-        attentions=attentions,
-        dense_layers=dense_layers,
-        pre_norms=pre_norms,
-        post_norms=post_norms,
-        gating=gating,
+        **args,
         activation=activation,
         inputs_bc=inputs_bc,
         kv_bc=kv_bc,
         inputs_window_shape=inputs_window_shape,
         kv_window_shape=kv_window_shape,
-        relative_bias_net=relative_bias_net,
         shift_windows=shift_windows,
     )
 

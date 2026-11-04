@@ -173,6 +173,49 @@ class TransformerLayersTest(parameterized.TestCase):
     else:
       self.assertIs(post_norms[3], transformer_layers.identity)
 
+  def test_transformer_blocks_relative_bias(self):
+    """Tests TransformerBlocks with relative position bias."""
+    n_levels = self.levels.shape[0]
+    num_heads, pos_encoding_size = 2, 5
+    relative_bias_factory = functools.partial(
+        standard_layers.Mlp, intermediate_sizes=()
+    )
+    net = transformer_layers.TransformerBlocks.build_using_factories(
+        self.hidden_size,
+        intermediate_sizes=[self.hidden_size],
+        num_heads=num_heads,
+        dense_factory=self.dense_factory,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=pos_encoding_size,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEqual(net.relative_bias_net.input_size, pos_encoding_size)
+    self.assertEqual(net.relative_bias_net.output_size, num_heads)
+    inputs = jax.random.uniform(jax.random.key(0), (self.hidden_size, n_levels))
+    pe = jax.random.uniform(jax.random.key(1), (pos_encoding_size, n_levels))
+    with self.subTest('self_attention'):
+      out = net(inputs, inputs_pos_encoding=pe)
+      self.assertEqual(out.shape, (self.hidden_size, n_levels))
+    with self.subTest('latents_share_inputs_pos_encoding'):
+      latents = jax.random.uniform(
+          jax.random.key(2), (self.hidden_size, n_levels)
+      )
+      out = net(inputs, latents=latents, inputs_pos_encoding=pe)
+      self.assertEqual(out.shape, (self.hidden_size, n_levels))
+    with self.subTest('requires_pos_encoding'):
+      with self.assertRaisesRegex(ValueError, 'inputs_pos_encoding'):
+        net(inputs)
+    with self.subTest('factory_requires_pos_encoding_size'):
+      with self.assertRaisesRegex(ValueError, 'pos_encoding_size'):
+        transformer_layers.TransformerBlocks.build_using_factories(
+            self.hidden_size,
+            intermediate_sizes=[],
+            num_heads=num_heads,
+            dense_factory=self.dense_factory,
+            relative_bias_factory=relative_bias_factory,
+            rngs=nnx.Rngs(0),
+        )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='no_shifts_even_window_shape_no_gating',
@@ -231,13 +274,16 @@ class TransformerLayersTest(parameterized.TestCase):
         ylm_mapper.ylm_map(self.grid), 4
     )
     rngs = nnx.Rngs(0)
-    relative_bias_net = nnx.Linear(ylm_pe.shape[0], num_heads, rngs=rngs)
+    relative_bias_factory = functools.partial(
+        standard_layers.Mlp, intermediate_sizes=()
+    )
     net = transformer_layers.WindowTransformerBlocks.build_using_factories(
         input_size,
         output_size,
         intermediate_sizes=([self.hidden_size] * n_layers),
         num_heads=num_heads,
-        relative_bias_net=relative_bias_net,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=ylm_pe.shape[0],
         inputs_window_shape=inputs_window_shape,
         qkv_features=num_heads * self.per_head_kv_size,
         shift_windows=shift_windows,
@@ -246,6 +292,7 @@ class TransformerLayersTest(parameterized.TestCase):
         inputs_bc=boundaries.LonLatBoundary(),
         rngs=rngs,
     )
+    self.assertEmpty(nnx.find_duplicates(net))
     rng = jax.random.key(0)
     inputs = jax.random.uniform(rng, (input_size,) + self.grid.shape)
     out = net(inputs, inputs_pos_encoding=ylm_pe)
@@ -261,7 +308,9 @@ class TransformerLayersTest(parameterized.TestCase):
     num_heads = 2
     n_layers = 2
     inputs_window_shape = (2, 2)
-    relative_bias_net = nnx.Linear(ylm_pe.shape[0], num_heads, rngs=rngs)
+    relative_bias_factory = functools.partial(
+        standard_layers.Mlp, intermediate_sizes=()
+    )
     input_size = 6
     output_size = 3
     net = transformer_layers.WindowTransformerBlocks.build_using_factories(
@@ -269,7 +318,8 @@ class TransformerLayersTest(parameterized.TestCase):
         output_size,
         intermediate_sizes=([self.hidden_size] * n_layers),
         num_heads=num_heads,
-        relative_bias_net=relative_bias_net,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=ylm_pe.shape[0],
         inputs_window_shape=inputs_window_shape,
         qkv_features=num_heads * self.per_head_kv_size,
         shift_windows=True,

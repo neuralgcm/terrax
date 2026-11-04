@@ -415,12 +415,15 @@ class TransformerTowerTest(parameterized.TestCase):
     )
     pe_channels = lmax**2
     rngs = nnx.Rngs(0)
-    relative_bias_net = nnx.Linear(pe_channels, num_heads, rngs=rngs)
+    relative_bias_factory = functools.partial(
+        standard_layers.Mlp, intermediate_sizes=()
+    )
     neural_net_factory = functools.partial(
         transformer_layers.WindowTransformerBlocks.build_using_factories,
         intermediate_sizes=[8, 8],
         num_heads=num_heads,
-        relative_bias_net=relative_bias_net,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=pe_channels,
         inputs_window_shape=(4, 4),
         qkv_features=(num_heads * 3),
         shift_windows=False,

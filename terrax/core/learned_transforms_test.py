@@ -381,8 +381,8 @@ class TransformerTowerTransformTest(parameterized.TestCase):
     positional_encoder = transformer_layers.SphericalPositionalEncoder(
         ylm_mapper, l_max=4
     )
-    relative_bias_net = nnx.Linear(
-        positional_encoder.l_max**2, num_heads, rngs=rngs
+    relative_bias_factory = functools.partial(
+        standard_layers.Mlp, intermediate_sizes=()
     )
     dense_factory = functools.partial(
         standard_layers.Mlp.uniform, hidden_layers=1, hidden_size=16
@@ -391,7 +391,8 @@ class TransformerTowerTransformTest(parameterized.TestCase):
         transformer_layers.WindowTransformerBlocks.build_using_factories,
         intermediate_sizes=[8, 8],
         num_heads=num_heads,
-        relative_bias_net=relative_bias_net,
+        relative_bias_factory=relative_bias_factory,
+        pos_encoding_size=positional_encoder.l_max**2,
         inputs_window_shape=(4, 4),
         qkv_features=(num_heads * 3),
         shift_windows=True,
