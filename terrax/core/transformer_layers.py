@@ -374,6 +374,9 @@ class TransformerBase(nnx.Module, abc.ABC):
     relative_bias_net: Optional network mapping differences of positional
       encodings `[..., P]` to per-head attention biases `[..., NUM_HEADS]`
       (continuous relative position bias), shared by all attention layers.
+    pos_encoding_proj: Optional linear projection of positional encodings that
+      is added to the inputs once, before the first block
+      (https://arxiv.org/abs/1706.03762, Sec. 3.5).
   """
 
   input_size: int = nnx.static(init=False)
@@ -398,6 +401,7 @@ class TransformerBase(nnx.Module, abc.ABC):
   relative_bias_net: standard_layers.UnaryLayer | None = nnx.data(
       default=None, kw_only=True
   )
+  pos_encoding_proj: nnx.Linear | None = nnx.data(default=None, kw_only=True)
 
   def __post_init__(self):
     n_layers = len(self.attentions)
@@ -650,6 +654,14 @@ class TransformerBase(nnx.Module, abc.ABC):
     z_pos_enc = latents_pos_encoding
     if z_pos_enc is None:
       z_pos_enc = x_pos_enc
+    if self.pos_encoding_proj is not None:
+      if x_pos_enc is None:
+        raise ValueError(
+            'inputs_pos_encoding is required when pos_encoding_proj is set.'
+        )
+      x = x + self.pos_encoding_proj(
+          jnp.asarray(self.rearrange_inputs(x_pos_enc))
+      )
     attention_biases = self.attention_biases(x_pos_enc, z_pos_enc)
     pre_norms = self.pre_norms or [identity] * (2 * self.n_layers)
     post_norms = self.post_norms or [identity] * (2 * self.n_layers)
@@ -698,6 +710,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       dense_factory: standard_layers.UnaryLayerFactory,
       relative_bias_factory: standard_layers.UnaryLayerFactory | None = None,
       pos_encoding_size: int | None = None,
+      use_additive_pos_encoding: bool = False,
       normalize_qk: bool = False,
       normalize_v: bool = False,
       apply_final_norm: bool = False,
@@ -708,7 +721,7 @@ class TransformerBase(nnx.Module, abc.ABC):
     """Prepares arguments for `TransformerBase` constructor.
 
     This method constructs the sequences of attention layers, dense layers,
-    layer norms, gating configurations and the relative position bias network
+    layer norms, gating configurations and the positional encoding modules
     based on the provided factories and parameters. It's primarily a helper
     for `build_using_factories`.
 
@@ -729,7 +742,9 @@ class TransformerBase(nnx.Module, abc.ABC):
         rngs=rngs)`. The network maps differences of positional encodings
         `[..., pos_encoding_size]` to per-head biases `[..., num_heads]`.
       pos_encoding_size: Size of positional encodings. Required when
-        `relative_bias_factory` is provided.
+        `relative_bias_factory` or `use_additive_pos_encoding` are set.
+      use_additive_pos_encoding: Whether to add a linear projection of the
+        positional encodings to the inputs before the first block.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
       apply_final_norm: whether to include final post_norm layer.
@@ -739,7 +754,8 @@ class TransformerBase(nnx.Module, abc.ABC):
 
     Returns:
       Keyword arguments `attentions`, `dense_layers`, `pre_norms`, `post_norms`,
-      `gating` and `relative_bias_net` for the `TransformerBase` constructor.
+      `gating`, `relative_bias_net` and `pos_encoding_proj` for the
+      `TransformerBase` constructor.
     """
     if output_size is None:
       output_size = input_size
@@ -798,6 +814,14 @@ class TransformerBase(nnx.Module, abc.ABC):
       relative_bias_net = relative_bias_factory(
           pos_encoding_size, num_heads, rngs=rngs
       )
+    if not use_additive_pos_encoding:
+      pos_encoding_proj = None
+    elif pos_encoding_size is None:
+      raise ValueError(
+          'pos_encoding_size is required when use_additive_pos_encoding=True.'
+      )
+    else:
+      pos_encoding_proj = nnx.Linear(pos_encoding_size, input_size, rngs=rngs)
     return dict(
         attentions=attentions,
         dense_layers=dense_layers,
@@ -805,6 +829,7 @@ class TransformerBase(nnx.Module, abc.ABC):
         post_norms=post_norms,
         gating=gating,
         relative_bias_net=relative_bias_net,
+        pos_encoding_proj=pos_encoding_proj,
     )
 
   @classmethod
@@ -825,6 +850,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       dense_factory: standard_layers.UnaryLayerFactory,
       relative_bias_factory: standard_layers.UnaryLayerFactory | None = None,
       pos_encoding_size: int | None = None,
+      use_additive_pos_encoding: bool = False,
       normalize_qk: bool = False,
       normalize_v: bool = False,
       w_init=nnx.initializers.he_normal(),
@@ -849,7 +875,9 @@ class TransformerBase(nnx.Module, abc.ABC):
       relative_bias_factory: optional factory for the relative position bias
         network, see `build_args_using_factories`.
       pos_encoding_size: size of positional encodings, required when
-        `relative_bias_factory` is set.
+        `relative_bias_factory` or `use_additive_pos_encoding` are set.
+      use_additive_pos_encoding: whether to add a linear projection of the
+        positional encodings to the inputs before the first block.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
       w_init: kernel initializer for the MultiHeadAttention modules.
@@ -870,6 +898,7 @@ class TransformerBase(nnx.Module, abc.ABC):
         dense_factory=dense_factory,
         relative_bias_factory=relative_bias_factory,
         pos_encoding_size=pos_encoding_size,
+        use_additive_pos_encoding=use_additive_pos_encoding,
         normalize_qk=normalize_qk,
         normalize_v=normalize_v,
         w_init=w_init,
@@ -1343,6 +1372,7 @@ class WindowTransformerBlocks(TransformerBase):
       kv_window_shape: tuple[int, ...] | None = None,
       relative_bias_factory: standard_layers.UnaryLayerFactory | None = None,
       pos_encoding_size: int | None = None,
+      use_additive_pos_encoding: bool = False,
       shift_windows: bool = False,
       intermediate_sizes: tuple[int, ...],
       num_heads: int,
@@ -1373,7 +1403,9 @@ class WindowTransformerBlocks(TransformerBase):
       relative_bias_factory: Optional factory for the relative position bias
         network, see `TransformerBase.build_args_using_factories`.
       pos_encoding_size: Size of positional encodings, required when
-        `relative_bias_factory` is provided.
+        `relative_bias_factory` or `use_additive_pos_encoding` are set.
+      use_additive_pos_encoding: Whether to add a linear projection of the
+        positional encodings to the inputs before the first block.
       shift_windows: If True, windows are shifted in alternating layers.
       intermediate_sizes: tuple of intermediate channel numbers.
       num_heads: number of attention heads to use.
@@ -1405,6 +1437,7 @@ class WindowTransformerBlocks(TransformerBase):
         dense_factory=dense_factory,
         relative_bias_factory=relative_bias_factory,
         pos_encoding_size=pos_encoding_size,
+        use_additive_pos_encoding=use_additive_pos_encoding,
         normalize_qk=normalize_qk,
         normalize_v=normalize_v,
         w_init=w_init,
@@ -1505,13 +1538,52 @@ class SphericalPositionalEncoder(nnx.Module):
     return cx.field(pe, encoding_dim_tag, grid)
 
 
+def _apply_to_channel_axis(
+    layer: Callable[[jax.Array], jax.Array], x: typing.Array
+) -> jax.Array:
+  """Applies `layer` that acts on the last axis to the leading channel axis.
+
+  The two transposes are index remaps for XLA rather than extra passes over
+  the data. Verified on the compiled CPU HLO: for `nnx.LayerNorm` they are
+  fused into the reduction / element-wise fusions of the layer (no additional
+  copies), and for `nnx.Linear` the input transpose becomes a single copy into
+  the layout of the dot while the output transpose is fused with the bias add.
+  The overhead is therefore at most one pass over `x`, negligible compared to
+  the layer itself.
+  """
+  return jnp.moveaxis(layer(jnp.moveaxis(jnp.asarray(x), 0, -1)), -1, 0)
+
+
 @nnx.dataclass
 class EpdTransformer(nnx.Module, pytree=False):
-  """EPD layer with transformer process block."""
+  """EPD layer with transformer process blocks.
+
+  Like `standard_layers.Epd`, inputs are encoded, updated residually by each
+  process block (`x = x + block(x)`) and decoded. Process blocks are
+  `TransformerLayer`s, e.g. `TransformerBlocks` or `WindowTransformerBlocks`.
+  Following other layers in `standard_layers.py`, `encode`, `process_blocks`
+  and `decode` operate on arrays with a leading channel axis `[C, spatial...]`,
+  while the projection of positional encodings and the optional pre-decode
+  normalization act on the channel axis of each token.
+
+  Attributes:
+    encode: Layer mapping inputs to the latent representation.
+    decode: Layer mapping the latent representation to outputs.
+    process_blocks: Transformer layers applied residually to the latents.
+    pos_encoding_proj: Optional linear projection of positional encodings added
+      to the encoded inputs (https://arxiv.org/abs/1706.03762, Sec. 3.5).
+    pre_decode_norm: Optional normalization of latents applied before decoding,
+      i.e. the final normalization of Pre-LN transformer stacks.
+    post_encode_activation: Optional activation applied after encoding.
+    pre_decode_activation: Optional activation applied before decoding.
+    final_activation: Optional activation applied to the outputs.
+  """
 
   encode: standard_layers.UnaryLayer = nnx.data(kw_only=True)
   decode: standard_layers.UnaryLayer = nnx.data(kw_only=True)
   process_blocks: Sequence[TransformerLayer] = nnx.data(kw_only=True)
+  pos_encoding_proj: nnx.Linear | None = nnx.data(default=None, kw_only=True)
+  pre_decode_norm: nnx.Module | None = nnx.data(default=None, kw_only=True)
   post_encode_activation: Callable[[Array], Array] | None = nnx.static(
       default=None
   )
@@ -1542,21 +1614,63 @@ class EpdTransformer(nnx.Module, pytree=False):
       encode_factory: standard_layers.UnaryLayerFactory,
       process_factory: Callable[..., TransformerLayer],
       decode_factory: standard_layers.UnaryLayerFactory,
+      pos_encoding_size: int | None = None,
+      use_additive_pos_encoding: bool = False,
+      pre_decode_normalization_factory: NormalizationFactory | None = None,
       post_encode_activation: Callable[[Array], Array] | None = None,
       pre_decode_activation: Callable[[Array], Array] | None = None,
       final_activation: Callable[[Array], Array] | None = None,
       rngs: nnx.Rngs,
   ) -> EpdTransformer:
+    """Constructs an EpdTransformer from layer factories.
+
+    Args:
+      input_size: Number of input channels.
+      output_size: Number of output channels.
+      latent_size: Number of channels in the encoded (latent) representation.
+      num_process_blocks: Number of residual process blocks.
+      encode_factory: Factory for the encoder `UnaryLayer`.
+      process_factory: Factory for process blocks, called as
+        `process_factory(latent_size, latent_size, rngs=rngs)`.
+      decode_factory: Factory for the decoder `UnaryLayer`.
+      pos_encoding_size: Size of positional encodings. Required when
+        `use_additive_pos_encoding` is True.
+      use_additive_pos_encoding: Whether to add a linear projection of the
+        positional encodings to the encoded inputs (once, before the process
+        blocks).
+      pre_decode_normalization_factory: Optional factory for a normalization
+        layer applied to the latent stream right before decoding. This is the
+        final normalization of Pre-LN stacks; for Post-LN process blocks use
+        their `apply_final_norm` option instead.
+      post_encode_activation: Optional activation applied after encoding.
+      pre_decode_activation: Optional activation applied before decoding.
+      final_activation: Optional activation applied to the outputs.
+      rngs: Random number generators for parameter initialization.
+    """
     encode = encode_factory(input_size, latent_size, rngs=rngs)
     decode = decode_factory(latent_size, output_size, rngs=rngs)
     process_blocks = tuple([
         process_factory(latent_size, latent_size, rngs=rngs)
         for _ in range(num_process_blocks)
     ])
+    if not use_additive_pos_encoding:
+      pos_encoding_proj = None
+    elif pos_encoding_size is None:
+      raise ValueError(
+          'pos_encoding_size is required when use_additive_pos_encoding=True.'
+      )
+    else:
+      pos_encoding_proj = nnx.Linear(pos_encoding_size, latent_size, rngs=rngs)
+    if pre_decode_normalization_factory is None:
+      pre_decode_norm = None
+    else:
+      pre_decode_norm = pre_decode_normalization_factory(latent_size, rngs=rngs)
     return cls(
         encode=encode,
         decode=decode,
         process_blocks=process_blocks,
+        pos_encoding_proj=pos_encoding_proj,
+        pre_decode_norm=pre_decode_norm,
         post_encode_activation=post_encode_activation,
         pre_decode_activation=pre_decode_activation,
         final_activation=final_activation,
@@ -1571,9 +1685,17 @@ class EpdTransformer(nnx.Module, pytree=False):
       mask: typing.Array | None = None,
   ) -> typing.Array:
     """Applies all EPD layers to inputs."""
-    encoded = self.encode(inputs)  # pyrefly: ignore[bad-argument-type]
+    encoded = self.encode(jnp.asarray(inputs))
     if self.post_encode_activation is not None:
       encoded = self.post_encode_activation(encoded)
+    if self.pos_encoding_proj is not None:
+      if inputs_pos_encoding is None:
+        raise ValueError(
+            'inputs_pos_encoding is required when pos_encoding_proj is set.'
+        )
+      encoded = encoded + _apply_to_channel_axis(
+          self.pos_encoding_proj, inputs_pos_encoding
+      )
     current = encoded
     for process_block in self.process_blocks:
       current = current + process_block(
@@ -1583,9 +1705,11 @@ class EpdTransformer(nnx.Module, pytree=False):
           latents_pos_encoding,
           mask,
       )
+    if self.pre_decode_norm is not None:
+      current = _apply_to_channel_axis(self.pre_decode_norm, current)
     if self.pre_decode_activation is not None:
       current = self.pre_decode_activation(current)
-    out = self.decode(current)  # pyrefly: ignore[bad-argument-type]
+    out = self.decode(jnp.asarray(current))
     if self.final_activation is not None:
       return self.final_activation(out)
     return out

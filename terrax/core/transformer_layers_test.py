@@ -216,6 +216,94 @@ class TransformerLayersTest(parameterized.TestCase):
             rngs=nnx.Rngs(0),
         )
 
+  def test_transformer_blocks_additive_pos_encoding(self):
+    """Tests TransformerBlocks with projected positional encodings as inputs."""
+    n_levels = self.levels.shape[0]
+    pos_encoding_size = 5
+    net = transformer_layers.TransformerBlocks.build_using_factories(
+        self.hidden_size,
+        intermediate_sizes=[self.hidden_size],
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        pos_encoding_size=pos_encoding_size,
+        use_additive_pos_encoding=True,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertIsInstance(net.pos_encoding_proj, nnx.Linear)
+    self.assertEqual(net.pos_encoding_proj.in_features, pos_encoding_size)
+    self.assertEqual(net.pos_encoding_proj.out_features, self.hidden_size)
+    inputs = jax.random.uniform(jax.random.key(0), (self.hidden_size, n_levels))
+    pe = jax.random.uniform(jax.random.key(1), (pos_encoding_size, n_levels))
+    out = net(inputs, inputs_pos_encoding=pe)
+    self.assertEqual(out.shape, (self.hidden_size, n_levels))
+    with self.subTest('requires_pos_encoding'):
+      with self.assertRaisesRegex(ValueError, 'inputs_pos_encoding'):
+        net(inputs)
+    with self.subTest('factory_requires_pos_encoding_size'):
+      with self.assertRaisesRegex(ValueError, 'pos_encoding_size'):
+        transformer_layers.TransformerBlocks.build_using_factories(
+            self.hidden_size,
+            intermediate_sizes=[],
+            num_heads=2,
+            dense_factory=self.dense_factory,
+            use_additive_pos_encoding=True,
+            rngs=nnx.Rngs(0),
+        )
+
+  def test_epd_transformer_with_additive_pos_encoding(self):
+    """Tests EpdTransformer with positional encodings and pre-decode norm."""
+    num_levels, pos_encoding_size = 16, 8
+    input_size, output_size, latent_size = 6, 4, 12
+    encode_factory = functools.partial(standard_layers.ConvLevel, kernel_size=1)
+    decode_factory = functools.partial(standard_layers.ConvLevel, kernel_size=1)
+    process_factory = functools.partial(
+        transformer_layers.TransformerBlocks.build_using_factories,
+        intermediate_sizes=(latent_size,),
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        relative_bias_factory=functools.partial(
+            standard_layers.Mlp.uniform, hidden_size=4, hidden_layers=1
+        ),
+        pos_encoding_size=pos_encoding_size,
+        pre_normalization_factory=nnx.LayerNorm,
+        normalize_qk=True,
+        gating=None,
+    )
+    epd = transformer_layers.EpdTransformer.build_using_factories(
+        input_size=input_size,
+        output_size=output_size,
+        latent_size=latent_size,
+        num_process_blocks=2,
+        encode_factory=encode_factory,
+        process_factory=process_factory,
+        decode_factory=decode_factory,
+        pos_encoding_size=pos_encoding_size,
+        use_additive_pos_encoding=True,
+        pre_decode_normalization_factory=nnx.LayerNorm,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(epd))
+    self.assertIsInstance(epd.pos_encoding_proj, nnx.Linear)
+    self.assertIsInstance(epd.pre_decode_norm, nnx.LayerNorm)
+    x = jax.random.normal(jax.random.key(0), (input_size, num_levels))
+    pe = jax.random.normal(jax.random.key(1), (pos_encoding_size, num_levels))
+    out = epd(x, inputs_pos_encoding=pe)
+    self.assertEqual(out.shape, (output_size, num_levels))
+    with self.assertRaisesRegex(ValueError, 'inputs_pos_encoding is required'):
+      epd(x)
+
+    def loss_fn(model, inp):
+      return jax.numpy.sum(model(inp, inputs_pos_encoding=pe) ** 2)
+
+    grad_model, grad_x = nnx.grad(loss_fn, argnums=(0, 1))(epd, x)
+    self.assertGreater(float(np.linalg.norm(grad_x)), 0.0)
+    self.assertGreater(
+        float(np.linalg.norm(grad_model.pos_encoding_proj.kernel.value)), 0.0
+    )
+    self.assertGreater(
+        float(np.linalg.norm(grad_model.pre_decode_norm.scale.value)), 0.0
+    )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='no_shifts_even_window_shape_no_gating',
