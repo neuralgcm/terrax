@@ -152,6 +152,27 @@ class TransformerLayersTest(parameterized.TestCase):
     )
     self.assertEqual([a.qkv_features for a in net.attentions], [6, 8])
 
+  @parameterized.parameters(False, True)
+  def test_post_norms_of_last_block(self, apply_final_norm: bool):
+    """Tests that apply_final_norm only controls the final post-dense norm."""
+    net = transformer_layers.TransformerBlocks.build_using_factories(
+        self.hidden_size,
+        intermediate_sizes=[self.hidden_size],
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        post_normalization_factory=nnx.LayerNorm,
+        apply_final_norm=apply_final_norm,
+        rngs=nnx.Rngs(0),
+    )
+    post_norms = list(net.post_norms)
+    self.assertLen(post_norms, 4)  # (post-attention, post-dense) x 2 blocks.
+    for norm in post_norms[:3]:
+      self.assertIsInstance(norm, nnx.LayerNorm)
+    if apply_final_norm:
+      self.assertIsInstance(post_norms[3], nnx.LayerNorm)
+    else:
+      self.assertIs(post_norms[3], transformer_layers.identity)
+
   @parameterized.named_parameters(
       dict(
           testcase_name='no_shifts_even_window_shape_no_gating',

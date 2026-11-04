@@ -687,11 +687,12 @@ class TransformerBase(nnx.Module, abc.ABC):
         pre_norms.append(pre_normalization_factory(d_in, rngs=rngs))
         pre_norms.append(pre_normalization_factory(d_out, rngs=rngs))
       if post_normalization_factory is not None:
+        # Each block has a post-attention and a post-dense norm; only the very
+        # last post-dense norm of the network is controlled by apply_final_norm.
+        post_norms.append(post_normalization_factory(d_out, rngs=rngs))
         if i < len(intermediate_sizes) or apply_final_norm:
           post_norms.append(post_normalization_factory(d_out, rngs=rngs))
-          post_norms.append(post_normalization_factory(d_out, rngs=rngs))
         else:
-          post_norms.append(identity)
           post_norms.append(identity)
       possible_gating.append(no_gating if d_in != d_out else residual_gating)
       dense_layers.append(dense_factory(d_out, d_out, rngs=rngs))
