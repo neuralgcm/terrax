@@ -19,7 +19,7 @@ import abc
 import functools
 import itertools
 import math
-from typing import Any, Callable, Protocol, Self, Sequence, TypeAlias
+from typing import Any, Callable, Literal, Protocol, Self, Sequence, TypeAlias
 
 import coordax as cx
 import einops
@@ -1490,6 +1490,136 @@ def spherical_harmonic_lon_lat_encodings(
   return jax.vmap(ylm_map.to_nodal_array)(modal_basis)  # pyrefly: ignore[bad-argument-type]
 
 
+def legendre_encodings(positions: np.ndarray, encoding_size: int) -> np.ndarray:
+  """Computes Legendre polynomial encodings of 1D positions in [-1, 1].
+
+  Legendre polynomials form an orthogonal basis on [-1, 1]. The encodings
+  consist of P_1(x), ..., P_{encoding_size}(x), omitting the constant P_0,
+  evaluated with Bonnet's recursion
+  `(n + 1) P_{n+1}(x) = (2n + 1) x P_n(x) - n P_{n-1}(x)`.
+
+  Args:
+    positions: 1D array of positions scaled to [-1, 1] of shape [L].
+    encoding_size: Number of Legendre polynomial degrees to include.
+
+  Returns:
+    Positional encodings of shape [encoding_size, L].
+  """
+  if encoding_size < 1:
+    raise ValueError(f'{encoding_size=} must be >= 1.')
+  x = np.asarray(positions, dtype=np.float32)
+  p_prev, p_curr = np.ones_like(x), x
+  polys = [p_curr]
+  for n in range(1, encoding_size):
+    p_next = ((2 * n + 1) * x * p_curr - n * p_prev) / (n + 1)
+    polys.append(p_next.astype(np.float32))
+    p_prev, p_curr = p_curr, p_next
+  return np.stack(polys, axis=0)
+
+
+def sinusoidal_encodings(
+    positions: np.ndarray,
+    encoding_size: int,
+    *,
+    min_scale: float,
+    max_scale: float,
+) -> np.ndarray:
+  """Computes sinusoidal encodings of 1D positions.
+
+  Follows the sinusoidal positional encodings of
+  https://arxiv.org/abs/1706.03762 (Sec. 3.5): `sin(x / s_k)` and `cos(x / s_k)`
+  with scales `s_k` forming a geometric progression from `min_scale` to
+  `max_scale`.
+
+  Args:
+    positions: 1D array of positions of shape [L].
+    encoding_size: Number of encoding channels (must be even).
+    min_scale: Scale of the highest frequency component, in units of positions.
+    max_scale: Scale of the lowest frequency component, in units of positions.
+
+  Returns:
+    Positional encodings of shape [encoding_size, L].
+  """
+  if encoding_size < 2 or encoding_size % 2 != 0:
+    raise ValueError(f'sinusoidal encodings require even {encoding_size=} > 0.')
+  x = np.asarray(positions, dtype=np.float32)
+  scales = np.geomspace(min_scale, max_scale, encoding_size // 2)
+  angles = x[np.newaxis, :] / scales[:, np.newaxis].astype(np.float32)
+  return np.concatenate([np.sin(angles), np.cos(angles)], axis=0)
+
+
+def level_fractions_and_thicknesses(
+    level_coord: cx.Coordinate,
+    reference_pressure: float = 1000.0,
+) -> tuple[np.ndarray, np.ndarray]:
+  """Returns vertical level centers and layer thicknesses as column fractions.
+
+  Levels are expressed as a fraction of the atmospheric column in pressure
+  space, i.e. a sigma-like coordinate in [0, 1] increasing from the top of the
+  atmosphere to the surface:
+
+    * `SigmaLevels`: the sigma coordinate itself.
+    * `HybridLevels`: sigma levels at a surface pressure of
+      `reference_pressure`.
+    * `PressureLevels`: `p / reference_pressure`, with layer interfaces at the
+      midpoints between levels, 0 at the top and at least `reference_pressure`
+      at the bottom.
+    * Other coordinates: equidistant layers spanning [0, 1].
+
+  Thicknesses are differences between layer interfaces normalized to sum to 1.
+
+  Args:
+    level_coord: Vertical level coordinate.
+    reference_pressure: Surface pressure in hPa used to convert pressures to
+      column fractions.
+
+  Returns:
+    A tuple of float32 arrays `(centers, thicknesses)`, each of shape [L].
+  """
+  if isinstance(level_coord, coordinates.SigmaLevels):
+    interfaces = np.asarray(level_coord.boundaries)
+    centers = np.asarray(level_coord.centers)
+  elif isinstance(level_coord, coordinates.HybridLevels):
+    hybrid = level_coord.hybrid_levels
+    interfaces = np.asarray(hybrid.get_sigma_boundaries(reference_pressure))
+    centers = np.asarray(hybrid.get_sigma_centers(reference_pressure))
+  elif isinstance(level_coord, coordinates.PressureLevels):
+    p = np.asarray(level_coord.centers)
+    if p.size < 2:
+      raise ValueError(f'PressureLevels must have at least 2 levels, got {p=}')
+    bottom = max(reference_pressure, p[-1] + 0.5 * (p[-1] - p[-2]))
+    interfaces = np.concatenate([[0.0], 0.5 * (p[:-1] + p[1:]), [bottom]])
+    interfaces = interfaces / reference_pressure
+    centers = p / reference_pressure
+  else:
+    interfaces = np.linspace(0.0, 1.0, level_coord.shape[0] + 1)
+    centers = 0.5 * (interfaces[:-1] + interfaces[1:])
+  thicknesses = np.diff(interfaces) / (interfaces[-1] - interfaces[0])
+  return centers.astype(np.float32), thicknesses.astype(np.float32)
+
+
+def thickness_encodings(thicknesses: np.ndarray) -> np.ndarray:
+  """Computes relative thickness and standardized log-thickness features.
+
+  Args:
+    thicknesses: Positive layer thicknesses normalized to sum to 1, shape [L].
+
+  Returns:
+    Array of shape [2, L] with `thicknesses * L - 1` (zero for equidistant
+    layers) and the standardized log-thickness (zero if all layers are equal).
+  """
+  if np.any(thicknesses <= 0):
+    raise ValueError(f'Layer thicknesses must be positive, got {thicknesses=}')
+  relative = thicknesses * thicknesses.shape[0] - 1.0
+  log_thickness = np.log(thicknesses)
+  std = np.std(log_thickness)
+  if std > 1e-6:
+    log_thickness = (log_thickness - np.mean(log_thickness)) / std
+  else:
+    log_thickness = np.zeros_like(log_thickness)
+  return np.stack([relative, log_thickness], axis=0).astype(np.float32)
+
+
 class PositionalEncoder(Protocol):
   """Protocol for positional encoders."""
 
@@ -1536,6 +1666,80 @@ class SphericalPositionalEncoder(nnx.Module):
     ylm_map = self.ylm_mapper.ylm_map(grid)
     pe = spherical_harmonic_lon_lat_encodings(ylm_map, l_max, l_min)
     return cx.field(pe, encoding_dim_tag, grid)
+
+
+@nnx.dataclass
+class LevelPositionalEncoder(nnx.Module):
+  """Generates positional and layer-thickness encodings for vertical levels.
+
+  Levels are located by their fractional position in the atmospheric column
+  (see `level_fractions_and_thicknesses`) and encoded with Legendre polynomials
+  (`basis_type='legendre'`, positions mapped to [-1, 1]) or sinusoidal
+  functions (`basis_type='sinusoidal'`, positions in hPa). With
+  `include_thickness=True` two channels with the relative layer thickness and
+  the standardized log-thickness are prepended (see `thickness_encodings`), so
+  that attention over stretched vertical grids can account for layer mass.
+  Encodings depend on the level coordinate only and are computed with numpy.
+
+  Attributes:
+    encoding_size: Total number of encoding channels, including the two
+      thickness channels when `include_thickness` is True.
+    basis_type: Family of basis functions used to encode level positions.
+    include_thickness: Whether to include layer thickness channels.
+    reference_pressure: Surface pressure in hPa used to express pressure and
+      hybrid levels as column fractions.
+    min_scale: Smallest scale of sinusoidal encodings, in hPa.
+    max_scale: Largest scale of sinusoidal encodings, in hPa. The default range
+      of 1-1000 hPa spans the pressure range of the atmosphere.
+  """
+
+  encoding_size: int = 16
+  basis_type: Literal['legendre', 'sinusoidal'] = 'legendre'
+  include_thickness: bool = True
+  reference_pressure: float = 1000.0
+  min_scale: float = 1.0
+  max_scale: float = 1000.0
+
+  def __call__(
+      self,
+      inputs: cx.Field,
+      dims: tuple[str | cx.Coordinate, ...],
+      encoding_dim_tag: str | cx.Coordinate | None = None,
+  ) -> cx.Field:
+    """Returns positional encodings for `inputs` over level dimension `dims`."""
+    level_dims = _dim_names(*dims)
+    if len(level_dims) != 1:
+      raise ValueError(
+          'LevelPositionalEncoder expects a single vertical level dimension, '
+          f'got {dims=} ({level_dims=}).'
+      )
+    level_coord = inputs.axes.get(level_dims[0])
+    if level_coord is None:
+      raise ValueError(
+          f'Dimension {level_dims[0]!r} not found in {inputs.coordinate=}.'
+      )
+    fractions, thicknesses = level_fractions_and_thicknesses(
+        level_coord, self.reference_pressure
+    )
+    basis_size = self.encoding_size - 2 * int(self.include_thickness)
+    if basis_size < 1:
+      raise ValueError(
+          f'{self.encoding_size=} is too small for {self.include_thickness=}.'
+      )
+    if self.basis_type == 'legendre':
+      pe = legendre_encodings(2.0 * fractions - 1.0, basis_size)
+    elif self.basis_type == 'sinusoidal':
+      pe = sinusoidal_encodings(
+          fractions * self.reference_pressure,
+          basis_size,
+          min_scale=self.min_scale,
+          max_scale=self.max_scale,
+      )
+    else:
+      raise ValueError(f'Unsupported {self.basis_type=}.')
+    if self.include_thickness:
+      pe = np.concatenate([thickness_encodings(thicknesses), pe], axis=0)
+    return cx.field(pe, encoding_dim_tag, level_coord)
 
 
 def _apply_to_channel_axis(

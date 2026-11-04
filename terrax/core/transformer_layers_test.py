@@ -453,6 +453,95 @@ class TransformerLayersTest(parameterized.TestCase):
     pos_encoding = pe(inputs, ('longitude', 'latitude'))
     self.assertEqual(pos_encoding.shape, (lmax**2 - lmin**2,) + grid.shape)
 
+  @parameterized.product(
+      basis_type=['legendre', 'sinusoidal'],
+      level_type=['sigma', 'hybrid', 'pressure', 'layer'],
+  )
+  def test_level_positional_encoder(self, basis_type: str, level_type: str):
+    """Tests output shape and thickness features of LevelPositionalEncoder."""
+    if level_type == 'sigma':
+      levels = coordinates.SigmaLevels.equidistant(12)
+    elif level_type == 'hybrid':
+      levels = coordinates.HybridLevels.ecmwf137_interpolated(12)
+    elif level_type == 'pressure':
+      levels = coordinates.PressureLevels.with_13_era5_levels()
+    else:
+      levels = coordinates.LayerLevels(12)
+    pe_size = 8
+    pe = transformer_layers.LevelPositionalEncoder(
+        encoding_size=pe_size,
+        basis_type=basis_type,  # pyrefly: ignore[bad-argument-type]
+    )
+    inputs = cx.field(
+        np.ones(levels.shape + self.grid.shape), levels, self.grid
+    )
+    pos_encoding = pe(inputs, (levels,), encoding_dim_tag='pe')
+    self.assertEqual(pos_encoding.shape, (pe_size,) + levels.shape)
+    self.assertEqual(pos_encoding.dims, ('pe', levels.dims[0]))
+    self.assertTrue(np.all(np.isfinite(pos_encoding.data)))
+    thickness = pos_encoding.data[:2]
+    if level_type in ('sigma', 'layer'):  # equidistant layers.
+      np.testing.assert_allclose(thickness, 0.0, atol=1e-5)
+    else:  # stretched layers must be distinguishable through thickness.
+      self.assertGreater(np.std(thickness[0]), 0.0)
+      np.testing.assert_allclose(np.mean(thickness[1]), 0.0, atol=1e-5)
+      np.testing.assert_allclose(np.std(thickness[1]), 1.0, atol=1e-5)
+    if isinstance(levels, coordinates.HybridLevels):
+      diffs = pos_encoding.data[:, :, None] - pos_encoding.data[:, None, :]
+      channel_norms = np.linalg.norm(diffs, axis=(1, 2))
+      self.assertTrue(np.all(channel_norms > 0.0))
+
+  def test_level_fractions_and_thicknesses(self):
+    """Tests column fractions for sigma, hybrid and pressure levels."""
+    sigma = coordinates.SigmaLevels.equidistant(4)
+    centers, thicknesses = transformer_layers.level_fractions_and_thicknesses(
+        sigma
+    )
+    np.testing.assert_allclose(centers, [0.125, 0.375, 0.625, 0.875])
+    np.testing.assert_allclose(thicknesses, 0.25)
+
+    hybrid = coordinates.HybridLevels(
+        a_boundaries=[0.0, 100.0, 0.0], b_boundaries=[0.0, 0.4, 1.0]
+    )
+    centers, thicknesses = transformer_layers.level_fractions_and_thicknesses(
+        hybrid, reference_pressure=1000.0
+    )
+    np.testing.assert_allclose(centers, [0.25, 0.75])
+    np.testing.assert_allclose(thicknesses, [0.5, 0.5])
+
+    pressure = coordinates.PressureLevels([250.0, 500.0, 1000.0])
+    centers, thicknesses = transformer_layers.level_fractions_and_thicknesses(
+        pressure, reference_pressure=1000.0
+    )
+    np.testing.assert_allclose(centers, [0.25, 0.5, 1.0])
+    # Interfaces at [0, 375, 750, 1250] hPa normalized by the bottom interface.
+    np.testing.assert_allclose(thicknesses, [0.3, 0.3, 0.4])
+    with self.assertRaisesRegex(ValueError, 'too small'):
+      pe = transformer_layers.LevelPositionalEncoder(encoding_size=2)
+      pe(cx.field(np.ones(sigma.shape), sigma), (sigma,), 'pe')
+
+  def test_1d_encodings(self):
+    """Tests Legendre and sinusoidal encodings against closed forms."""
+    x = np.linspace(-1.0, 1.0, 7)
+    legendre = transformer_layers.legendre_encodings(x, 3)
+    np.testing.assert_allclose(legendre[0], x)
+    np.testing.assert_allclose(legendre[1], (3 * x**2 - 1) / 2, atol=1e-6)
+    np.testing.assert_allclose(legendre[2], (5 * x**3 - 3 * x) / 2, atol=1e-6)
+
+    positions = np.array([0.0, 10.0, 100.0])
+    sinusoidal = transformer_layers.sinusoidal_encodings(
+        positions, 4, min_scale=1.0, max_scale=100.0
+    )
+    self.assertEqual(sinusoidal.shape, (4, 3))
+    np.testing.assert_allclose(sinusoidal[0], np.sin(positions), atol=1e-6)
+    np.testing.assert_allclose(
+        sinusoidal[3], np.cos(positions / 100.0), atol=1e-6
+    )
+    with self.assertRaisesRegex(ValueError, 'even'):
+      transformer_layers.sinusoidal_encodings(
+          positions, 3, min_scale=1.0, max_scale=100.0
+      )
+
   def test_pytree_no_duplicates(self):
     dummy_att = transformer_layers.MultiHeadAttention(
         num_heads=2,
