@@ -1856,6 +1856,23 @@ class NestedTransformTest(parameterized.TestCase):
       }
       chex.assert_trees_all_equal(actual, expected)
 
+  def test_full_like(self):
+    x = cx.SizedAxis('x', 2)
+    inputs = {
+        'longitude': cx.field(jnp.array([10.0, 20.0]), x),
+        'other': cx.field(jnp.array([1.0, 2.0]), x),
+    }
+    with self.subTest('nan_default'):
+      transform = transforms.FullLike(keys=['a', 'b'], like='longitude')
+      actual = transform(inputs)
+      nans = cx.field(jnp.array([jnp.nan, jnp.nan]), x)
+      chex.assert_trees_all_equal(actual, {'a': nans, 'b': nans})
+
+    with self.subTest('custom_fill_value'):
+      transform = transforms.FullLike(keys=['a'], like='other', fill_value=0.0)
+      actual = transform(inputs)
+      chex.assert_trees_all_equal(actual, {'a': cx.field(jnp.zeros(2), x)})
+
   def test_apply_mask(self):
     x = cx.SizedAxis('x', 2)
     inputs = {

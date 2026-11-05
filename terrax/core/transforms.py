@@ -2530,6 +2530,36 @@ class FillNaNs(PytreeTransformABC):
 
 
 @nnx.dataclass
+class FullLike(PytreeTransformABC):
+  """Returns fields filled with a constant value, shaped like a template field.
+
+  Args:
+    keys: Names of the fields to produce.
+    like: Key of the input field whose coordinates and dtype are used.
+    fill_value: Value to fill the fields with. Defaults to NaN.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {'longitude': cx.field(jnp.array([10.0, 20.0]))}
+    >>> transform = transforms.FullLike(keys=['lag'], like='longitude')
+    >>> transform(inputs)['lag'].data
+    Array([nan, nan], dtype=float32)
+  """
+  keys: Sequence[str]
+  like: str
+  fill_value: float | None = None
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    template = inputs[self.like]
+    with jax.ensure_compile_time_eval():
+      fill_value = jnp.nan if self.fill_value is None else self.fill_value
+    full = cx.cmap(functools.partial(jnp.full_like, fill_value=fill_value))
+    return {k: full(template) for k in self.keys}
+
+
+@nnx.dataclass
 class ApplyMask(PytreeTransformABC):
   """Applies a boolean mask field to other fields.
 
