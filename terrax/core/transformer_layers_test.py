@@ -140,6 +140,84 @@ class TransformerLayersTest(parameterized.TestCase):
     out = net(inputs, latents=latents)
     self.assertEqual(out.shape, (output_size, n_levels))
 
+  def test_transformer_blocks_cross_attention_layers(self):
+    """Tests mixing self-attention and cross-attention layers."""
+    n_levels, n_latent_levels, pos_encoding_size = 12, 7, 4
+
+    def build(cross_attention_layers):
+      return transformer_layers.TransformerBlocks.build_using_factories(
+          self.hidden_size,
+          intermediate_sizes=[self.hidden_size, self.hidden_size],
+          num_heads=2,
+          dense_factory=self.dense_factory,
+          relative_bias_factory=functools.partial(
+              standard_layers.Mlp, intermediate_sizes=()
+          ),
+          pos_encoding_size=pos_encoding_size,
+          pre_normalization_factory=nnx.LayerNorm,
+          gating=None,
+          cross_attention_layers=cross_attention_layers,
+          rngs=nnx.Rngs(0),
+      )
+
+    keys = jax.random.split(jax.random.key(0), 5)
+    x = jax.random.normal(keys[0], (self.hidden_size, n_levels))
+    z = jax.random.normal(keys[1], (self.hidden_size, n_latent_levels))
+    x_pe = jax.random.normal(keys[2], (pos_encoding_size, n_levels))
+    z_pe = jax.random.normal(keys[3], (pos_encoding_size, n_latent_levels))
+    other_z = jax.random.normal(keys[4], z.shape)
+
+    mixed = build((True, False, True))
+    out = mixed(x, z, x_pe, z_pe)
+    self.assertEqual(out.shape, (self.hidden_size, n_levels))
+    # Cross-attention layers see the latents ...
+    self.assertFalse(np.allclose(out, mixed(x, other_z, x_pe, z_pe)))
+    # ... while a stack of self-attention layers ignores them.
+    self_only = build((False, False, False))
+    np.testing.assert_allclose(
+        self_only(x, z, x_pe, z_pe), self_only(x, other_z, x_pe, z_pe)
+    )
+    np.testing.assert_allclose(
+        self_only(x, z, x_pe, z_pe), self_only(x, inputs_pos_encoding=x_pe)
+    )
+    # By default every layer attends to the latents.
+    np.testing.assert_allclose(
+        build(None)(x, z, x_pe, z_pe), build((True,) * 3)(x, z, x_pe, z_pe)
+    )
+    with self.assertRaisesRegex(ValueError, 'cross_attention_layers'):
+      build((True, False))
+
+  def test_window_transformer_blocks_cross_attention_layers(self):
+    """Tests window blocks alternating self- and cross-attention layers."""
+    ylm_pe = transformer_layers.spherical_harmonic_lon_lat_encodings(
+        spherical_harmonics.YlmMapper().ylm_map(self.grid), 4
+    )
+    kv_shape = (2 * self.grid.shape[0], 2 * self.grid.shape[1])
+    net = transformer_layers.WindowTransformerBlocks.build_using_factories(
+        self.hidden_size,
+        intermediate_sizes=[self.hidden_size],
+        num_heads=2,
+        relative_bias_factory=functools.partial(
+            standard_layers.Mlp, intermediate_sizes=()
+        ),
+        pos_encoding_size=ylm_pe.shape[0],
+        inputs_window_shape=(2, 2),
+        kv_window_shape=(4, 4),
+        shift_windows=True,
+        dense_factory=self.dense_factory,
+        inputs_bc=boundaries.LonLatBoundary(),
+        cross_attention_layers=(False, True),
+        rngs=nnx.Rngs(0),
+    )
+    keys = jax.random.split(jax.random.key(0), 4)
+    x = jax.random.normal(keys[0], (self.hidden_size, *self.grid.shape))
+    z = jax.random.normal(keys[1], (self.hidden_size, *kv_shape))
+    other_z = jax.random.normal(keys[2], z.shape)
+    z_pe = jax.random.normal(keys[3], (ylm_pe.shape[0], *kv_shape))
+    out = net(x, z, ylm_pe, z_pe)
+    self.assertEqual(out.shape, (self.hidden_size, *self.grid.shape))
+    self.assertFalse(np.allclose(out, net(x, other_z, ylm_pe, z_pe)))
+
   def test_default_qkv_features_follow_layer_input_sizes(self):
     """Tests that qkv_features default to the input size of each layer."""
     net = transformer_layers.TransformerBlocks.build_using_factories(

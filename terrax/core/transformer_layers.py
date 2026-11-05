@@ -377,6 +377,10 @@ class TransformerBase(nnx.Module, abc.ABC):
     pos_encoding_proj: Optional linear projection of positional encodings that
       is added to the inputs once, before the first block
       (https://arxiv.org/abs/1706.03762, Sec. 3.5).
+    cross_attention_layers: Optional sequence of `n_layers` flags selecting the
+      layers that attend to `latents` (keys/values from the latents); all other
+      layers self-attend. If None, every layer attends to `latents` when they
+      are provided. Without `latents` all layers self-attend regardless.
   """
 
   input_size: int = nnx.static(init=False)
@@ -402,6 +406,9 @@ class TransformerBase(nnx.Module, abc.ABC):
       default=None, kw_only=True
   )
   pos_encoding_proj: nnx.Linear | None = nnx.data(default=None, kw_only=True)
+  cross_attention_layers: Sequence[bool] | None = nnx.static(
+      default=None, kw_only=True
+  )
 
   def __post_init__(self):
     n_layers = len(self.attentions)
@@ -418,6 +425,14 @@ class TransformerBase(nnx.Module, abc.ABC):
       raise ValueError(
           f'{type(self)} got {self.gating=} that is not a sequence of '
           f'2 * {n_layers} == {2 * n_layers} gating functions/layers.'
+      )
+    if (
+        self.cross_attention_layers is not None
+        and len(self.cross_attention_layers) != n_layers
+    ):
+      raise ValueError(
+          f'{type(self)} got {self.cross_attention_layers=} that is not a '
+          f'sequence of {n_layers=} flags.'
       )
     # `nnx.List` registers module entries as nodes of the NNX graph while
     # keeping plain callables (e.g. `identity`) as static entries.
@@ -476,7 +491,7 @@ class TransformerBase(nnx.Module, abc.ABC):
   def attention_biases(
       self,
       inputs_pos_encoding: typing.Array | None,
-      latents_pos_encoding: typing.Array | None,
+      latents_pos_encoding: typing.Array | None = None,
   ) -> Sequence[typing.Array | None]:
     """Returns the relative position bias of each attention layer.
 
@@ -487,7 +502,8 @@ class TransformerBase(nnx.Module, abc.ABC):
 
     Args:
       inputs_pos_encoding: Positional encodings of inputs [P, spatial...].
-      latents_pos_encoding: Positional encodings of latents (keys/values).
+      latents_pos_encoding: Positional encodings of latents (keys/values), or
+        None for self-attention over the inputs.
 
     Returns:
       A sequence of `n_layers` biases that broadcast against attention logits,
@@ -495,14 +511,17 @@ class TransformerBase(nnx.Module, abc.ABC):
     """
     if self.relative_bias_net is None:
       return [None] * self.n_layers
-    if inputs_pos_encoding is None or latents_pos_encoding is None:
+    if inputs_pos_encoding is None:
       raise ValueError(
           'inputs_pos_encoding is required when relative_bias_net is set.'
       )
-    bias = self._attention_bias(
-        self.rearrange_inputs(inputs_pos_encoding),
-        self.rearrange_latents(latents_pos_encoding),
+    q_pe = self.rearrange_inputs(inputs_pos_encoding)
+    kv_pe = (
+        q_pe
+        if latents_pos_encoding is None
+        else self.rearrange_latents(latents_pos_encoding)
     )
+    bias = self._attention_bias(q_pe, kv_pe)
     return [bias] * self.n_layers
 
   @abc.abstractmethod
@@ -623,11 +642,11 @@ class TransformerBase(nnx.Module, abc.ABC):
     """Applies a sequence of transformer blocks to the inputs.
 
     The method processes `inputs` through multiple transformer layers.
-    If `latents` are provided, they can be used as a source for keys/values
-    in attention, as defined by `attention_key_source` and
-    `attention_value_source` in subclasses. Positional encodings, if supplied,
-    are passed to attention mechanisms. An optional mask can be used to prevent
-    attention to certain positions.
+    If `latents` are provided, they are used as the source of keys/values in
+    the attention layers selected by `cross_attention_layers` (all layers by
+    default), while the remaining layers self-attend. Positional encodings, if
+    supplied, are passed to attention mechanisms. An optional mask can be used
+    to prevent attention to certain positions.
 
     Each block applies `pre_norm -> attention -> gating -> post_norm` followed
     by `pre_norm -> dense -> gating -> post_norm`. With residual gating, using
@@ -642,7 +661,9 @@ class TransformerBase(nnx.Module, abc.ABC):
       latents_pos_encoding: Optional positional encodings for latents. If None,
         latents are assumed to be co-located with the inputs and share
         `inputs_pos_encoding`.
-      mask: Optional attention mask.
+      mask: Optional attention mask over the keys/values, i.e. over `latents`
+        if provided (in which case it is not applied in self-attention layers)
+        and over `inputs` otherwise.
 
     Returns:
       The processed array, in the same spatial format as `inputs`.
@@ -662,7 +683,17 @@ class TransformerBase(nnx.Module, abc.ABC):
       x = x + self.pos_encoding_proj(
           jnp.asarray(self.rearrange_inputs(x_pos_enc))
       )
-    attention_biases = self.attention_biases(x_pos_enc, z_pos_enc)
+    # Layers attending to latents take keys/values (and the mask) from `z`;
+    # all others self-attend. Biases are computed once per attention source.
+    pattern = self.cross_attention_layers or (True,) * self.n_layers
+    cross = [z is not None and use_latents for use_latents in pattern]
+    cross_biases: Sequence[typing.Array | None] = [None] * self.n_layers
+    self_biases: Sequence[typing.Array | None] = [None] * self.n_layers
+    if any(cross):
+      cross_biases = self.attention_biases(x_pos_enc, z_pos_enc)
+    if not all(cross):
+      self_biases = self.attention_biases(x_pos_enc, None)
+    self_mask = None if z is not None else mask
     pre_norms = self.pre_norms or [identity] * (2 * self.n_layers)
     post_norms = self.post_norms or [identity] * (2 * self.n_layers)
     gates = (
@@ -673,17 +704,21 @@ class TransformerBase(nnx.Module, abc.ABC):
     parts = zip(self.attentions, self.dense_layers, strict=True)
     for i, (attention, dense) in enumerate(parts):
       x_norm = pre_norms[2 * i](x)
-      keys = self.attention_key_source(x_norm, z, x_pos_enc, z_pos_enc)
-      values = self.attention_value_source(x_norm, z, x_pos_enc, z_pos_enc)
+      if cross[i]:
+        z_i, z_pe_i, mask_i, bias = z, z_pos_enc, mask, cross_biases[i]
+      else:
+        z_i, z_pe_i, mask_i, bias = None, x_pos_enc, self_mask, self_biases[i]
+      keys = self.attention_key_source(x_norm, z_i, x_pos_enc, z_pe_i)
+      values = self.attention_value_source(x_norm, z_i, x_pos_enc, z_pe_i)
       x_attn = self.apply_attention(
           attention=attention,
           query=x_norm,
           key=keys,
           value=values,
-          mask=mask,
-          attention_bias=attention_biases[i],
+          mask=mask_i,
+          attention_bias=bias,
           query_pos_encoding=x_pos_enc,
-          kv_pos_encoding=z_pos_enc,
+          kv_pos_encoding=z_pe_i,
           layer_idx=i,
       )
       x = gates[2 * i](x, self.activation(x_attn))
@@ -714,6 +749,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       normalize_qk: bool = False,
       normalize_v: bool = False,
       apply_final_norm: bool = False,
+      cross_attention_layers: Sequence[bool] | None = None,
       w_init=nnx.initializers.he_normal(),
       b_init=nnx.initializers.zeros,
       rngs: nnx.Rngs,
@@ -748,14 +784,17 @@ class TransformerBase(nnx.Module, abc.ABC):
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
       apply_final_norm: whether to include final post_norm layer.
+      cross_attention_layers: Optional flags, one per layer, selecting the
+        layers that attend to `latents`; all other layers self-attend. Defaults
+        to cross-attention in every layer when latents are provided.
       w_init: Kernel initializer for `MultiHeadAttention`.
       b_init: Bias initializer for `MultiHeadAttention`.
       rngs: JAX PRNG keys.
 
     Returns:
       Keyword arguments `attentions`, `dense_layers`, `pre_norms`, `post_norms`,
-      `gating`, `relative_bias_net` and `pos_encoding_proj` for the
-      `TransformerBase` constructor.
+      `gating`, `relative_bias_net`, `pos_encoding_proj` and
+      `cross_attention_layers` for the `TransformerBase` constructor.
     """
     if output_size is None:
       output_size = input_size
@@ -830,6 +869,7 @@ class TransformerBase(nnx.Module, abc.ABC):
         gating=gating,
         relative_bias_net=relative_bias_net,
         pos_encoding_proj=pos_encoding_proj,
+        cross_attention_layers=cross_attention_layers,
     )
 
   @classmethod
@@ -853,6 +893,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       use_additive_pos_encoding: bool = False,
       normalize_qk: bool = False,
       normalize_v: bool = False,
+      cross_attention_layers: Sequence[bool] | None = None,
       w_init=nnx.initializers.he_normal(),
       b_init=nnx.initializers.zeros,
       rngs: nnx.Rngs,
@@ -880,6 +921,8 @@ class TransformerBase(nnx.Module, abc.ABC):
         positional encodings to the inputs before the first block.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
+      cross_attention_layers: optional flags, one per layer, selecting the
+        layers that attend to `latents`, see `build_args_using_factories`.
       w_init: kernel initializer for the MultiHeadAttention modules.
       b_init: bias initializer for the MultiHeadAttention modules.
       rngs: random number generator for parameter initialization.
@@ -901,6 +944,7 @@ class TransformerBase(nnx.Module, abc.ABC):
         use_additive_pos_encoding=use_additive_pos_encoding,
         normalize_qk=normalize_qk,
         normalize_v=normalize_v,
+        cross_attention_layers=cross_attention_layers,
         w_init=w_init,
         b_init=b_init,
         rngs=rngs,
@@ -940,7 +984,6 @@ class TransformerBlocks(TransformerBase):
       z_pos_encoding: typing.Array | None,
   ) -> typing.Array | None:
     """Returns latents `z` as the key source if available."""
-    # TODO(dkochkov): Consider adding class attributes that choose alternatives.
     return z
 
   def attention_value_source(
@@ -951,7 +994,6 @@ class TransformerBlocks(TransformerBase):
       z_pos_encoding: typing.Array | None,
   ) -> typing.Array | None:
     """Returns latents `z` as the value source if available."""
-    # TODO(dkochkov): Consider adding class attributes that choose alternatives.
     return z
 
   def apply_attention(
@@ -1193,7 +1235,7 @@ class WindowTransformerBlocks(TransformerBase):
   def attention_biases(
       self,
       inputs_pos_encoding: typing.Array | None,
-      latents_pos_encoding: typing.Array | None,
+      latents_pos_encoding: typing.Array | None = None,
   ) -> Sequence[typing.Array | None]:
     """Returns relative position biases of windowed attention for each layer.
 
@@ -1202,7 +1244,8 @@ class WindowTransformerBlocks(TransformerBase):
 
     Args:
       inputs_pos_encoding: Positional encodings of inputs [P, spatial...].
-      latents_pos_encoding: Positional encodings of latents (keys/values).
+      latents_pos_encoding: Positional encodings of latents (keys/values), or
+        None for self-attention over the inputs.
 
     Returns:
       A sequence of `n_layers` biases [num_windows, NUM_HEADS, Lq_win, Lkv_win]
@@ -1210,7 +1253,7 @@ class WindowTransformerBlocks(TransformerBase):
     """
     if self.relative_bias_net is None:
       return [None] * self.n_layers
-    if inputs_pos_encoding is None or latents_pos_encoding is None:
+    if inputs_pos_encoding is None:
       raise ValueError(
           'inputs_pos_encoding is required when relative_bias_net is set.'
       )
@@ -1223,9 +1266,12 @@ class WindowTransformerBlocks(TransformerBase):
           self.inputs_bc,
           q_shifts,
       )
-      kv_pe_windows = self._to_windows(
-          latents_pos_encoding, self.kv_window_shape, self.kv_bc, kv_shifts
-      )
+      if latents_pos_encoding is None:
+        kv_pe_windows = q_pe_windows
+      else:
+        kv_pe_windows = self._to_windows(
+            latents_pos_encoding, self.kv_window_shape, self.kv_bc, kv_shifts
+        )
       return self._attention_bias(q_pe_windows, kv_pe_windows)
 
     unshifted_bias = bias_for_layer(0)
@@ -1262,12 +1308,10 @@ class WindowTransformerBlocks(TransformerBase):
     )
 
   def attention_key_source(self, x, z, x_pos_encoding, z_pos_encoding):
-    # TODO(dkochkov): Consider adding class attributes that choose alternatives.
     return z
 
   def attention_value_source(self, x, z, x_pos_encoding, z_pos_encoding):
-    # TODO(dkochkov): Consider adding class attributes that choose alternatives.
-    return z  # Parameterize by class attributes?
+    return z
 
   def apply_attention(
       self,
@@ -1386,6 +1430,7 @@ class WindowTransformerBlocks(TransformerBase):
       dense_factory: standard_layers.UnaryLayerFactory,
       normalize_qk: bool = False,
       normalize_v: bool = False,
+      cross_attention_layers: Sequence[bool] | None = None,
       w_init=nnx.initializers.xavier_uniform(),
       b_init=nnx.initializers.zeros,
       rngs: nnx.Rngs,
@@ -1419,6 +1464,9 @@ class WindowTransformerBlocks(TransformerBase):
       dense_factory: factory for generating dense layers that follow attention.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
+      cross_attention_layers: optional flags, one per layer, selecting the
+        layers that attend to `latents`, see
+        `TransformerBase.build_args_using_factories`.
       w_init: kernel initializer for the MultiHeadAttention modules.
       b_init: bias initializer for the MultiHeadAttention modules.
       rngs: random number generator for parameter initialization.
@@ -1440,6 +1488,7 @@ class WindowTransformerBlocks(TransformerBase):
         use_additive_pos_encoding=use_additive_pos_encoding,
         normalize_qk=normalize_qk,
         normalize_v=normalize_v,
+        cross_attention_layers=cross_attention_layers,
         w_init=w_init,
         b_init=b_init,
         rngs=rngs,
