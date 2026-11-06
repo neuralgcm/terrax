@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import abc
 import dataclasses
 import functools
 from typing import Any, Iterable, Literal, Self, Sequence, TYPE_CHECKING, cast
@@ -1208,6 +1209,570 @@ class SphericalHarmonicGrid(cx.Coordinate):
           'restoration?'
       )
 
+    return candidate
+
+
+_EARTH_RADIUS_KM = 6371.0
+
+
+class PatchCoordinate(cx.Coordinate):
+  """Base class for 2D local patch coordinates."""
+
+  @property
+  @abc.abstractmethod
+  def dims(self) -> tuple[str, str]:
+    raise NotImplementedError
+
+  @property
+  @abc.abstractmethod
+  def shape(self) -> tuple[int, int]:
+    raise NotImplementedError
+
+  def _remap_indexers_to_labeled_axes(
+      self, indexers: dict[str | cx.Coordinate, Any]
+  ) -> tuple[
+      dict[str | cx.Coordinate, Any], tuple[cx.LabeledAxis, cx.LabeledAxis]
+  ]:
+    """Remaps SelectedAxis indexers to LabeledAxes for 1D indexing."""
+    dim0, dim1 = self.dims
+    ax0 = cx.LabeledAxis(dim0, np.asarray(self.fields[dim0].data))
+    ax1 = cx.LabeledAxis(dim1, np.asarray(self.fields[dim1].data))
+    sel0, sel1 = self.axes
+    remap: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        sel0: ax0,
+        sel1: ax1,
+    }
+    axes = (ax0, ax1)
+    indexers = {
+        remap.get(k, k): remap.get(v, v) if cx.is_coord(v) else v
+        for k, v in indexers.items()
+    }
+    return indexers, axes
+
+  def map_indexers(
+      self,
+      indexers: dict[str | cx.Coordinate, Any],
+      method: coordax.experimental.SelMethod = None,
+  ) -> tuple[dict[str | cx.Coordinate, Any], set[str | cx.Coordinate]]:
+    """Maps indexers along the two patch axes using 1D LabeledAxes."""
+    dim0, dim1 = self.dims
+    indexers, (ax0, ax1) = self._remap_indexers_to_labeled_axes(indexers)
+    mapped, consumed = {}, set()
+    if dim0 in indexers or ax0 in indexers:
+      sub_mapped, sub_consumed = ax0.map_indexers(indexers, method=method)
+      mapped.update(sub_mapped)
+      consumed.update(sub_consumed)
+    if dim1 in indexers or ax1 in indexers:
+      sub_mapped, sub_consumed = ax1.map_indexers(indexers, method=method)
+      mapped.update(sub_mapped)
+      consumed.update(sub_consumed)
+    from_labeled: dict[str | cx.Coordinate, str | cx.Coordinate] = {
+        l_ax: ax for l_ax, ax in zip((ax0, ax1), self.axes)
+    }
+    consumed = {from_labeled.get(ax, ax) for ax in consumed}
+    mapped = {from_labeled.get(k, k): v for k, v in mapped.items()}
+    return mapped, consumed
+
+  def _isel(self, indexers: dict[str | cx.Coordinate, Any]) -> cx.Coordinate:
+    indexers, l_axes = self._remap_indexers_to_labeled_axes(indexers)
+    l_isel = cx.coords.compose(*l_axes).isel(indexers)
+    labeled_to_orig: dict[cx.Coordinate, cx.Coordinate] = {
+        ax: orig for ax, orig in zip(l_axes, self.axes)
+    }
+    return cx.coords.compose(
+        *[labeled_to_orig.get(c, c) for c in l_isel.axes]
+    )
+
+  def _reduce_mean(
+      self,
+      x: cx.Field,
+      weights: cx.Field | None = None,
+      *,
+      skipna: bool = True,
+  ) -> cx.Field:
+    """Computes unweighted or weighted mean of `x` across `self`."""
+    if not cx.contains_dims(x, self):
+      raise ValueError(f'{x=} does not contain all axes of {self=}.')
+    if weights is not None:
+      w = weights.broadcast_like(x.coordinate)
+      if not skipna:
+
+        def _weighted_mean(vals, w_arr):
+          w_sum = jnp.sum(w_arr)
+          has_valid = w_sum > 0.0
+          safe_w_sum = jnp.where(has_valid, w_sum, 1.0)
+          return jnp.where(
+              has_valid, jnp.sum(vals * w_arr) / safe_w_sum, jnp.nan
+          )
+
+        return cx.cmap(_weighted_mean)(x.untag(self), w.untag(self))
+
+      def _weighted_nanmean(vals, w_arr):
+        valid = jnp.isfinite(vals) & jnp.isfinite(w_arr)
+        safe_vals = jnp.where(valid, vals, 0.0)
+        safe_w = jnp.where(valid, w_arr, 0.0)
+        w_sum = jnp.sum(safe_w)
+        has_valid = w_sum > 0.0
+        safe_w_sum = jnp.where(has_valid, w_sum, 1.0)
+        return jnp.where(
+            has_valid,
+            jnp.sum(safe_vals * safe_w) / safe_w_sum,
+            jnp.nan,
+        )
+
+      return cx.cmap(_weighted_nanmean)(x.untag(self), w.untag(self))
+
+    reduce_fn = jnp.nanmean if skipna else jnp.mean
+    return cx.cmap(reduce_fn)(x.untag(self))
+
+
+@jax.tree_util.register_static
+@dataclasses.dataclass(frozen=True)
+class SwathPatch(PatchCoordinate):
+  """2D satellite swath patch coordinate along ('scanline', 'fov').
+
+  Represents a rectangular window of `scanlines` along-track scans by `fov`
+  cross-track fields-of-view from a scanning satellite instrument. Exposes
+  cross-track scan angles and spherical surface-area footprint weights along
+  the `'fov'` axis.
+
+  Attributes:
+    scanlines: Number of along-track scanlines in the patch.
+    fov: Number of cross-track fields-of-view per scanline.
+    max_scan_angle: Maximum cross-track scan angle from nadir in degrees at the
+      outermost FOV cell centers.
+    satellite_altitude_km: Nominal satellite orbital altitude above Earth's
+      surface in kilometers.
+  """
+
+  scanlines: int
+  fov: int
+  max_scan_angle: float
+  satellite_altitude_km: float
+
+  def __post_init__(self):
+    if self.scanlines < 1 or self.fov < 1:
+      raise ValueError(
+          'scanlines and fov must be >= 1, got'
+          f' {self.scanlines=}, {self.fov=}.'
+      )
+    if not (0.0 <= self.max_scan_angle < 90.0):
+      raise ValueError(
+          'max_scan_angle must be in [0, 90) degrees, got'
+          f' {self.max_scan_angle=}.'
+      )
+    if self.satellite_altitude_km < 0.0:
+      raise ValueError(
+          'Underground satellites are not supported yet, got'
+          f' {self.satellite_altitude_km=}.'
+      )
+    r_ratio = 1.0 + self.satellite_altitude_km / _EARTH_RADIUS_KM
+    sin_zenith_max = r_ratio * np.sin(np.deg2rad(self.max_scan_angle))
+    if sin_zenith_max >= 1.0:
+      horizon_deg = np.rad2deg(np.arcsin(1.0 / r_ratio))
+      raise ValueError(
+          f'{self.max_scan_angle=} exceeds geometric horizon'
+          f' ({horizon_deg:.2f} deg) for {self.satellite_altitude_km=} km.'
+      )
+
+  @property
+  def dims(self) -> tuple[str, str]:
+    return ('scanline', 'fov')
+
+  @property
+  def shape(self) -> tuple[int, int]:
+    return (self.scanlines, self.fov)
+
+  def _tuple(self):
+    return (
+        self.scanlines,
+        self.fov,
+        self.max_scan_angle,
+        self.satellite_altitude_km,
+    )
+
+  def __lt__(self, other) -> bool:
+    if not isinstance(other, SwathPatch):
+      return NotImplemented
+    return self._tuple() < other._tuple()
+
+  @property
+  def fields(self) -> dict[str, cx.Field]:
+    scanline_axis, fov_axis = self.axes
+    return {
+        'scanline': cx.field(np.arange(self.scanlines), scanline_axis),
+        'fov': cx.field(np.arange(self.fov), fov_axis),
+    }
+
+  @classmethod
+  def atms(cls, scanlines: int = 135) -> Self:
+    """Returns a SwathPatch configured with nominal JPSS ATMS geometry."""
+    return cls(
+        scanlines=scanlines,
+        fov=96,
+        max_scan_angle=52.725,
+        satellite_altitude_km=833.0,
+    )
+
+  @functools.cached_property
+  def scan_angles(self) -> cx.Field:
+    """Nominal cross-track scan angles in degrees along 'fov'."""
+    _, fov_axis = self.axes
+    with jax.ensure_compile_time_eval():
+      if self.fov == 1:
+        angles = jnp.zeros(1, dtype=jnp.float32)
+      else:
+        angles = jnp.linspace(
+            -self.max_scan_angle,
+            self.max_scan_angle,
+            self.fov,
+            dtype=jnp.float32,
+        )
+      return cx.field(angles, fov_axis)
+
+  @functools.cached_property
+  def footprint_weights(self) -> cx.Field:
+    """Normalized relative footprint area weights along 'fov' (mean = 1)."""
+    _, fov_axis = self.axes
+    r_sat = _EARTH_RADIUS_KM + self.satellite_altitude_km
+    r_ratio = r_sat / _EARTH_RADIUS_KM
+
+    def _normalize_weights(scan_deg):
+      scan_rad = jnp.deg2rad(jnp.abs(scan_deg))
+      sin_zenith = jnp.clip(r_ratio * jnp.sin(scan_rad), 0.0, 1.0)
+      cos_zenith = jnp.sqrt(jnp.maximum(1.0 - sin_zenith**2, 1e-12))
+      zenith_rad = jnp.arcsin(sin_zenith)
+      psi = zenith_rad - scan_rad
+      slant_range = r_sat * jnp.cos(scan_rad) - _EARTH_RADIUS_KM * cos_zenith
+      raw_area = (
+          jnp.cos(psi)
+          * (slant_range / _EARTH_RADIUS_KM)
+          / jnp.maximum(cos_zenith, 1e-6)
+      )
+      return raw_area / jnp.mean(raw_area)
+
+    with jax.ensure_compile_time_eval():
+      return cx.cmap(_normalize_weights)(
+          self.scan_angles.untag(fov_axis)
+      ).tag(fov_axis)
+
+  def mean(
+      self,
+      x: cx.Field,
+      *,
+      area_weighted: bool = False,
+      skipna: bool = True,
+  ) -> cx.Field:
+    """Computes the mean of `x` across the ('scanline', 'fov') axes."""
+    weights = self.footprint_weights if area_weighted else None
+    return self._reduce_mean(x, weights=weights, skipna=skipna)
+
+  def to_xarray(self) -> dict[str, xarray.Variable]:
+    variables = super().to_xarray()
+    metadata = dict(
+        max_scan_angle=self.max_scan_angle,
+        satellite_altitude_km=self.satellite_altitude_km,
+    )
+    variables['scanline'].attrs = metadata
+    variables['fov'].attrs = metadata
+    return variables
+
+  @classmethod
+  def from_xarray(
+      cls, dims: tuple[str, ...], coords: xarray.Coordinates
+  ) -> Self | cx.coords.NoCoordinateMatch:
+    if dims[:2] != ('scanline', 'fov'):
+      return cx.coords.NoCoordinateMatch(
+          f"leading dimensions {dims[:2]!r} are not ('scanline', 'fov')"
+      )
+    if 'scanline' not in coords or 'fov' not in coords:
+      return cx.coords.NoCoordinateMatch(
+          "missing 'scanline' or 'fov' coordinate variables"
+      )
+    if coords['scanline'].dims != ('scanline',):
+      return cx.coords.NoCoordinateMatch('scanline is not a 1D coordinate')
+    if coords['fov'].dims != ('fov',):
+      return cx.coords.NoCoordinateMatch('fov is not a 1D coordinate')
+
+    scanlines = coords.sizes['scanline']
+    fov = coords.sizes['fov']
+    if not np.array_equal(coords['scanline'].data, np.arange(scanlines)):
+      return cx.coords.NoCoordinateMatch(
+          'scanline coordinate is not sequential integers 0..scanlines-1'
+      )
+    if not np.array_equal(coords['fov'].data, np.arange(fov)):
+      return cx.coords.NoCoordinateMatch(
+          'fov coordinate is not sequential integers 0..fov-1'
+      )
+
+    attrs = coords['scanline'].attrs or coords['fov'].attrs
+    if 'max_scan_angle' not in attrs or 'satellite_altitude_km' not in attrs:
+      return cx.coords.NoCoordinateMatch(
+          'max_scan_angle or satellite_altitude_km not in "scanline" or "fov"'
+          ' attributes'
+      )
+    return cls(
+        scanlines=scanlines,
+        fov=fov,
+        max_scan_angle=float(attrs['max_scan_angle']),
+        satellite_altitude_km=float(attrs['satellite_altitude_km']),
+    )
+
+
+@jax.tree_util.register_static
+@dataclasses.dataclass(frozen=True)
+class LonLatPatch(PatchCoordinate):
+  """2D index-aligned sub-window of LonLatGrid along ('patch_lon', 'patch_lat').
+
+  Represents a fixed-size `(longitude_nodes, latitude_nodes)` rectangular patch
+  sliced from a parent `LonLatGrid`. Because the coordinate dimensions are node
+  offsets `(0..longitude_nodes-1, 0..latitude_nodes-1)` rather than fixed global
+  degrees, multiple patches at different geographic locations can be stacked and
+  vectorized along a batch axis while preserving exact alignment with the parent
+  `LonLatGrid`.
+
+  Attributes:
+    longitude_nodes: Number of grid nodes along `'patch_lon'`.
+    latitude_nodes: Number of grid nodes along `'patch_lat'`.
+  """
+
+  longitude_nodes: int
+  latitude_nodes: int
+
+  def __post_init__(self):
+    if self.longitude_nodes < 1 or self.latitude_nodes < 1:
+      raise ValueError(
+          'longitude_nodes and latitude_nodes must be >= 1, got'
+          f' {self.longitude_nodes=}, {self.latitude_nodes=}.'
+      )
+
+  @property
+  def dims(self) -> tuple[str, str]:
+    return ('patch_lon', 'patch_lat')
+
+  @property
+  def shape(self) -> tuple[int, int]:
+    return (self.longitude_nodes, self.latitude_nodes)
+
+  def _tuple(self):
+    return (self.longitude_nodes, self.latitude_nodes)
+
+  def __lt__(self, other) -> bool:
+    if not isinstance(other, LonLatPatch):
+      return NotImplemented
+    return self._tuple() < other._tuple()
+
+  @property
+  def fields(self) -> dict[str, cx.Field]:
+    lon_axis, lat_axis = self.axes
+    return {
+        'patch_lon': cx.field(np.arange(self.longitude_nodes), lon_axis),
+        'patch_lat': cx.field(np.arange(self.latitude_nodes), lat_axis),
+    }
+
+  def mean(
+      self,
+      x: cx.Field,
+      *,
+      latitude: cx.Field | None = None,
+      skipna: bool = True,
+  ) -> cx.Field:
+    """Computes the mean of `x` across ('patch_lon', 'patch_lat').
+
+    Args:
+      x: Field containing `self` in its coordinates.
+      latitude: Optional latitude field in degrees containing `self` (or
+        `self.axes[1]`) used for `cos(latitude)` spherical area weighting.
+      skipna: Whether to ignore NaN values when averaging.
+
+    Returns:
+      Field with `('patch_lon', 'patch_lat')` reduced.
+    """
+    if latitude is None:
+      return self._reduce_mean(x, weights=None, skipna=skipna)
+    cos_lat = cx.cmap(
+        lambda lat_deg: jnp.maximum(jnp.cos(jnp.deg2rad(lat_deg)), 0.0)
+    )(latitude)
+    return self._reduce_mean(x, weights=cos_lat, skipna=skipna)
+
+  @classmethod
+  def from_xarray(
+      cls, dims: tuple[str, ...], coords: xarray.Coordinates
+  ) -> Self | cx.coords.NoCoordinateMatch:
+    if dims[:2] != ('patch_lon', 'patch_lat'):
+      return cx.coords.NoCoordinateMatch(
+          f"leading dimensions {dims[:2]!r} are not ('patch_lon', 'patch_lat')"
+      )
+    if 'patch_lon' not in coords or 'patch_lat' not in coords:
+      return cx.coords.NoCoordinateMatch(
+          "missing 'patch_lon' or 'patch_lat' coordinate variables"
+      )
+    if coords['patch_lon'].dims != ('patch_lon',):
+      return cx.coords.NoCoordinateMatch('patch_lon is not a 1D coordinate')
+    if coords['patch_lat'].dims != ('patch_lat',):
+      return cx.coords.NoCoordinateMatch('patch_lat is not a 1D coordinate')
+    n_lon = coords.sizes['patch_lon']
+    n_lat = coords.sizes['patch_lat']
+    if not np.array_equal(coords['patch_lon'].data, np.arange(n_lon)):
+      return cx.coords.NoCoordinateMatch(
+          'patch_lon is not sequential integers 0..longitude_nodes-1'
+      )
+    if not np.array_equal(coords['patch_lat'].data, np.arange(n_lat)):
+      return cx.coords.NoCoordinateMatch(
+          'patch_lat is not sequential integers 0..latitude_nodes-1'
+      )
+    return cls(longitude_nodes=n_lon, latitude_nodes=n_lat)
+
+
+@jax.tree_util.register_static
+@dataclasses.dataclass(frozen=True)
+class LocalGridPatch(PatchCoordinate):
+  """2D uniform local rotated-sphere grid patch along ('patch_x', 'patch_y').
+
+  Defines a regular `(x_nodes, y_nodes)` grid with spacing `(dx_deg, dy_deg)` in
+  degrees centered at `(0, 0)` on a local rotated equator. When embedded at any
+  geographic center `(center_lon, center_lat)` via
+  `patch_geometry.local_patch_lon_lat`, the patch is free of polar meridian
+  convergence and dateline discontinuities.
+
+  Attributes:
+    x_nodes: Number of grid nodes along `'patch_x'`.
+    y_nodes: Number of grid nodes along `'patch_y'`.
+    dx_deg: Angular spacing in degrees along `'patch_x'`.
+    dy_deg: Angular spacing in degrees along `'patch_y'`.
+  """
+
+  x_nodes: int
+  y_nodes: int
+  dx_deg: float
+  dy_deg: float
+
+  def __post_init__(self):
+    if self.x_nodes < 1 or self.y_nodes < 1:
+      raise ValueError(
+          f'x_nodes and y_nodes must be >= 1, got {self.x_nodes=},'
+          f' {self.y_nodes=}.'
+      )
+    if self.dx_deg <= 0.0 or self.dy_deg <= 0.0:
+      raise ValueError(
+          f'dx_deg and dy_deg must be > 0, got {self.dx_deg=}, {self.dy_deg=}.'
+      )
+    span_x = (self.x_nodes - 1) * self.dx_deg
+    span_y = (self.y_nodes - 1) * self.dy_deg
+    if span_x >= 360.0 or span_y >= 180.0:
+      raise ValueError(
+          f'LocalGridPatch angular span ({span_x=}, {span_y=}) must be'
+          ' < (360, 180) degrees.'
+      )
+
+  @property
+  def dims(self) -> tuple[str, str]:
+    return ('patch_x', 'patch_y')
+
+  @property
+  def shape(self) -> tuple[int, int]:
+    return (self.x_nodes, self.y_nodes)
+
+  def _tuple(self):
+    return (self.x_nodes, self.y_nodes, self.dx_deg, self.dy_deg)
+
+  def __lt__(self, other) -> bool:
+    if not isinstance(other, LocalGridPatch):
+      return NotImplemented
+    return self._tuple() < other._tuple()
+
+  @property
+  def fields(self) -> dict[str, cx.Field]:
+    x_axis, y_axis = self.axes
+    half_x = 0.5 * (self.x_nodes - 1) * self.dx_deg
+    half_y = 0.5 * (self.y_nodes - 1) * self.dy_deg
+    xs = (
+        np.zeros(1, dtype=np.float32)
+        if self.x_nodes == 1
+        else np.linspace(-half_x, half_x, self.x_nodes, dtype=np.float32)
+    )
+    ys = (
+        np.zeros(1, dtype=np.float32)
+        if self.y_nodes == 1
+        else np.linspace(-half_y, half_y, self.y_nodes, dtype=np.float32)
+    )
+    return {
+        'patch_x': cx.field(xs, x_axis),
+        'patch_y': cx.field(ys, y_axis),
+    }
+
+  @functools.cached_property
+  def area_weights(self) -> cx.Field:
+    """Normalized spherical area weights cos(patch_y) along 'patch_y'."""
+    _, y_axis = self.axes
+
+    def _norm_cos(eta_deg):
+      cos_y = jnp.cos(jnp.deg2rad(eta_deg))
+      return cos_y / jnp.mean(cos_y)
+
+    with jax.ensure_compile_time_eval():
+      return cx.cmap(_norm_cos)(self.fields['patch_y'].untag(y_axis)).tag(
+          y_axis
+      )
+
+  def mean(
+      self,
+      x: cx.Field,
+      *,
+      area_weighted: bool = False,
+      skipna: bool = True,
+  ) -> cx.Field:
+    """Computes the mean of `x` across ('patch_x', 'patch_y')."""
+    weights = self.area_weights if area_weighted else None
+    return self._reduce_mean(x, weights=weights, skipna=skipna)
+
+  def to_xarray(self) -> dict[str, xarray.Variable]:
+    variables = super().to_xarray()
+    metadata = dict(dx_deg=self.dx_deg, dy_deg=self.dy_deg)
+    variables['patch_x'].attrs = metadata
+    variables['patch_y'].attrs = metadata
+    return variables
+
+  @classmethod
+  def from_xarray(
+      cls, dims: tuple[str, ...], coords: xarray.Coordinates
+  ) -> Self | cx.coords.NoCoordinateMatch:
+    if dims[:2] != ('patch_x', 'patch_y'):
+      return cx.coords.NoCoordinateMatch(
+          f"leading dimensions {dims[:2]!r} are not ('patch_x', 'patch_y')"
+      )
+    if 'patch_x' not in coords or 'patch_y' not in coords:
+      return cx.coords.NoCoordinateMatch(
+          "missing 'patch_x' or 'patch_y' coordinate variables"
+      )
+    if coords['patch_x'].dims != ('patch_x',):
+      return cx.coords.NoCoordinateMatch('patch_x is not a 1D coordinate')
+    if coords['patch_y'].dims != ('patch_y',):
+      return cx.coords.NoCoordinateMatch('patch_y is not a 1D coordinate')
+
+    attrs = coords['patch_x'].attrs or coords['patch_y'].attrs
+    if 'dx_deg' not in attrs or 'dy_deg' not in attrs:
+      return cx.coords.NoCoordinateMatch(
+          'dx_deg or dy_deg not in "patch_x" or "patch_y" attributes'
+      )
+    candidate = cls(
+        x_nodes=coords.sizes['patch_x'],
+        y_nodes=coords.sizes['patch_y'],
+        dx_deg=float(attrs['dx_deg']),
+        dy_deg=float(attrs['dy_deg']),
+    )
+    if not np.allclose(
+        coords['patch_x'].data,
+        np.asarray(candidate.fields['patch_x'].data),
+        atol=1e-5,
+    ):
+      return cx.coords.NoCoordinateMatch('patch_x values do not match')
+    if not np.allclose(
+        coords['patch_y'].data,
+        np.asarray(candidate.fields['patch_y'].data),
+        atol=1e-5,
+    ):
+      return cx.coords.NoCoordinateMatch('patch_y values do not match')
     return candidate
 
 
