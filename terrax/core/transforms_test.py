@@ -1873,6 +1873,35 @@ class NestedTransformTest(parameterized.TestCase):
       actual = transform(inputs)
       chex.assert_trees_all_equal(actual, {'a': cx.field(jnp.zeros(2), x)})
 
+  def test_sigmoid_gate(self):
+    x = cx.SizedAxis('x', 3)
+    inputs = {
+        'delta': cx.field(jnp.array([2.0, 2.0, 2.0]), x),
+        'gate': cx.field(jnp.array([-100.0, 0.0, 100.0]), x),
+        'other': cx.field(jnp.ones(3), x),
+    }
+    with self.subTest('default_bias'):
+      transform = transforms.SigmoidGate('delta', 'gate', out_key='embedding')
+      actual = transform(inputs)
+      expected = {'embedding': cx.field(jnp.array([0.0, 1.0, 2.0]), x)}
+      chex.assert_trees_all_close(actual, expected)
+
+    with self.subTest('bias_shifts_logits_and_include_remaining'):
+      transform = transforms.SigmoidGate(
+          'delta',
+          'gate',
+          out_key='embedding',
+          gate_bias=-100.0,
+          include_remaining=True,
+      )
+      actual = transform(inputs)
+      self.assertEqual(set(actual), {'embedding', 'other'})
+      # Shifted logits [-200, -100, 0] give gates [0, 0, 0.5].
+      np.testing.assert_allclose(
+          actual['embedding'].data, jnp.array([0.0, 0.0, 1.0])
+      )
+      chex.assert_trees_all_equal(actual['other'], inputs['other'])
+
   def test_apply_mask(self):
     x = cx.SizedAxis('x', 2)
     inputs = {

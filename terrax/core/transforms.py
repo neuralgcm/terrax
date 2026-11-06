@@ -2714,6 +2714,53 @@ class EntrywiseBinaryOp(TransformABC):
 
 
 @nnx.dataclass
+class SigmoidGate(PytreeTransformABC):
+  """Scales a field by a sigmoid gate computed from another field.
+
+  Returns ``sigmoid(inputs[gate_key] + gate_bias) * inputs[value_key]`` under
+  `out_key`. Gate logits are typically predicted alongside the gated value by a
+  learned transform (e.g. as two entries of its `target_split_axes`). With a
+  negative `gate_bias` (e.g. -3) gates start almost closed, so gated updates
+  are small perturbations at initialization and have to be opened by training.
+
+  Args:
+    value_key: Key of the field to gate.
+    gate_key: Key of the field holding gate logits, aligned with `value_key`.
+    out_key: Key under which the gated field is returned.
+    gate_bias: Constant added to the gate logits before the sigmoid.
+    include_remaining: If True, fields other than `value_key` and `gate_key`
+      are passed through to the output.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {
+    ...     'delta': cx.field(jnp.array([2.0, 2.0])),
+    ...     'gate': cx.field(jnp.array([-100.0, 100.0])),
+    ... }
+    >>> gate = transforms.SigmoidGate('delta', 'gate', out_key='update')
+    >>> gate(inputs)['update'].data
+    Array([0., 2.], dtype=float32)
+  """
+
+  value_key: str
+  gate_key: str
+  out_key: str
+  gate_bias: float = 0.0
+  include_remaining: bool = False
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    gate_fn = cx.cmap(lambda x: jax.nn.sigmoid(x + self.gate_bias))
+    gated = gate_fn(inputs[self.gate_key]) * inputs[self.value_key]
+    outputs = {self.out_key: gated}
+    if self.include_remaining:
+      skip_keys = {self.value_key, self.gate_key}
+      outputs |= {k: v for k, v in inputs.items() if k not in skip_keys}
+    return outputs
+
+
+@nnx.dataclass
 class ProjectOntoBasis(TransformABC):
   """Projects inputs onto basis vectors and computes dot product.
 
