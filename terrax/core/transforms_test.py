@@ -14,6 +14,7 @@
 
 """Tests that transforms produce outputs with expected structure."""
 
+import dataclasses
 import operator
 from typing import Callable
 
@@ -1455,6 +1456,79 @@ class ExtractLocalPatchFromGridTest(parameterized.TestCase):
     ]
     np.testing.assert_array_equal(output['f'].data, expected)
 
+  def test_named_grids_and_arc_length_offsets(self):
+    """Offsets of fields on several grids are keyed by name and in arc length."""
+    coarse = coordinates.LonLatGrid.TL31()
+    fine = coordinates.LonLatGrid.TL63()
+    inputs = {
+        'longitude': cx.field(15.0),
+        'latitude': cx.field(60.0),
+        'a': cx.field(np.ones(coarse.shape), coarse),
+        'b': cx.field(np.ones(fine.shape), fine),
+    }
+    transform = transforms.ExtractLocalPatchFromGrid(
+        width=2,
+        offset_names={'coarse': coarse, 'fine': fine},
+        offset_radius=2.0,
+    )
+    output = transform(inputs)
+    self.assertEqual(
+        set(output),
+        {
+            'a', 'b',
+            'delta_longitude_coarse', 'delta_latitude_coarse',
+            'delta_longitude_fine', 'delta_latitude_fine',
+            'delta_x_coarse', 'delta_y_coarse', 'delta_x_fine', 'delta_y_fine',
+        },
+    )
+    for name in ('coarse', 'fine'):
+      dlon = output[f'delta_longitude_{name}']
+      dlat = output[f'delta_latitude_{name}']
+      self.assertEqual(dlon.dims, ('longitude', 'latitude'))
+      # Even width patches bracket the query: offsets of both signs.
+      self.assertLess(dlon.data.min(), 0.0)
+      self.assertGreater(dlon.data.max(), 0.0)
+      np.testing.assert_allclose(
+          output[f'delta_x_{name}'].data,
+          2.0 * np.deg2rad(dlon.data) * np.cos(np.deg2rad(60.0)),
+          rtol=1e-6,
+      )
+      np.testing.assert_allclose(
+          output[f'delta_y_{name}'].data, 2.0 * np.deg2rad(dlat.data), rtol=1e-6
+      )
+    # The finer grid has smaller offsets.
+    self.assertLess(
+        np.abs(output['delta_x_fine'].data).max(),
+        np.abs(output['delta_x_coarse'].data).max(),
+    )
+
+    with self.subTest('unnamed_grid_raises'):
+      with self.assertRaisesRegex(ValueError, 'not in offset_names'):
+        transforms.ExtractLocalPatchFromGrid(
+            width=2, offset_names={'coarse': coarse}
+        )(inputs)
+
+    with self.subTest('arc_length_without_degrees'):
+      output = transforms.ExtractLocalPatchFromGrid(
+          width=2,
+          include_offset=False,
+          offset_names={'coarse': coarse, 'fine': fine},
+          offset_radius=1.0,
+      )(inputs)
+      self.assertEqual(
+          set(output),
+          {'a', 'b', 'delta_x_coarse', 'delta_y_coarse', 'delta_x_fine',
+           'delta_y_fine'},
+      )
+
+    with self.subTest('padded_lon_lat_grid_matches'):
+      padded_coarse = dataclasses.replace(coarse, lon_lat_padding=(2, 1))
+      padded_inputs = inputs | {
+          'a': cx.field(np.ones(padded_coarse.shape), padded_coarse),
+      }
+      padded_out = transform(padded_inputs)
+      self.assertIn('delta_x_coarse', padded_out)
+
   def test_odd_width_patch(self):
     """Verifies odd width=3 patch is centered on the nearest neighbor."""
     lons = np.arange(0, 360, 10)
@@ -2228,6 +2302,81 @@ class NestedTransformTest(parameterized.TestCase):
     actual = transform(inputs)
     self.assertIn('proj', actual)
     chex.assert_trees_all_close(actual['proj'], cx.field(22.5))
+
+  def test_concat_fields(self):
+    batch = cx.SizedAxis('batch', 2)
+    cell = cx.SizedAxis('cell', 2)
+    feat = cx.SizedAxis('features', 3)
+    token = cx.SizedAxis('token', 4)
+    f_a = cx.field(jnp.arange(12.0).reshape(2, 2, 3), batch, cell, feat)
+    f_b = cx.field(jnp.arange(100.0, 112.0).reshape(2, 2, 3), batch, cell, feat)
+    f_keep = cx.field(jnp.ones((2, 3)), batch, feat)
+    inputs = {'b': f_b, 'a': f_a, 'keep': f_keep}
+
+    with self.subTest('middle_axis_coord_out_axis'):
+      actual = transforms.ConcatFields(
+          cell,
+          out_key='tokens',
+          out_axis=token,
+          keys=('a', 'b'),
+          include_remaining=True,
+      )(inputs)
+      expected_tokens = cx.field(
+          jnp.concatenate([f_a.data, f_b.data], axis=1), batch, token, feat
+      )
+      self.assertSameElements(actual.keys(), ['tokens', 'keep'])
+      cx.testing.assert_fields_allclose(actual['tokens'], expected_tokens)
+      cx.testing.assert_fields_allclose(actual['keep'], f_keep)
+
+    with self.subTest('unequal_lengths_str_axis'):
+      unequal = {
+          'first': cx.field(jnp.ones((2, 2, 3)), batch, 'x', feat),
+          'second': cx.field(jnp.zeros((2, 3, 3)), batch, 'x', feat),
+      }
+      out = transforms.ConcatFields('x', out_key='merged', out_axis='y')(
+          unequal
+      )
+      expected = cx.field(
+          jnp.concatenate(
+              [unequal['first'].data, unequal['second'].data], axis=1
+          ),
+          batch,
+          'y',
+          feat,
+      )
+      cx.testing.assert_fields_allclose(out['merged'], expected)
+
+    with self.subTest('errors'):
+      with self.assertRaisesRegex(ValueError, 'no fields to concatenate'):
+        transforms.ConcatFields('cell', out_key='t', out_axis='t', keys=())(
+            inputs
+        )
+      with self.assertRaisesRegex(ValueError, 'collides with an unselected'):
+        transforms.ConcatFields(
+            cell,
+            out_key='keep',
+            out_axis='t',
+            keys=('a',),
+            include_remaining=True,
+        )(inputs)
+      xy = cx.coords.compose(batch, cell)
+      unnamed = cx.DummyAxis(None, 2)
+      with self.assertRaisesRegex(
+          ValueError, '`axis` must be a named 1D coordinate'
+      ):
+        transforms.ConcatFields(xy, out_key='t', out_axis='t')
+      with self.assertRaisesRegex(
+          ValueError, '`axis` must be a named 1D coordinate'
+      ):
+        transforms.ConcatFields(unnamed, out_key='t', out_axis='t')
+      with self.assertRaisesRegex(
+          ValueError, '`out_axis` must be a named 1D coordinate'
+      ):
+        transforms.ConcatFields(cell, out_key='t', out_axis=xy)
+      with self.assertRaisesRegex(
+          ValueError, '`out_axis` must be a named 1D coordinate'
+      ):
+        transforms.ConcatFields(cell, out_key='t', out_axis=unnamed)
 
 
 if __name__ == '__main__':

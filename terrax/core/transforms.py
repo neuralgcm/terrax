@@ -26,13 +26,14 @@ from __future__ import annotations
 
 import abc
 import collections
+import dataclasses
 import functools
 import itertools
 import logging
 import operator
 import re
 import types
-from typing import Any, Callable, Literal, Sequence, TypeAlias, overload
+from typing import Any, Callable, Literal, Mapping, Sequence, TypeAlias, overload
 
 import coordax as cx
 from flax import nnx
@@ -859,6 +860,66 @@ class SplitAxis(PytreeTransformABC):
 
     if self.include_remaining:
       outputs |= {k: v for k, v in inputs.items() if k not in to_split}
+    return outputs
+
+
+@nnx.dataclass
+class ConcatFields(PytreeTransformABC):
+  """Concatenates fields along an axis into a single output field.
+
+  Selected fields are concatenated in sorted key order along ``axis``, keeping
+  the position of ``axis`` in the shared named-axis layout.
+
+  Args:
+    axis: The named 1D coordinate or dimension name to concatenate along.
+    out_key: Key assigned to the concatenated field in the output dictionary.
+    out_axis: The named 1D coordinate or dimension name to tag the concatenated
+      axis with.
+    keys: Optional argument to ``SelectKeys`` selecting fields to concatenate.
+      If ``None``, all fields in ``inputs`` are concatenated.
+    include_remaining: If ``True``, unselected fields are included unchanged.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> inputs = {
+    ...     'a': cx.field(jnp.array([1.0, 2.0]), 'x'),
+    ...     'b': cx.field(jnp.array([3.0]), 'x'),
+    ... }
+    >>> out = transforms.ConcatFields('x', out_key='ab', out_axis='x')(inputs)
+    >>> out['ab'].dims, out['ab'].shape
+    (('x',), (3,))
+  """
+
+  axis: cx.Coordinate | str
+  out_key: str
+  out_axis: cx.Coordinate | str
+  keys: str | Sequence[str] | Callable[[str], bool] | None = None
+  include_remaining: bool = False
+
+  def __post_init__(self):
+    for name, axis in (('axis', self.axis), ('out_axis', self.out_axis)):
+      if isinstance(axis, cx.Coordinate) and (
+          axis.ndim != 1 or axis.dims[0] is None
+      ):
+        raise ValueError(f'`{name}` must be a named 1D coordinate, got {axis}.')
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    to_concat = inputs if self.keys is None else SelectKeys(self.keys)(inputs)
+    if not to_concat:
+      raise ValueError('ConcatFields received no fields to concatenate.')
+    untagged = [f.untag(self.axis) for _, f in sorted(to_concat.items())]
+    outputs = {
+        self.out_key: cx.cpmap(jnp.concatenate)(untagged).tag(self.out_axis)
+    }
+    if self.include_remaining:
+      remaining = {k: v for k, v in inputs.items() if k not in to_concat}
+      if self.out_key in remaining:
+        raise ValueError(
+            f'out_key={self.out_key!r} collides with an unselected key.'
+        )
+      outputs |= remaining
     return outputs
 
 
@@ -2270,19 +2331,32 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
   """Extracts a patch of neighbors from gridded fields around query points.
 
   Splits inputs into query points and gridded data, then extracts local
-  patches from the gridded data centered around each query point.
+  patches from the gridded data centered around each query point. Fields may
+  live on different horizontal grids; patches are extracted on each field's own
+  grid and share the patch dimensions `('longitude', 'latitude')`.
 
   Args:
     width: The width of the square patch to extract. Defaults to 1.
     lon_query_key: Key for query longitudes in inputs.
     lat_query_key: Key for query latitudes in inputs.
-    include_offset: Whether to include coordinates offset relative to queries.
+    include_offset: Whether to include coordinates offset relative to queries
+      in degrees, as `delta_longitude_<name>` and `delta_latitude_<name>`.
+    offset_names: Optional mapping from a name to a horizontal grid (e.g. a
+      `LonLatGrid`). Offsets of fields on that grid are reported under that
+      name; without it, grids are named by their index of first appearance. If
+      given, fields on grids not listed raise a `ValueError`.
+    offset_radius: If set, zonal and meridional arc lengths of the patch cells
+      from the query points on a sphere of this radius are included as
+      `delta_x_<name>` and `delta_y_<name>` (`radius * cos(lat) * dlon` and
+      `radius * dlat` with angles in radians).
   """
 
   width: int = 1
   lon_query_key: str = 'longitude'
   lat_query_key: str = 'latitude'
   include_offset: bool = True
+  offset_names: Mapping[str, cx.Coordinate] | None = None
+  offset_radius: float | None = None
   boundary_condition: boundaries.BoundaryCondition = nnx.data(init=False)
   padding: int = nnx.static(init=False)
 
@@ -2293,6 +2367,24 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
         'longitude': (self.padding, self.padding),
         'latitude': (self.padding, self.padding),
     }
+
+  def _offset_name(self, grid: cx.Coordinate, grid_idx: int) -> str:
+    if self.offset_names is None:
+      return str(grid_idx)
+    # TODO(dkochkov): Standardize comparison of grids up to `lon_lat_padding`
+    # in `core.coordinates` instead of unpadding here.
+    unpad = lambda g: (
+        dataclasses.replace(g, lon_lat_padding=(0, 0))
+        if isinstance(g, coordinates.LonLatGrid)
+        else g
+    )
+    unpadded = unpad(grid)
+    for name, named_grid in self.offset_names.items():
+      if unpad(named_grid) == unpadded:
+        return name
+    raise ValueError(
+        f'Grid {grid} is not in offset_names={list(self.offset_names)}.'
+    )
 
   def _1d_indices(
       self,
@@ -2383,9 +2475,11 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
       patch = extract_fn(lon_indices, lat_indices, untagged_f).tag(patch_coord)
       outputs[k] = patch
 
-    if self.include_offset:
+    radius = self.offset_radius
+    if self.include_offset or radius is not None:
       for grid_idx, (grid, cached_values) in enumerate(cache.items()):
         lon_indices, lat_indices, patch_coord, lon_1d, lat_1d = cached_values
+        name = self._offset_name(grid, grid_idx)
         lons = lon_1d.broadcast_like(grid)
         lats = lat_1d.broadcast_like(grid)
         padded_lon = self.boundary_condition.pad(lons, self.pad_sizes)
@@ -2398,8 +2492,16 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
         ).tag(patch_coord)
 
         norm_lon = cx.cmap(lambda x: jnp.mod(x + 180.0, 360.0) - 180.0)
-        outputs[f'delta_longitude_{grid_idx}'] = norm_lon(patch_lon - lon_query)
-        outputs[f'delta_latitude_{grid_idx}'] = patch_lat - lat_query
+        delta_lon = norm_lon(patch_lon - lon_query)
+        delta_lat = patch_lat - lat_query
+        if self.include_offset:
+          outputs[f'delta_longitude_{name}'] = delta_lon
+          outputs[f'delta_latitude_{name}'] = delta_lat
+        if radius is not None:
+          cos_lat = cx.cmap(lambda x: jnp.cos(jnp.deg2rad(x)))(lat_query)
+          arc = cx.cmap(lambda x: radius * jnp.deg2rad(x))
+          outputs[f'delta_x_{name}'] = arc(delta_lon) * cos_lat
+          outputs[f'delta_y_{name}'] = arc(delta_lat)
 
     return outputs
 
