@@ -314,6 +314,63 @@ class FeatureTransformsTest(parameterized.TestCase):
         {'time': cx.field(jdt.to_datetime('2025-01-09T15:00'))},
     )
 
+  def test_point_cyclic_covariates(self):
+    station = cx.SizedAxis('station', 4)
+    inputs = {
+        'longitude': cx.field(np.array([0.0, 90.0, 180.0, -90.0]), station),
+        'latitude': cx.field(np.array([-45.0, 0.0, 45.0, 60.0]), station),
+        'time': cx.field(jdt.to_datetime('2025-06-21T12:00')),
+        'time_offset': cx.field(np.array([0.0, 3600.0, 0.0, 0.0]), station),
+    }
+
+    with self.subTest('default_axis'):
+      transform = feature_transforms.PointCyclicCovariates()
+      self._test_feature_module(transform, inputs)
+      out = transform(inputs)['cyclic_covariates']
+      expected_axis = cx.SizedAxis('cyclic_covariates_at_loc', 10)
+      self.assertEqual(
+          out.coordinate, cx.coords.compose(station, expected_axis)
+      )
+      self.assertTrue(np.all(np.abs(out.data) <= 1.0 + 1e-6))
+      untagged = out.untag(station, expected_axis).data
+      lat_rad = np.deg2rad(inputs['latitude'].data)
+      np.testing.assert_allclose(untagged[:, 0], np.sin(lat_rad), atol=1e-6)
+      np.testing.assert_allclose(untagged[:, 1], np.cos(lat_rad), atol=1e-6)
+      # Local solar time at 12:00 UTC is noon at lon=0 and midnight at
+      # lon=180 (both without time offset): first diurnal harmonic flips sign.
+      np.testing.assert_allclose(untagged[0, 2:4], -untagged[2, 2:4], atol=1e-5)
+      # Harmonics of day-of-year are shared by stations with equal offsets.
+      np.testing.assert_allclose(untagged[0, 6:], untagged[3, 6:], atol=1e-6)
+
+    with self.subTest('without_latitude_and_time_offset'):
+      transform = feature_transforms.PointCyclicCovariates(
+          num_harmonics=1, include_latitude=False, axis='custom_cyclic'
+      )
+      no_offset_inputs = {k: v for k, v in inputs.items() if k != 'time_offset'}
+      out = transform(no_offset_inputs)['cyclic_covariates']
+      expected_axis = cx.SizedAxis('custom_cyclic', 4)
+      self.assertEqual(
+          out.coordinate, cx.coords.compose(station, expected_axis)
+      )
+
+    with self.subTest('missing_time_raises'):
+      transform = feature_transforms.PointCyclicCovariates()
+      no_time_inputs = {k: v for k, v in inputs.items() if k != 'time'}
+      with self.assertRaisesRegex(ValueError, 'missing required keys'):
+        transform(no_time_inputs)
+
+    with self.subTest('invalid_axis_shape_raises'):
+      with self.assertRaisesRegex(ValueError, 'must have shape'):
+        feature_transforms.PointCyclicCovariates(
+            axis=cx.SizedAxis('bad_axis', 8)
+        )
+
+    with self.subTest('no_covariates_raises'):
+      with self.assertRaisesRegex(ValueError, 'produces no covariates'):
+        feature_transforms.PointCyclicCovariates(
+            num_harmonics=0, include_latitude=False
+        )
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')

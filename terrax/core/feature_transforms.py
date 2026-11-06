@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import functools
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 import coordax as cx
 from flax import nnx
@@ -352,3 +352,101 @@ class ClimatologyFeatures(transforms.PytreeTransformABC):
         full_coord = cx.coords.compose(day_axis, self.coords[key])
         value = candidate.order_as(full_coord).data
         feature.set_value(parallelism.shard_like(value, feature.get_value()))
+
+
+@nnx.dataclass
+class PointCyclicCovariates(transforms.PytreeTransformABC):
+  """Computes solar/seasonal harmonic covariates (and latitude) at query points.
+
+  Evaluates unit-bounded covariates along `axis` (size
+  `2 * include_latitude + 4 * num_harmonics`, 10 by default):
+    - `sin(lat)`, `cos(lat)` if `include_latitude`;
+    - harmonics `1..H` of local solar time, from `time`, `time_offset` and
+      `longitude`;
+    - harmonics `1..H` of day-of-year, from `time` and `time_offset`.
+
+  Attributes:
+    lon_key: Key in `inputs` providing query longitudes in degrees.
+    lat_key: Key in `inputs` providing query latitudes in degrees.
+    time_key: Key in `inputs` providing `jdt.Datetime` timestamps. Required.
+    time_offset_key: Key in `inputs` providing time offsets in seconds. Zero
+      offsets are assumed if not present.
+    output_key: Key under which the cyclic covariate field is returned.
+    num_harmonics: Number of diurnal and seasonal harmonics (`>= 0`).
+    include_latitude: Whether to include `sin(lat)` and `cos(lat)` entries.
+    axis: Coordinate (or axis name string) of shape
+      `(2 * include_latitude + 4 * num_harmonics,)`. Defaults to
+      `'cyclic_covariates_at_loc'`.
+  """
+
+  lon_key: str = 'longitude'
+  lat_key: str = 'latitude'
+  time_key: str = 'time'
+  time_offset_key: str = 'time_offset'
+  output_key: str = 'cyclic_covariates'
+  num_harmonics: int = 2
+  include_latitude: bool = True
+  axis: cx.Coordinate | str = 'cyclic_covariates_at_loc'
+
+  def __post_init__(self):
+    if self.num_harmonics < 0:
+      raise ValueError(
+          f'`num_harmonics` must be >= 0, got {self.num_harmonics}.'
+      )
+    expected_size = 2 * self.include_latitude + 4 * self.num_harmonics
+    if expected_size == 0:
+      raise ValueError(
+          'PointCyclicCovariates produces no covariates with'
+          ' `include_latitude=False` and `num_harmonics=0`.'
+      )
+    if isinstance(self.axis, str):
+      self.axis = cx.SizedAxis(self.axis, expected_size)
+    if self.axis.shape != (expected_size,):
+      raise ValueError(
+          f'`axis` must have shape ({expected_size},), got {self.axis.shape=}.'
+      )
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    missing = {self.lon_key, self.lat_key, self.time_key} - set(inputs)
+    if missing:
+      raise ValueError(f'Inputs are missing required keys {sorted(missing)}.')
+    lon = inputs[self.lon_key]
+    lat = inputs[self.lat_key]
+    assert isinstance(self.axis, cx.Coordinate)
+    time_field = inputs[self.time_key]
+    time_data: Any = time_field.data
+    days = cx.field(
+        jax.lax.stop_gradient(time_data.delta.days.astype(jnp.float32)),
+        time_field.coordinate,
+    )
+    seconds = cx.field(
+        jax.lax.stop_gradient(time_data.delta.seconds.astype(jnp.float32)),
+        time_field.coordinate,
+    )
+    if self.time_offset_key in inputs:
+      time_offset = inputs[self.time_offset_key]
+    else:
+      time_offset = cx.cmap(jnp.zeros_like)(lon)
+
+    def _compute(lon_deg, lat_deg, t_off, d, s):
+      # Fraction of the day is computed from seconds to avoid float32 round-off
+      # of the (large) day count; days only enter the slow seasonal cycle.
+      local_seconds = s + t_off
+      day_frac = jnp.mod(local_seconds, 86400.0) / 86400.0
+      solar_angle = 2.0 * jnp.pi * (day_frac + lon_deg / 360.0)
+      year_frac = (d + local_seconds / 86400.0) / 365.2422
+      season_angle = 2.0 * jnp.pi * (year_frac - jnp.floor(year_frac))
+      terms = []
+      if self.include_latitude:
+        lat_rad = jnp.deg2rad(lat_deg)
+        terms.extend([jnp.sin(lat_rad), jnp.cos(lat_rad)])
+      for k in range(1, self.num_harmonics + 1):
+        terms.extend([jnp.sin(k * solar_angle), jnp.cos(k * solar_angle)])
+      for k in range(1, self.num_harmonics + 1):
+        terms.extend([jnp.sin(k * season_angle), jnp.cos(k * season_angle)])
+      return jnp.stack(terms, axis=-1)
+
+    out = cx.cmap(_compute, out_axes='leading')(
+        lon, lat, time_offset, days, seconds
+    ).tag(self.axis)
+    return {self.output_key: out}
