@@ -117,17 +117,47 @@ class ObservationValueFeatures(transforms.TransformABC):
 
 @nnx.dataclass
 class RandomnessFeatures(transforms.TransformABC):
-  """Returns values from a random process evaluated on a grid."""
+  """Returns values of a random process evaluated on a coordinate.
+
+  The evaluation coordinate is either the fixed `coord` or, if `like` is set,
+  the coordinate of ``inputs[like]`` at call time, so that a single transform
+  serves inputs of varying structure, e.g. queries at different sets of points
+  (the random process must then support evaluation on arbitrary coordinates,
+  e.g. `random_processes.NormalUncorrelated`). In both cases `sample_axis`, if
+  provided, is appended to the evaluation coordinate.
+
+  Attributes:
+    random_process: Random process evaluated via `state_values(coord)`.
+    coord: Fixed coordinate on which the random process is evaluated. Exactly
+      one of `coord` and `like` must be set.
+    feature_name: Key under which the random values are returned.
+    like: Key of the input field whose coordinate is used for evaluation.
+    sample_axis: Optional axis of independent samples per entry of the
+      evaluation coordinate.
+  """
 
   random_process: random_processes.RandomProcessModule
-  coord: cx.Coordinate
+  coord: cx.Coordinate | None = None
   feature_name: str = 'randomness'
+  like: str | None = None
+  sample_axis: cx.Coordinate | None = None
+
+  def __post_init__(self):
+    if (self.coord is None) == (self.like is None):
+      raise ValueError(
+          'Exactly one of `coord` and `like` must be set, got'
+          f' {self.coord=} and {self.like=}.'
+      )
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
-    del inputs  # unused.
-    return {
-        self.feature_name: self.random_process.state_values(self.coord),
-    }
+    if self.like is not None:
+      coord = inputs[self.like].coordinate
+    else:
+      assert self.coord is not None  # validated in __post_init__.
+      coord = self.coord
+    if self.sample_axis is not None:
+      coord = cx.coords.compose(coord, self.sample_axis)
+    return {self.feature_name: self.random_process.state_values(coord)}
 
 
 @nnx.dataclass

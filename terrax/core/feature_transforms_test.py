@@ -303,6 +303,50 @@ class FeatureTransformsTest(parameterized.TestCase):
       )
       self._test_feature_module(randomness_features, None)
 
+  def test_randomness_features_like_input(self):
+    random_process = random_processes.NormalUncorrelated.construct(
+        rngs=nnx.Rngs(0)
+    )
+    random_process.unconditional_sample(jax.random.key(0))
+    sample_axis = cx.SizedAxis('noise', 4)
+    randomness_features = feature_transforms.RandomnessFeatures(
+        random_process=random_process,
+        like='longitude',
+        feature_name='point_randomness',
+        sample_axis=sample_axis,
+    )
+    stations = cx.SizedAxis('station', 3)
+    inputs = {'longitude': cx.field(np.array([1.0, 2.0, 3.0]), stations)}
+    self._test_feature_module(randomness_features, inputs)
+    draw = randomness_features(inputs)['point_randomness']
+    self.assertEqual(draw.coordinate, cx.coords.compose(stations, sample_axis))
+    # Draws are deterministic for a fixed state and change once advanced.
+    same_draw = randomness_features(inputs)['point_randomness']
+    np.testing.assert_array_equal(draw.data, same_draw.data)
+    random_process.advance()
+    advanced_draw = randomness_features(inputs)['point_randomness']
+    self.assertFalse(np.allclose(draw.data, advanced_draw.data))
+    # The same transform serves templates of a different size.
+    more_stations = cx.SizedAxis('station', 5)
+    more_inputs = {'longitude': cx.field(np.arange(5.0), more_stations)}
+    self.assertEqual(
+        randomness_features(more_inputs)['point_randomness'].coordinate,
+        cx.coords.compose(more_stations, sample_axis),
+    )
+    # Without a sample axis values live on the template coordinate.
+    scalar_features = feature_transforms.RandomnessFeatures(
+        random_process=random_process, like='longitude'
+    )
+    self.assertEqual(
+        scalar_features(inputs)['randomness'].coordinate, stations
+    )
+    with self.assertRaisesRegex(ValueError, 'Exactly one of'):
+      feature_transforms.RandomnessFeatures(
+          random_process=random_process, coord=stations, like='longitude'
+      )
+    with self.assertRaisesRegex(ValueError, 'Exactly one of'):
+      feature_transforms.RandomnessFeatures(random_process=random_process)
+
   def test_climatology_features(self):
     grid = coordinates.LonLatGrid.TL31()
     climatology_features = feature_transforms.ClimatologyFeatures(
