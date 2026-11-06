@@ -480,11 +480,26 @@ class ConvLonLat(nnx.Module):
 
 @nnx.dataclass
 class Epd(nnx.Module):
-  """EPD layer parameterized by encode/process/decode layers."""
+  """EPD layer parameterized by encode/process/decode layers.
+
+  Attributes:
+    encode: Layer mapping inputs to the latent representation.
+    decode: Layer mapping the latent representation to outputs.
+    process_blocks: Layers applied residually to the latents.
+    pre_decode_norm: Optional normalization of the latents applied before
+      decoding, i.e. the final normalization of pre-norm residual stacks. It is
+      applied to the latents as produced by the process blocks (the last axis
+      for `nnx.Linear`-based layers).
+    post_encode_activation: Optional activation applied after encoding.
+    pre_decode_activation: Optional activation applied before decoding (after
+      `pre_decode_norm`).
+    final_activation: Optional activation applied to the outputs.
+  """
 
   encode: UnaryLayer
   decode: UnaryLayer
   process_blocks: Sequence[UnaryLayer] = nnx.data()
+  pre_decode_norm: nnx.Module | None = nnx.data(default=None)
   post_encode_activation: Callable[[jax.Array], jax.Array] | None = None
   pre_decode_activation: Callable[[jax.Array], jax.Array] | None = None
   final_activation: Callable[[jax.Array], jax.Array] | None = None
@@ -508,21 +523,48 @@ class Epd(nnx.Module):
       encode_factory: UnaryLayerFactory,
       process_factory: UnaryLayerFactory,
       decode_factory: UnaryLayerFactory,
+      pre_decode_normalization_factory: Callable[..., nnx.Module] | None = None,
       post_encode_activation: Callable[[jax.Array], jax.Array] | None = None,
       pre_decode_activation: Callable[[jax.Array], jax.Array] | None = None,
       final_activation: Callable[[jax.Array], jax.Array] | None = None,
       rngs: nnx.Rngs,
   ) -> Epd:
+    """Builds an `Epd` layer from layer factories.
+
+    Args:
+      input_size: Size of the inputs.
+      output_size: Size of the outputs.
+      latent_size: Size of the latent representation.
+      num_process_blocks: Number of residual process blocks.
+      encode_factory: Factory of the encoder layer.
+      process_factory: Factory of the process blocks.
+      decode_factory: Factory of the decoder layer.
+      pre_decode_normalization_factory: Optional factory called as
+        `factory(latent_size, rngs=rngs)` for the normalization applied to the
+        latents before decoding, e.g. `nnx.LayerNorm`.
+      post_encode_activation: Optional activation applied after encoding.
+      pre_decode_activation: Optional activation applied before decoding.
+      final_activation: Optional activation applied to the outputs.
+      rngs: Random number generators.
+
+    Returns:
+      The `Epd` layer.
+    """
     encode = encode_factory(input_size, latent_size, rngs=rngs)
     decode = decode_factory(latent_size, output_size, rngs=rngs)
     process_blocks = tuple([
         process_factory(latent_size, latent_size, rngs=rngs)
         for _ in range(num_process_blocks)
     ])
+    if pre_decode_normalization_factory is None:
+      pre_decode_norm = None
+    else:
+      pre_decode_norm = pre_decode_normalization_factory(latent_size, rngs=rngs)
     return cls(
         encode=encode,
         decode=decode,
         process_blocks=process_blocks,
+        pre_decode_norm=pre_decode_norm,
         post_encode_activation=post_encode_activation,
         pre_decode_activation=pre_decode_activation,
         final_activation=final_activation,
@@ -536,6 +578,8 @@ class Epd(nnx.Module):
     current = encoded
     for process_block in self.process_blocks:
       current = current + process_block(current)
+    if self.pre_decode_norm is not None:
+      current = self.pre_decode_norm(current)
     if self.pre_decode_activation is not None:
       current = self.pre_decode_activation(current)
     out = self.decode(current)

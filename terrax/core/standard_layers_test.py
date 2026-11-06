@@ -518,6 +518,47 @@ class StandardLayersTest(parameterized.TestCase):
       actual = count_actual_params(epd_layer)
       self.assertEqual(actual, expected)
 
+  def test_epd_layer_pre_decode_norm(self):
+    mlp_factory = functools.partial(
+        standard_layers.Mlp.uniform,
+        hidden_size=8,
+        hidden_layers=1,
+    )
+    build = functools.partial(
+        standard_layers.Epd.build_using_factories,
+        input_size=7,
+        output_size=13,
+        latent_size=11,
+        num_process_blocks=2,
+        encode_factory=mlp_factory,
+        decode_factory=nnx.Linear,
+        process_factory=mlp_factory,
+    )
+    epd_layer = build(rngs=nnx.Rngs(0))
+    normed_epd_layer = build(
+        pre_decode_normalization_factory=nnx.LayerNorm, rngs=nnx.Rngs(0)
+    )
+    inputs = 1e3 * jnp.arange(7, dtype=jnp.float32)
+    with self.subTest('output_shape'):
+      self.assertEqual(normed_epd_layer(inputs).shape, (13,))
+    with self.subTest('layer_norm_params'):
+      self.assertEqual(
+          count_actual_params(normed_epd_layer),
+          count_actual_params(epd_layer) + 2 * 11,
+      )
+    with self.subTest('bounded_output_scale'):
+      # LayerNorm fixes the scale of the decoded latents, so the output norm is
+      # bounded by that of the (identically initialized) decoder weights.
+      decode_norm = jnp.linalg.norm(normed_epd_layer.decode.kernel[...])
+      outputs = normed_epd_layer(inputs) - normed_epd_layer.decode.bias[...]
+      self.assertLess(
+          jnp.linalg.norm(outputs), jnp.sqrt(11.0) * decode_norm + 1e-5
+      )
+      self.assertGreater(
+          jnp.linalg.norm(epd_layer(inputs)),
+          jnp.linalg.norm(normed_epd_layer(inputs)),
+      )
+
 
 def count_actual_params(module: nnx.Module):
   return sum(
