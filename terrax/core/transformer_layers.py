@@ -967,8 +967,10 @@ class TransformerBlocks(TransformerBase):
     return jnp.transpose(latents)
 
   def rearrange_mask(self, mask: typing.Array) -> typing.Array:
-    """Formats mask to attention-broadcastable shape."""
-    return self.mask_to_attention_shape(jnp.transpose(mask))
+    """Formats mask [1, L] to the attention-broadcastable shape [1, 1, L]."""
+    # Sequences are not batched here, so the mask over keys/values broadcasts
+    # against attention weights of shape [NUM_HEADS, Q_LEN, KV_LEN].
+    return jnp.expand_dims(jnp.squeeze(mask, axis=0), axis=(0, 1))
 
   def rearrange_outputs(
       self, outputs: typing.Array, inputs_shape

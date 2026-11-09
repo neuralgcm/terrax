@@ -187,6 +187,34 @@ class TransformerLayersTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'cross_attention_layers'):
       build((True, False))
 
+  def test_transformer_blocks_mask_drops_keys(self):
+    """Tests that masked keys/values are equivalent to absent ones."""
+    n_levels, n_latent_levels = 5, 7
+    net = transformer_layers.TransformerBlocks.build_using_factories(
+        self.hidden_size,
+        intermediate_sizes=[self.hidden_size, self.hidden_size],
+        num_heads=2,
+        dense_factory=self.dense_factory,
+        pre_normalization_factory=nnx.LayerNorm,
+        gating=None,
+        rngs=nnx.Rngs(0),
+    )
+    keys = jax.random.split(jax.random.key(0), 2)
+    x = jax.random.normal(keys[0], (self.hidden_size, n_levels))
+    z = jax.random.normal(keys[1], (self.hidden_size, n_latent_levels))
+    keep = np.array([True, False, True, True, False, False, True])
+    with self.subTest('cross_attention'):
+      masked = net(x, z, mask=keep[np.newaxis, :])
+      np.testing.assert_allclose(
+          masked, net(x, z[:, keep]), rtol=1e-5, atol=1e-6
+      )
+    with self.subTest('self_attention'):
+      keep_x = keep[:n_levels]
+      masked = net(x, mask=keep_x[np.newaxis, :])
+      np.testing.assert_allclose(
+          masked[:, keep_x], net(x[:, keep_x]), rtol=1e-5, atol=1e-6
+      )
+
   def test_window_transformer_blocks_cross_attention_layers(self):
     """Tests window blocks alternating self- and cross-attention layers."""
     ylm_pe = transformer_layers.spherical_harmonic_lon_lat_encodings(
