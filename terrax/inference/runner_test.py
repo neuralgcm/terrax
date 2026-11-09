@@ -16,6 +16,7 @@ import functools
 import operator
 import os
 import pathlib
+from unittest import mock
 import warnings
 
 from absl.testing import absltest
@@ -277,6 +278,8 @@ class RunnerTest(parameterized.TestCase):
           ensemble_size // ensemble_batch_size
       )
     self.assertEqual(runner.task_count, expected_task_count)
+    for task_id in range(runner.task_count):
+      self.assertFalse(runner.is_task_complete(task_id))
 
     expected_lead_times = np.arange(0, out_duration_in_h, out_freq_in_h) * one_h
     nans = functools.partial(np.full, fill_value=np.nan)
@@ -312,6 +315,15 @@ class RunnerTest(parameterized.TestCase):
 
     for task_id in range(runner.task_count):
       runner.run(task_id)
+
+    # Completed tasks are marked as done and skipped when run again, which
+    # makes re-running a pipeline against an existing output path resumable.
+    for task_id in range(runner.task_count):
+      self.assertTrue(runner.is_task_complete(task_id))
+    with mock.patch.object(
+        runner, '_run_with_retries', side_effect=AssertionError('not skipped')
+    ):
+      runner.run(0)
 
     h = np.array([0.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0])
     expected_foo = np.stack([h, 10 + h])
@@ -547,6 +559,22 @@ class RunnerTest(parameterized.TestCase):
       expected_bar = np.stack([2 * h + 1, 2 * h + 2, 2 * h + 3], -1)[None]
     actual_bar = state['bar'].to_numpy()
     np.testing.assert_allclose(actual_bar, expected_bar, rtol=1e-5)
+
+  def test_impute_nan_removes_partial_checkpoint(self):
+    output_path = self.create_tempdir().full_path
+    runner = make_runner(
+        model=api.InferenceModel.from_model_api(construct_model()),
+        output_path=output_path,
+        bad_state_strategy='impute_nan',
+    )
+    runner._checkpoints_path().mkdir(parents=True, exist_ok=True)
+    runner._task_path(0).write_bytes(b'partial_state')
+    with mock.patch.object(
+        runner, '_run_attempt', side_effect=runnerlib.BadStateError('nan')
+    ):
+      runner.run(0)
+    self.assertFalse(runner._task_path(0).exists())
+    self.assertTrue(runner.is_task_complete(0))
 
 
 def make_runner(**kwargs) -> runnerlib.InferenceRunner:

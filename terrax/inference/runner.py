@@ -538,6 +538,21 @@ class InferenceRunner:
   def _task_path(self, task_id: int) -> epath.Path:
     return self._checkpoints_path() / f'task_{task_id}.pkl'
 
+  def _done_path(self, task_id: int) -> epath.Path:
+    return self._checkpoints_path() / f'task_{task_id}.done'
+
+  def is_task_complete(self, task_id: int) -> bool:
+    """Returns True if all outputs of `task_id` were written by a previous run.
+
+    Completion markers are written at the end of `run()`, so re-running a
+    pipeline against an existing `output_path` (e.g. after a crash) skips tasks
+    that already finished and only recomputes the remaining ones.
+
+    Args:
+      task_id: integer task ID, from the range [0, task_count).
+    """
+    return self._done_path(task_id).exists()
+
   def _make_rng(
       self,
       task_id: int,
@@ -581,7 +596,10 @@ class InferenceRunner:
   def run(self, task_id: int) -> None:
     """Simulate a single task, saving outputs to the Zarr file.
 
-    Each task corresponds to an initial condition and ensemble RNG.
+    Each task corresponds to an initial condition and ensemble RNG. Tasks that
+    already completed in a previous run (see `is_task_complete`) are skipped,
+    which makes re-running a pipeline against an existing `output_path`
+    resumable.
 
     Args:
       task_id: integer task ID to run, from the range [0, task_count).
@@ -592,6 +610,15 @@ class InferenceRunner:
     if self.model is None:
       raise ValueError('model must be set before calling InferenceRunner.run()')
 
+    if self.is_task_complete(task_id):
+      logging.info(f'{task_id=} already complete, skipping')
+      return
+
+    self._run_with_retries(task_id)
+    self._done_path(task_id).touch()
+
+  def _run_with_retries(self, task_id: int) -> None:
+    """Runs `task_id`, retrying with new RNGs per `bad_state_strategy`."""
     max_attempts = (
         self.max_nan_retries + 1
         if self.bad_state_strategy == 'retry'
@@ -620,6 +647,7 @@ class InferenceRunner:
             )
         else:
           # 'impute_nan': stop and leave remainder as NaN.
+          self._task_path(task_id).unlink(missing_ok=True)
           logging.warning(
               f'Bad state encountered, imputing NaN for remainder of'
               f' {task_id=}: {error}'
@@ -655,7 +683,7 @@ class InferenceRunner:
     if task_path.exists():
       logging.info(f'state checkpoint already exists for task {task_id=}')
       with task_path.open('rb') as f:
-        state, commited_steps = pickle.load(f)
+        state, commited_steps = pickle.load(f)  # pylint: disable=g-unsafe-pickle-load
     else:
       logging.info(f'no state checkpoint found for task {task_id=}')
       rng = self._make_rng(task_id, init_time_index, realization_start, attempt)
