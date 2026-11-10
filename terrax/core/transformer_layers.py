@@ -53,6 +53,78 @@ class TransformerLayer(Protocol):
     ...
 
 
+def _append_key_entry(
+    array: typing.Array, entry: typing.Array | bool, shape: tuple[int, ...]
+) -> jax.Array:
+  """Appends `entry` to `array` (broadcasted to `shape`) along the last axis."""
+  array = jnp.asarray(array)
+  array = jnp.broadcast_to(array, jnp.broadcast_shapes(array.shape, shape))
+  column = jnp.broadcast_to(entry, (*array.shape[:-1], 1))
+  return jnp.concatenate([array, column], axis=-1)
+
+
+def dot_product_attention_with_sink(
+    query: typing.Array,
+    key: typing.Array,
+    value: typing.Array,
+    sink_logits: typing.Array,
+    bias: typing.Array | None = None,
+    mask: typing.Array | None = None,
+    attention_fn: Callable[..., typing.Array] = nnx.dot_product_attention,
+    **kwargs: Any,
+) -> typing.Array:
+  """Dot-product attention with a learnable per-head zero-value sink.
+
+  Appends one virtual key per head with logit `sink_logits[h]` and value zero
+  to the softmax, so unmasked real keys compete against a learned threshold
+  rather than summing to 1, and masking out every real key returns exact zeros
+  without `0/0` NaNs. The sink is expressed through the regular interface of
+  `attention_fn`: an all-zero key and value (its own logit is 0, it contributes
+  nothing to the output), the sink logit in the corresponding column of `bias`,
+  and an always-`True` entry in `mask`, which leaves dropout, dtype promotion
+  and the optimized kernels of `attention_fn` untouched.
+
+  Args:
+    query: Queries of shape `[..., q_length, num_heads, head_dim]`.
+    key: Keys of shape `[..., kv_length, num_heads, head_dim]`.
+    value: Values of shape `[..., kv_length, num_heads, head_dim]`.
+    sink_logits: Per-head sink logits of shape `[num_heads]`.
+    bias: Optional additive attention bias broadcastable to
+      `[..., num_heads, q_length, kv_length]`.
+    mask: Optional boolean mask broadcastable to
+      `[..., num_heads, q_length, kv_length]`. `False` masks out the entry.
+    attention_fn: Attention function with the signature of
+      `nnx.dot_product_attention`.
+    **kwargs: Further keyword arguments of `attention_fn` (e.g. `dtype`,
+      `precision`, dropout settings).
+
+  Returns:
+    Attended values of shape `[..., q_length, num_heads, head_dim]`.
+  """
+  num_heads, q_length = query.shape[-2], query.shape[-3]
+  kv_length = key.shape[-3]
+  if sink_logits.shape != (num_heads,):
+    raise ValueError(
+        f'Expected {sink_logits.shape=} to be ({num_heads},).'
+    )
+  pad_key_axis = [(0, 0)] * key.ndim
+  pad_key_axis[-3] = (0, 1)
+  key = jnp.pad(key, pad_key_axis)  # pads with zeros.
+  value = jnp.pad(value, pad_key_axis)  # pads with zeros.
+  # Logits are `[..., num_heads, q_length, kv_length + 1]`: `bias` (zero if
+  # absent) on the real keys and the per-head sink logit on the appended key,
+  # which is never masked.
+  logits_shape = (num_heads, q_length, kv_length)
+  bias = _append_key_entry(
+      jnp.zeros((), sink_logits.dtype) if bias is None else bias,
+      sink_logits[:, jnp.newaxis, jnp.newaxis],  # make broadcastable.
+      logits_shape,
+  )
+  if mask is not None:
+    mask = _append_key_entry(jnp.asarray(mask, dtype=bool), True, logits_shape)
+  return attention_fn(query, key, value, bias=bias, mask=mask, **kwargs)
+
+
 class MultiHeadAttention(nnx.Module):
   """Adaptation of nnx.MultiHeadAttention with attention_bias input.
 
@@ -79,11 +151,15 @@ class MultiHeadAttention(nnx.Module):
     out_bias_init: optional initializer for the bias of the output Dense layer,
       if None, the bias_init is used.
     use_bias: bool: whether pointwise QKVO dense transforms use bias.
+    out_use_bias: optional override for whether the output projection uses bias
+      (defaults to `use_bias`).
     attention_fn: dot_product_attention or compatible function. Accepts query,
       key, value, and returns output of shape `[bs, dim1, dim2, ..., dimN,,
       num_heads, value_channels]``
     normalize_qk: should QK normalization be applied (arxiv.org/abs/2302.05442).
     normalize_v: should V normalization be applied (arxiv.org/abs/2503.04598v3).
+    attention_sink: whether to include a learnable per-head zero-value sink in
+      the attention softmax (see `dot_product_attention_with_sink`).
     rngs: rng key.
   """
 
@@ -103,9 +179,11 @@ class MultiHeadAttention(nnx.Module):
       bias_init: nnx.initializers.Initializer = nnx.initializers.zeros_init(),
       out_bias_init: nnx.initializers.Initializer | None = None,
       use_bias: bool = True,
+      out_use_bias: bool | None = None,
       attention_fn: Callable[..., typing.Array] = nnx.dot_product_attention,
       normalize_qk: bool = False,
       normalize_v: bool = False,
+      attention_sink: bool = False,
       rngs: nnx.Rngs,
   ):
     self.num_heads = num_heads
@@ -127,9 +205,11 @@ class MultiHeadAttention(nnx.Module):
     self.bias_init = bias_init
     self.out_bias_init = out_bias_init
     self.use_bias = use_bias
+    self.out_use_bias = use_bias if out_use_bias is None else out_use_bias
     self.attention_fn = attention_fn
     self.normalize_qk = normalize_qk
     self.normalize_v = normalize_v
+    self.attention_sink = attention_sink
 
     if self.qkv_features % self.num_heads != 0:
       raise ValueError(
@@ -187,6 +267,15 @@ class MultiHeadAttention(nnx.Module):
       )
     else:
       self.value_ln = None
+    self.sink_logits: nnx.Param | None
+    if self.attention_sink:
+      self.sink_logits = nnx.Param(
+          nnx.initializers.zeros_init()(
+              rngs.params(), (self.num_heads,), self.param_dtype
+          )
+      )
+    else:
+      self.sink_logits = None
 
     self.out = nnx.LinearGeneral(
         in_features=(self.num_heads, self.head_dim),
@@ -194,7 +283,7 @@ class MultiHeadAttention(nnx.Module):
         axis=(-2, -1),
         kernel_init=self.out_kernel_init or self.kernel_init,
         bias_init=self.out_bias_init or self.bias_init,
-        use_bias=self.use_bias,
+        use_bias=self.out_use_bias,
         dtype=self.dtype,
         param_dtype=self.param_dtype,
         precision=self.precision,
@@ -268,15 +357,29 @@ class MultiHeadAttention(nnx.Module):
       assert self.value_ln is not None
       value = self.value_ln(value)
 
-    x = self.attention_fn(
-        query,
-        key,
-        value,
-        mask=mask,
-        bias=attention_bias,
-        dtype=self.dtype,
-        precision=self.precision,
-    )
+    if self.attention_sink:
+      assert self.sink_logits is not None
+      x = dot_product_attention_with_sink(
+          query,
+          key,
+          value,
+          self.sink_logits.get_value(),
+          mask=mask,
+          bias=attention_bias,
+          attention_fn=self.attention_fn,
+          dtype=self.dtype,
+          precision=self.precision,
+      )
+    else:
+      x = self.attention_fn(
+          query,
+          key,
+          value,
+          mask=mask,
+          bias=attention_bias,
+          dtype=self.dtype,
+          precision=self.precision,
+      )
     out = self.out(x)  # post-attention projection.  # pyrefly: ignore[bad-argument-type]
     return out
 
@@ -739,6 +842,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       num_heads: int,
       qkv_features: int | None = None,
       use_bias_in_attention: bool = True,
+      out_use_bias: bool | None = None,
       pre_normalization_factory: NormalizationFactory | None = None,
       post_normalization_factory: NormalizationFactory | None = None,
       gating: Sequence[Gating] | Gating | None = lambda skip, x: x,
@@ -748,6 +852,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       use_additive_pos_encoding: bool = False,
       normalize_qk: bool = False,
       normalize_v: bool = False,
+      attention_sink: bool = False,
       apply_final_norm: bool = False,
       cross_attention_layers: Sequence[bool] | None = None,
       w_init=nnx.initializers.he_normal(),
@@ -768,6 +873,8 @@ class TransformerBase(nnx.Module, abc.ABC):
       num_heads: Number of attention heads.
       qkv_features: Channels for query/key/value.
       use_bias_in_attention: If True, `MultiHeadAttention` includes bias.
+      out_use_bias: Optional override for whether the attention output
+        projection includes bias (defaults to `use_bias_in_attention`).
       pre_normalization_factory: factory for pre-normalization layers.
       post_normalization_factory: factory for post-normalization layers.
       gating: Gating function(s). Defaults to no gating. If None, a "where
@@ -783,6 +890,8 @@ class TransformerBase(nnx.Module, abc.ABC):
         positional encodings to the inputs before the first block.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
+      attention_sink: whether to include a learnable per-head zero-value sink in
+        each `MultiHeadAttention` layer.
       apply_final_norm: whether to include final post_norm layer.
       cross_attention_layers: Optional flags, one per layer, selecting the
         layers that attend to `latents`; all other layers self-attend. Defaults
@@ -818,9 +927,11 @@ class TransformerBase(nnx.Module, abc.ABC):
               qkv_features=d_in if qkv_features is None else qkv_features,
               out_features=d_out,
               use_bias=use_bias_in_attention,
+              out_use_bias=out_use_bias,
               kernel_init=w_init,
               normalize_qk=normalize_qk,
               normalize_v=normalize_v,
+              attention_sink=attention_sink,
               bias_init=b_init,
               rngs=rngs,
           )
@@ -882,6 +993,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       num_heads: int,
       qkv_features: int | None = None,
       use_bias_in_attention: bool = True,
+      out_use_bias: bool | None = None,
       pre_normalization_factory: NormalizationFactory | None = None,
       post_normalization_factory: NormalizationFactory | None = None,
       apply_final_norm: bool = False,
@@ -893,6 +1005,7 @@ class TransformerBase(nnx.Module, abc.ABC):
       use_additive_pos_encoding: bool = False,
       normalize_qk: bool = False,
       normalize_v: bool = False,
+      attention_sink: bool = False,
       cross_attention_layers: Sequence[bool] | None = None,
       w_init=nnx.initializers.he_normal(),
       b_init=nnx.initializers.zeros,
@@ -907,6 +1020,8 @@ class TransformerBase(nnx.Module, abc.ABC):
       num_heads: number of attention heads to use.
       qkv_features: number of channels used for query/key/value representations.
       use_bias_in_attention: whether to include bias term in MultiHeadAttention.
+      out_use_bias: optional override for whether the attention output
+        projection includes bias (defaults to `use_bias_in_attention`).
       pre_normalization_factory: factory for pre-normalization layers.
       post_normalization_factory: factory for post-normalization layers.
       apply_final_norm: whether to include final post_norm layer.
@@ -921,6 +1036,8 @@ class TransformerBase(nnx.Module, abc.ABC):
         positional encodings to the inputs before the first block.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
+      attention_sink: whether to include a learnable per-head zero-value sink in
+        each `MultiHeadAttention` layer.
       cross_attention_layers: optional flags, one per layer, selecting the
         layers that attend to `latents`, see `build_args_using_factories`.
       w_init: kernel initializer for the MultiHeadAttention modules.
@@ -934,6 +1051,7 @@ class TransformerBase(nnx.Module, abc.ABC):
         num_heads=num_heads,
         qkv_features=qkv_features,
         use_bias_in_attention=use_bias_in_attention,
+        out_use_bias=out_use_bias,
         pre_normalization_factory=pre_normalization_factory,
         post_normalization_factory=post_normalization_factory,
         apply_final_norm=apply_final_norm,
@@ -944,6 +1062,7 @@ class TransformerBase(nnx.Module, abc.ABC):
         use_additive_pos_encoding=use_additive_pos_encoding,
         normalize_qk=normalize_qk,
         normalize_v=normalize_v,
+        attention_sink=attention_sink,
         cross_attention_layers=cross_attention_layers,
         w_init=w_init,
         b_init=b_init,
@@ -1424,6 +1543,7 @@ class WindowTransformerBlocks(TransformerBase):
       num_heads: int,
       qkv_features: int | None = None,
       use_bias_in_attention: bool = True,
+      out_use_bias: bool | None = None,
       pre_normalization_factory: NormalizationFactory | None = None,
       post_normalization_factory: NormalizationFactory | None = None,
       apply_final_norm: bool = False,
@@ -1432,6 +1552,7 @@ class WindowTransformerBlocks(TransformerBase):
       dense_factory: standard_layers.UnaryLayerFactory,
       normalize_qk: bool = False,
       normalize_v: bool = False,
+      attention_sink: bool = False,
       cross_attention_layers: Sequence[bool] | None = None,
       w_init=nnx.initializers.xavier_uniform(),
       b_init=nnx.initializers.zeros,
@@ -1458,6 +1579,8 @@ class WindowTransformerBlocks(TransformerBase):
       num_heads: number of attention heads to use.
       qkv_features: number of channels used for query/key/value representations.
       use_bias_in_attention: whether to include bias term in MultiHeadAttention.
+      out_use_bias: optional override for whether the attention output
+        projection includes bias (defaults to `use_bias_in_attention`).
       pre_normalization_factory: factory for pre-normalization layers.
       post_normalization_factory: factory for post-normalization layers.
       apply_final_norm: whether to apply final layer norm.
@@ -1466,6 +1589,8 @@ class WindowTransformerBlocks(TransformerBase):
       dense_factory: factory for generating dense layers that follow attention.
       normalize_qk: whether to add layer norm prior to computing query and key.
       normalize_v: whether to add layer norm prior to computing value.
+      attention_sink: whether to include a learnable per-head zero-value sink in
+        each `MultiHeadAttention` layer.
       cross_attention_layers: optional flags, one per layer, selecting the
         layers that attend to `latents`, see
         `TransformerBase.build_args_using_factories`.
@@ -1480,6 +1605,7 @@ class WindowTransformerBlocks(TransformerBase):
         num_heads=num_heads,
         qkv_features=qkv_features,
         use_bias_in_attention=use_bias_in_attention,
+        out_use_bias=out_use_bias,
         pre_normalization_factory=pre_normalization_factory,
         post_normalization_factory=post_normalization_factory,
         apply_final_norm=apply_final_norm,
@@ -1490,6 +1616,7 @@ class WindowTransformerBlocks(TransformerBase):
         use_additive_pos_encoding=use_additive_pos_encoding,
         normalize_qk=normalize_qk,
         normalize_v=normalize_v,
+        attention_sink=attention_sink,
         cross_attention_layers=cross_attention_layers,
         w_init=w_init,
         b_init=b_init,
@@ -1515,13 +1642,7 @@ def spherical_harmonic_lon_lat_encodings(
     l_max: int,
     l_min: int = 0,
 ):
-  """Spherical harmonic positional encodings for lon-lat grids.
-
-  Returns the nodal representation of every spherical harmonic with total
-  wavenumber `l_min <= l < l_max` (`l_max**2 - l_min**2` channels). Modes are
-  selected via the `mask` and `total_wavenumber` fields of the modal grid, so
-  the result does not depend on the layout of modal coefficients.
-  """
+  """Spherical harmonic positional encodings for lon-lat grids."""
   fields = ylm_map.ylm_grid.fields
   total_wavenumber = fields['total_wavenumber'].data
   selected = (
@@ -1538,7 +1659,8 @@ def spherical_harmonic_lon_lat_encodings(
   # One-hot modal coefficients of each selected mode: [n_modes, M, L].
   modal_basis = np.zeros((n_modes, *selected.shape), np.float32)
   modal_basis[(np.arange(n_modes), *np.nonzero(selected))] = 1.0
-  return jax.vmap(ylm_map.to_nodal_array)(modal_basis)  # pyrefly: ignore[bad-argument-type]
+  # pyrefly: ignore[bad-argument-type]
+  return jax.vmap(ylm_map.to_nodal_array)(modal_basis)
 
 
 def legendre_encodings(positions: np.ndarray, encoding_size: int) -> np.ndarray:
@@ -1796,16 +1918,10 @@ class LevelPositionalEncoder(nnx.Module):
 def _apply_to_channel_axis(
     layer: Callable[[jax.Array], jax.Array], x: typing.Array
 ) -> jax.Array:
-  """Applies `layer` that acts on the last axis to the leading channel axis.
+  """Applies `layer` that acts on the last axis to the leading channel axis."""
 
-  The two transposes are index remaps for XLA rather than extra passes over
-  the data. Verified on the compiled CPU HLO: for `nnx.LayerNorm` they are
-  fused into the reduction / element-wise fusions of the layer (no additional
-  copies), and for `nnx.Linear` the input transpose becomes a single copy into
-  the layout of the dot while the output transpose is fused with the bias add.
-  The overhead is therefore at most one pass over `x`, negligible compared to
-  the layer itself.
-  """
+  # Used for normalization layers that act on the last axis e.g. `nnx.LayerNorm`
+  #  Transposes are typically fused leading in negligible overhead.
   return jnp.moveaxis(layer(jnp.moveaxis(jnp.asarray(x), 0, -1)), -1, 0)
 
 
@@ -1981,13 +2097,18 @@ class EpdTransformer(nnx.Module, pytree=False):
     latents_encode: Optional layer mapping `latents` to the channel size of the
       latent representation. If None, `latents` are passed to the process
       blocks as is.
-    pos_encoding_proj: Optional linear projection of positional encodings added
-      to the encoded inputs (https://arxiv.org/abs/1706.03762, Sec. 3.5).
+    pos_encoding_proj: Optional linear projection (`Dense1x1`) of positional
+      encodings added to the encoded inputs (https://arxiv.org/abs/1706.03762,
+      Sec. 3.5).
     pre_decode_norm: Optional normalization of latents applied before decoding,
       i.e. the final normalization of Pre-LN transformer stacks.
     post_encode_activation: Optional activation applied after encoding.
     pre_decode_activation: Optional activation applied before decoding.
     final_activation: Optional activation applied to the outputs.
+    residual_from_encode: Whether the first process block adds its output to
+      the encoded inputs (default True). Setting this to False drops the skip
+      connection around the first process block so that e.g. a zero-output
+      cross-attention block yields a zero latent stream.
   """
 
   encode: standard_layers.UnaryLayer = nnx.data(kw_only=True)
@@ -1996,7 +2117,9 @@ class EpdTransformer(nnx.Module, pytree=False):
   latents_encode: standard_layers.UnaryLayer | None = nnx.data(
       default=None, kw_only=True
   )
-  pos_encoding_proj: nnx.Linear | None = nnx.data(default=None, kw_only=True)
+  pos_encoding_proj: standard_layers.Dense1x1 | None = nnx.data(
+      default=None, kw_only=True
+  )
   pre_decode_norm: nnx.Module | None = nnx.data(default=None, kw_only=True)
   post_encode_activation: Callable[[Array], Array] | None = nnx.static(
       default=None
@@ -2005,9 +2128,14 @@ class EpdTransformer(nnx.Module, pytree=False):
       default=None
   )
   final_activation: Callable[[Array], Array] | None = nnx.static(default=None)
+  residual_from_encode: bool = nnx.static(default=True, kw_only=True)
 
   def __post_init__(self):
     self.process_blocks = nnx.List(self.process_blocks)
+    if not self.residual_from_encode and not self.process_blocks:
+      raise ValueError(
+          'process_blocks must be non-empty when residual_from_encode=False.'
+      )
 
   @property
   def input_size(self) -> int:
@@ -2036,6 +2164,7 @@ class EpdTransformer(nnx.Module, pytree=False):
       post_encode_activation: Callable[[Array], Array] | None = None,
       pre_decode_activation: Callable[[Array], Array] | None = None,
       final_activation: Callable[[Array], Array] | None = None,
+      residual_from_encode: bool = True,
       rngs: nnx.Rngs,
   ) -> EpdTransformer:
     """Constructs an EpdTransformer from layer factories.
@@ -2067,6 +2196,8 @@ class EpdTransformer(nnx.Module, pytree=False):
       post_encode_activation: Optional activation applied after encoding.
       pre_decode_activation: Optional activation applied before decoding.
       final_activation: Optional activation applied to the outputs.
+      residual_from_encode: Whether the first process block adds its output to
+        the encoded inputs (default True).
       rngs: Random number generators for parameter initialization.
     """
     encode = encode_factory(input_size, latent_size, rngs=rngs)
@@ -2089,7 +2220,9 @@ class EpdTransformer(nnx.Module, pytree=False):
           'pos_encoding_size is required when use_additive_pos_encoding=True.'
       )
     else:
-      pos_encoding_proj = nnx.Linear(pos_encoding_size, latent_size, rngs=rngs)
+      pos_encoding_proj = standard_layers.Dense1x1(
+          pos_encoding_size, latent_size, rngs=rngs
+      )
     if pre_decode_normalization_factory is None:
       pre_decode_norm = None
     else:
@@ -2104,6 +2237,7 @@ class EpdTransformer(nnx.Module, pytree=False):
         post_encode_activation=post_encode_activation,
         pre_decode_activation=pre_decode_activation,
         final_activation=final_activation,
+        residual_from_encode=residual_from_encode,
     )
 
   def __call__(
@@ -2123,21 +2257,25 @@ class EpdTransformer(nnx.Module, pytree=False):
         raise ValueError(
             'inputs_pos_encoding is required when pos_encoding_proj is set.'
         )
-      encoded = encoded + _apply_to_channel_axis(
-          self.pos_encoding_proj, inputs_pos_encoding
-      )
+      # pyrefly: ignore[bad-argument-type]
+      encoded = encoded + self.pos_encoding_proj(inputs_pos_encoding)
     if self.latents_encode is not None:
       if latents is None:
         raise ValueError('latents are required when latents_encode is set.')
       latents = self.latents_encode(jnp.asarray(latents))
     current = encoded
-    for process_block in self.process_blocks:
-      current = current + process_block(
+    for i, process_block in enumerate(self.process_blocks):
+      update = process_block(
           current,
           latents,
           inputs_pos_encoding,
           latents_pos_encoding,
           mask,
+      )
+      current = (
+          update
+          if i == 0 and not self.residual_from_encode
+          else current + update
       )
     if self.pre_decode_norm is not None:
       current = _apply_to_channel_axis(self.pre_decode_norm, current)

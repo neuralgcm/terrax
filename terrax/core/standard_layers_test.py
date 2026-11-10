@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import types
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -558,6 +559,66 @@ class StandardLayersTest(parameterized.TestCase):
           jnp.linalg.norm(epd_layer(inputs)),
           jnp.linalg.norm(normed_epd_layer(inputs)),
       )
+
+  @parameterized.parameters(
+      dict(spatial_shape=(5,), use_bias=True),
+      dict(spatial_shape=(4, 3), use_bias=False),
+  )
+  def test_dense_1x1(self, spatial_shape: tuple[int, ...], use_bias: bool):
+    """Tests Dense1x1 shapes, parameters and equivalence with 1x1 ConvLevel."""
+    in_c, out_c = 6, 4
+    layer = standard_layers.Dense1x1(
+        input_size=in_c,
+        output_size=out_c,
+        use_bias=use_bias,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(layer))
+    self.assertEqual((layer.input_size, layer.output_size), (in_c, out_c))
+    self.assertEqual(
+        count_actual_params(layer), in_c * out_c + (out_c if use_bias else 0)
+    )
+    x = jax.random.normal(jax.random.key(0), (in_c,) + spatial_shape)
+    out = layer(x)
+    self.assertEqual(out.shape, (out_c,) + spatial_shape)
+
+    # A 1x1 ConvLevel with the same parameters computes the same function.
+    kernel = layer.kernel.get_value()
+    bias = layer.bias.get_value() if use_bias else None
+    conv = standard_layers.ConvLevel(
+        input_size=in_c,
+        output_size=out_c,
+        kernel_size=1,
+        use_bias=use_bias,
+        w_init=lambda key, shape, dtype: kernel[jnp.newaxis].astype(dtype),
+        b_init=lambda key, shape, dtype: bias[:, jnp.newaxis].astype(dtype),
+        rngs=nnx.Rngs(1),
+    )
+    np.testing.assert_allclose(
+        out.reshape(out_c, -1), conv(x.reshape(in_c, -1)), rtol=1e-6, atol=1e-6
+    )
+    with self.assertRaisesRegex(ValueError, 'leading axis'):
+      layer(x[:-1])
+
+    # Gradients batch under nested vmap (the motivation over 1x1 convolutions).
+    xs = jax.random.normal(jax.random.key(1), (3, 7, in_c) + spatial_shape)
+
+    def loss(module, inputs):
+      return jnp.sum(jnp.square(jax.vmap(jax.vmap(module))(inputs)))
+
+    grads = nnx.grad(loss)(layer, xs)
+    grad_leaves = jax.tree.leaves(nnx.state(grads, nnx.Param))
+    self.assertLen(grad_leaves, 2 if use_bias else 1)
+    for leaf in grad_leaves:
+      self.assertTrue(np.all(np.isfinite(leaf)))
+      self.assertGreater(float(np.abs(leaf).max()), 0.0)
+
+  def test_standardize_is_python_function_and_normalizes_last_axis(self):
+    self.assertIsInstance(standard_layers.standardize, types.FunctionType)
+    x = jax.random.normal(jax.random.key(0), (5, 32)) * 12.0 + 1e3
+    y = standard_layers.standardize(x)
+    np.testing.assert_allclose(y.mean(axis=-1), 0.0, atol=1e-4)
+    np.testing.assert_allclose(y.var(axis=-1), 1.0, atol=1e-3)
 
 
 def count_actual_params(module: nnx.Module):

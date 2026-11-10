@@ -356,12 +356,25 @@ class TransformerLayersTest(parameterized.TestCase):
             rngs=nnx.Rngs(0),
         )
 
-  def test_epd_transformer_with_additive_pos_encoding(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='dense_1x1',
+          layer_factory=standard_layers.Dense1x1,
+      ),
+      dict(
+          # Existing checkpoints restore `ConvLevel(kernel_size=1)` layers.
+          testcase_name='conv_level_1x1',
+          layer_factory=functools.partial(
+              standard_layers.ConvLevel, kernel_size=1
+          ),
+      ),
+  )
+  def test_epd_transformer_with_additive_pos_encoding(self, layer_factory):
     """Tests EpdTransformer with positional encodings and pre-decode norm."""
     num_levels, pos_encoding_size = 16, 8
     input_size, output_size, latent_size = 6, 4, 12
-    encode_factory = functools.partial(standard_layers.ConvLevel, kernel_size=1)
-    decode_factory = functools.partial(standard_layers.ConvLevel, kernel_size=1)
+    encode_factory = layer_factory
+    decode_factory = layer_factory
     process_factory = functools.partial(
         transformer_layers.TransformerBlocks.build_using_factories,
         intermediate_sizes=(latent_size,),
@@ -389,7 +402,7 @@ class TransformerLayersTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     self.assertEmpty(nnx.find_duplicates(epd))
-    self.assertIsInstance(epd.pos_encoding_proj, nnx.Linear)
+    self.assertIsInstance(epd.pos_encoding_proj, standard_layers.Dense1x1)
     self.assertIsInstance(epd.pre_decode_norm, nnx.LayerNorm)
     x = jax.random.normal(jax.random.key(0), (input_size, num_levels))
     pe = jax.random.normal(jax.random.key(1), (pos_encoding_size, num_levels))
@@ -414,9 +427,7 @@ class TransformerLayersTest(parameterized.TestCase):
     """Tests EpdTransformer cross-attending to latents with their own size."""
     num_levels, num_latent_levels, pos_encoding_size = 16, 13, 8
     input_size, output_size, latent_size, latents_size = 6, 4, 12, 3
-    embedding_factory = functools.partial(
-        standard_layers.ConvLevel, kernel_size=1
-    )
+    embedding_factory = standard_layers.Dense1x1
     process_factory = functools.partial(
         transformer_layers.TransformerBlocks.build_using_factories,
         intermediate_sizes=(latent_size,),
@@ -441,7 +452,7 @@ class TransformerLayersTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
     self.assertEmpty(nnx.find_duplicates(epd))
-    self.assertIsInstance(epd.latents_encode, standard_layers.ConvLevel)
+    self.assertIsInstance(epd.latents_encode, standard_layers.Dense1x1)
     x = jax.random.normal(jax.random.key(0), (input_size, num_levels))
     z = jax.random.normal(jax.random.key(1), (latents_size, num_latent_levels))
     x_pe = jax.random.normal(jax.random.key(2), (pos_encoding_size, num_levels))
@@ -592,7 +603,8 @@ class TransformerLayersTest(parameterized.TestCase):
     total_wavenumber = ylm_map.ylm_grid.fields['total_wavenumber'].data
     modes = set()
     for coeffs in modal:
-      m_idx, l_idx = np.unravel_index(np.argmax(np.abs(coeffs)), coeffs.shape)
+      ylm_indices = np.unravel_index(np.argmax(np.abs(coeffs)), coeffs.shape)
+      m_idx, l_idx = ylm_indices  # pylint: disable=unbalanced-tuple-unpacking
       self.assertBetween(total_wavenumber[l_idx], l_min, l_max - 1)
       modes.add((m_idx, l_idx))
     self.assertLen(modes, l_max**2 - l_min**2)
@@ -780,13 +792,9 @@ class TransformerLayersTest(parameterized.TestCase):
         output_size=output_size,
         latent_size=latent_size,
         num_process_blocks=2,
-        encode_factory=functools.partial(
-            standard_layers.ConvLevel, kernel_size=1
-        ),
+        encode_factory=standard_layers.Dense1x1,
         process_factory=process_factory,
-        decode_factory=functools.partial(
-            standard_layers.ConvLevel, kernel_size=1
-        ),
+        decode_factory=standard_layers.Dense1x1,
         pos_encoding_size=pos_encoding_size,
         use_additive_pos_encoding=True,
         pre_decode_normalization_factory=nnx.LayerNorm,
@@ -836,6 +844,159 @@ class TransformerLayersTest(parameterized.TestCase):
         post_norms=None,
     )
     self.assertEmpty(nnx.find_duplicates(block))
+
+  def test_attention_sink_masking_and_gradients(self):
+    """Tests MultiHeadAttention with attention_sink=True under full/partial masks."""
+    with self.subTest('sink_works_with_custom_attention_fn'):
+      # The sink is expressed through `bias` / `mask`, so any attention
+      # function with the `nnx.dot_product_attention` interface supports it.
+      kwargs = dict(num_heads=2, in_features=8, attention_sink=True)
+      kv_lengths_seen = []
+
+      def custom_attention(query, key, value, **kw):
+        kv_lengths_seen.append(key.shape[-3])
+        return nnx.dot_product_attention(query, key, value, **kw)
+
+      mha_custom = transformer_layers.MultiHeadAttention(
+          attention_fn=custom_attention, rngs=nnx.Rngs(0), **kwargs
+      )
+      mha_default = transformer_layers.MultiHeadAttention(
+          rngs=nnx.Rngs(0), **kwargs
+      )
+      x = jax.random.normal(jax.random.key(3), (3, 8))
+      np.testing.assert_allclose(mha_custom(x, x), mha_default(x, x))
+      self.assertEqual(kv_lengths_seen, [3 + 1])  # Real keys plus the sink.
+
+    mha = transformer_layers.MultiHeadAttention(
+        num_heads=2,
+        in_features=8,
+        in_kv_features=6,
+        qkv_features=8,
+        out_features=4,
+        use_bias=True,
+        out_use_bias=False,
+        normalize_qk=True,
+        attention_sink=True,
+        rngs=nnx.Rngs(0),
+    )
+    q = jax.random.normal(jax.random.key(0), (3, 8))
+    kv = jax.random.normal(jax.random.key(1), (5, 6))
+
+    with self.subTest('all_masked_exact_zero_and_finite_grad'):
+      all_false = np.zeros((1, 3, 5), dtype=bool)
+      out = mha(q, kv, mask=all_false)
+      np.testing.assert_array_equal(out, np.zeros((3, 4), dtype=np.float32))
+      grad_mha, grad_q, grad_kv = nnx.grad(
+          lambda m, x, z: jax.numpy.sum(m(x, z, mask=all_false) ** 2),
+          argnums=(0, 1, 2),
+      )(mha, q, kv)
+      np.testing.assert_array_equal(grad_q, np.zeros_like(q))
+      np.testing.assert_array_equal(grad_kv, np.zeros_like(kv))
+      for leaf in jax.tree.leaves(nnx.state(grad_mha, nnx.Param)):
+        self.assertTrue(np.all(np.isfinite(leaf)))
+
+    with self.subTest('single_unmasked_key_ignores_masked_and_trains_all'):
+      one_true = np.array([[[False, True, False, False, False]]])
+      out = mha(q, kv, mask=one_true)
+      kv_perturbed = kv.at[np.array([0, 2, 3, 4])].add(1e4)
+      np.testing.assert_allclose(
+          out, mha(q, kv_perturbed, mask=one_true), rtol=1e-5, atol=1e-6
+      )
+      cotangent = jax.random.normal(jax.random.key(2), out.shape)
+      grad_mha, grad_q, grad_kv = nnx.grad(
+          lambda m, x, z: jax.numpy.sum(m(x, z, mask=one_true) * cotangent),
+          argnums=(0, 1, 2),
+      )(mha, q, kv)
+      self.assertGreater(float(np.linalg.norm(grad_q)), 0.0)
+      self.assertGreater(float(np.linalg.norm(grad_kv[1])), 0.0)
+      np.testing.assert_array_equal(np.asarray(grad_kv)[[0, 2, 3, 4]], 0.0)
+      for path, leaf in jax.tree_util.tree_leaves_with_path(
+          nnx.state(grad_mha, nnx.Param)
+      ):
+        self.assertTrue(np.all(np.isfinite(leaf)), msg=f'Non-finite {path}')
+        self.assertGreater(
+            float(np.abs(leaf).max()), 0.0, msg=f'Zero gradient at {path}'
+        )
+
+  def test_zero_preserving_epd_transformer(self):
+    """Tests EpdTransformer(residual_from_encode=False) zero-by-construction."""
+    dense_1x1_factory = standard_layers.Dense1x1
+    with self.assertRaisesRegex(ValueError, 'residual_from_encode=False'):
+      transformer_layers.EpdTransformer.build_using_factories(
+          input_size=6,
+          output_size=4,
+          latent_size=8,
+          num_process_blocks=0,
+          encode_factory=dense_1x1_factory,
+          process_factory=functools.partial(
+              transformer_layers.TransformerBlocks.build_using_factories,
+              intermediate_sizes=(),
+              num_heads=2,
+              dense_factory=self.dense_factory,
+          ),
+          decode_factory=dense_1x1_factory,
+          residual_from_encode=False,
+          rngs=nnx.Rngs(0),
+      )
+
+    n_layers = 2
+    latent_size = 8
+    process_factory = functools.partial(
+        transformer_layers.TransformerBlocks.build_using_factories,
+        intermediate_sizes=(latent_size,) * (n_layers - 1),
+        num_heads=2,
+        use_bias_in_attention=True,
+        out_use_bias=False,
+        normalize_qk=True,
+        attention_sink=True,
+        pre_normalization_factory=None,
+        gating=(
+            transformer_layers.no_gating,
+            *(transformer_layers.residual_gating,) * (2 * n_layers - 1),
+        ),
+        dense_factory=functools.partial(
+            standard_layers.Mlp.uniform,
+            hidden_size=latent_size,
+            hidden_layers=1,
+            use_bias=False,
+        ),
+    )
+    epd = transformer_layers.EpdTransformer.build_using_factories(
+        input_size=6,
+        output_size=5,
+        latent_size=latent_size,
+        num_process_blocks=1,
+        encode_factory=functools.partial(
+            standard_layers.Dense1x1, use_bias=True
+        ),
+        process_factory=process_factory,
+        decode_factory=functools.partial(
+            standard_layers.Dense1x1, use_bias=False
+        ),
+        pre_decode_normalization_factory=None,
+        residual_from_encode=False,
+        rngs=nnx.Rngs(0),
+    )
+    x = jax.random.normal(jax.random.key(0), (6, 1))
+    z = jax.random.normal(jax.random.key(1), (latent_size, 3))
+
+    all_false = np.zeros((1, 3), dtype=bool)
+    np.testing.assert_array_equal(
+        epd(x, z, mask=all_false), np.zeros((5, 1), dtype=np.float32)
+    )
+
+    partial_mask = np.array([[False, True, False]])
+    cotangent = jax.random.normal(jax.random.key(2), (5, 1))
+    grad_epd = nnx.grad(
+        lambda m: jax.numpy.sum(m(x, z, mask=partial_mask) * cotangent)
+    )(epd)
+    for path, leaf in jax.tree_util.tree_leaves_with_path(
+        nnx.state(grad_epd, nnx.Param)
+    ):
+      self.assertTrue(np.all(np.isfinite(leaf)), msg=f'Non-finite {path}')
+      self.assertGreater(
+          float(np.abs(leaf).max()), 0.0, msg=f'Zero gradient at {path}'
+      )
 
 
 if __name__ == '__main__':

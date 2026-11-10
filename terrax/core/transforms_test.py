@@ -1838,6 +1838,104 @@ class SanitizedNanGradTransformTest(parameterized.TestCase):
     np.testing.assert_allclose(out_san, out_orig, err_msg='output mismatch')
     chex.assert_trees_all_close(grads_san['transform'], grads_orig)
 
+  def test_excluded_keys_preserve_masked_nans(self):
+    """Verifies excluded keys keep semantic NaNs intact in the backward pass."""
+
+    class MaskedLagCorrection(transforms.TransformABC):
+
+      def __init__(self):
+        # `nnx.Param`s, which `nnx.grad` differentiates by default.
+        self.base_scale = nnx.Param(jnp.array(2.0))
+        self.lag_bias = nnx.Param(jnp.array(1.5))
+
+      def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+        base = inputs['a'] * self.base_scale.get_value()
+        filled_lag = transforms.FillNaNs(keys='lag', value=0.0)(inputs)['lag']
+        lag_update = filled_lag + self.lag_bias.get_value()
+        lag_is_nan = transforms.ComputeMasks('isnan')({'lag': inputs['lag']})[
+            'lag'
+        ]
+        masked_update = lag_update * (~lag_is_nan).astype(jnp.float32)
+        return {'a': base + masked_update}
+
+    # Index 0 is a padded slot (`a` and `lag` both NaN); index 1 is a valid
+    # slot whose optional `lag` is NaN (masked out); index 2 has both valid.
+    inputs = {
+        'a': cx.field(np.array([np.nan, 1.0, 2.0], np.float32), 'x'),
+        'lag': cx.field(np.array([np.nan, np.nan, 3.0], np.float32), 'x'),
+    }
+    inputs_valid = {
+        'a': cx.field(np.array([1.0, 2.0], np.float32), 'x'),
+        'lag': cx.field(np.array([np.nan, 3.0], np.float32), 'x'),
+    }
+    targets = {'a': MaskedLagCorrection()(inputs)['a'] + 0.5}
+    targets_valid = {'a': MaskedLagCorrection()(inputs_valid)['a'] + 0.5}
+
+    def loss_fn(model, x, y):
+      x_with_int = x | {'step': cx.field(jnp.array(3, jnp.int32))}
+      err = (model(x_with_int)['a'] - y['a']).data
+      valid = ~jnp.isnan(y['a'].data)
+      return jnp.sum(jnp.where(valid, err**2, 0.0)) / jnp.sum(valid)
+
+    ref_model = MaskedLagCorrection()
+    out_ref, (grads_ref, in_grads_ref) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1)
+    )(ref_model, inputs_valid, targets_valid)
+
+    san_model = transforms.SanitizeGradients(
+        MaskedLagCorrection(), keys=('lag',), invert=True
+    )
+    out_san, (grads_san, in_grads_san) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1)
+    )(san_model, inputs, targets)
+
+    np.testing.assert_allclose(out_san, out_ref)
+    chex.assert_trees_all_close(grads_san['transform'], grads_ref)
+    for leaf in jax.tree.leaves(in_grads_san):
+      self.assertTrue(np.all(np.isfinite(leaf)))
+    np.testing.assert_allclose(in_grads_san['lag'].data[:2], [0.0, 0.0])
+    np.testing.assert_allclose(
+        in_grads_san['lag'].data[2:], in_grads_ref['lag'].data[1:]
+    )
+
+  def test_invert_without_keys_raises(self):
+    sanitized = transforms.SanitizeGradients(SimpleScale(2.0), invert=True)
+    inputs = {'a': cx.field(np.array([1.0, 2.0], np.float32), 'x')}
+    with self.assertRaisesRegex(ValueError, 'sanitize no inputs'):
+      sanitized(inputs)
+
+  def test_transform_backward_nans_are_sanitized(self):
+    """NaNs produced by the backward pass of `transform` itself are zeroed."""
+
+    class SqrtScale(transforms.TransformABC):
+
+      def __init__(self):
+        self.scale = nnx.Param(jnp.array(2.0))
+
+      def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+        return {'a': cx.cmap(jnp.sqrt)(inputs['a'] * self.scale.get_value())}
+
+    # No NaNs in the inputs, but `d sqrt(a * w) / dw = a / (2 sqrt(a * w))` is
+    # `0 / 0 = nan` at `a == 0`, so the parameter cotangent (a sum over the
+    # entries) is NaN; the input cotangent `w / (2 sqrt(a * w))` is finite
+    # away from `a == 0` and must be left untouched there.
+    inputs = {'a': cx.field(np.array([0.0, 1.0, 4.0], np.float32), 'x')}
+
+    def loss_fn(model, x):
+      return jnp.sum(model(x)['a'].data)
+
+    out_ref, (grads_ref, in_grads_ref) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1)
+    )(SqrtScale(), inputs)
+    self.assertTrue(np.all(np.isnan(jax.tree.leaves(grads_ref))))
+    out_san, (grads_san, in_grads_san) = nnx.value_and_grad(
+        loss_fn, argnums=(0, 1)
+    )(transforms.SanitizeGradients(SqrtScale()), inputs)
+    np.testing.assert_allclose(out_san, out_ref)
+    np.testing.assert_array_equal(jax.tree.leaves(grads_san), [0.0])
+    np.testing.assert_allclose(
+        in_grads_san['a'].data[1:], in_grads_ref['a'].data[1:]
+    )
 
 class NestedTransformTest(parameterized.TestCase):
 

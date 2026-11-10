@@ -169,6 +169,7 @@ class Mlp(nnx.Module):
         rngs=rngs,
     )
 
+
 class MlpUniform(Mlp):
   """Multi-layer perceptron module with uniform layer sizes."""
 
@@ -234,7 +235,7 @@ def conv_dilated_ncw(
   )
 
 
-# TODO(dkochkov) Investigate performance of this layer.
+# TODO(dkochkov) Investigate performance of recurrent layers.
 
 
 class LSTMCell(nnx_recurrent.LSTMCell):
@@ -255,6 +256,7 @@ class LSTMCell(nnx_recurrent.LSTMCell):
         **kwargs,
     )
 
+
 class OptimizedLSTMCell(nnx_recurrent.OptimizedLSTMCell):
   """Optimized LSTM cell layer."""
 
@@ -272,6 +274,7 @@ class OptimizedLSTMCell(nnx_recurrent.OptimizedLSTMCell):
         rngs=rngs,
         **kwargs,
     )
+
 
 class GRUCell(nnx_recurrent.GRUCell):
   """GRU cell layer."""
@@ -291,6 +294,7 @@ class GRUCell(nnx_recurrent.GRUCell):
         **kwargs,
     )
 
+
 class SimpleCell(nnx_recurrent.SimpleCell):
   """Simple cell layer."""
 
@@ -308,6 +312,77 @@ class SimpleCell(nnx_recurrent.SimpleCell):
         rngs=rngs,
         **kwargs,
     )
+
+
+class Dense1x1(nnx.Module):
+  """Pointwise (`1x1`) channel mixing along the leading axis.
+
+  Maps inputs of shape `[input_size, *spatial]` to `[output_size, *spatial]`
+  with one matmul over the channel axis, `out[o, ...] = sum_c kernel[c, o] *
+  inputs[c, ...] + bias[o]`, for any number of trailing axes. This is a `1x1`
+  convolution (`ConvLevel(kernel_size=1)`, `ConvLonLat(kernel_size=(1, 1))`)
+  without the convolution machinery: parameters are a plain `[input_size,
+  output_size]` kernel and a `[output_size]` bias, and the einsum has complete
+  `vmap` batching rules, whereas the backward pass of `conv_general_dilated`
+  (grouped convolutions) is not implemented for batched kernels with unbatched
+  inputs under sharding, which nested-`vmap` programs on TPU hit. Prefer it
+  over `1x1` convolutions.
+  """
+
+  def __init__(
+      self,
+      input_size: int,
+      output_size: int,
+      *,
+      use_bias: bool = True,
+      precision: flax_typing.PrecisionLike = None,
+      w_init: nnx.initializers.Initializer = default_w_init,
+      b_init: nnx.initializers.Initializer = default_b_init,
+      dtype: typing.Dtype = jnp.float32,
+      rngs: nnx.Rngs,
+  ):
+    """Constructs a Dense1x1 layer.
+
+    Args:
+      input_size: Size of the leading (channel) axis of the inputs.
+      output_size: Size of the leading (channel) axis of the outputs.
+      use_bias: Whether to add a per-output-channel bias.
+      precision: Numerical precision of the matmul.
+      w_init: Initializer of the `[input_size, output_size]` kernel.
+      b_init: Initializer of the `[output_size]` bias.
+      dtype: Parameter dtype.
+      rngs: Random number generators for parameter initialization.
+    """
+    self.input_size = input_size
+    self.output_size = output_size
+    self.precision = precision
+    self.kernel = nnx.Param(
+        w_init(rngs.params(), (input_size, output_size), dtype)
+    )
+    self.bias: nnx.Param | None
+    if use_bias:
+      self.bias = nnx.Param(b_init(rngs.params(), (output_size,), dtype))
+    else:
+      self.bias = None
+
+  def __call__(self, inputs: jax.Array) -> jax.Array:
+    """Mixes the channels of `inputs` of shape `[input_size, *spatial]`."""
+    if inputs.shape[0] != self.input_size:
+      raise ValueError(
+          f'Expected a leading axis of size {self.input_size}, got'
+          f' {inputs.shape=}.'
+      )
+    out = jnp.einsum(
+        'c...,co->o...',
+        inputs,
+        self.kernel.get_value(),
+        precision=self.precision,
+    )
+    if self.bias is not None:
+      bias = self.bias.get_value()
+      out = out + bias.reshape(bias.shape + (1,) * (out.ndim - 1))
+    return out
+
 
 class ConvLevel(nnx.Conv):
   """1D convolution in the NCW data format that preserves tail axis shape."""
@@ -476,6 +551,15 @@ class ConvLonLat(nnx.Module):
     if needs_padding:
       outputs = trim(self.bc, outputs)
     return outputs
+
+
+def standardize(inputs: jax.Array, epsilon: float = 1e-5) -> jax.Array:
+  """Re-exposes `jax.nn.standardize(axis=-1)` for config serialization."""
+  mean = jnp.mean(inputs, axis=-1, keepdims=True)
+  # Two-pass variance (`jax.nn.standardize` uses `E[x^2] - E[x]^2`, which loses
+  # float32 precision for inputs with a large mean).
+  var = jnp.mean(jnp.square(inputs - mean), axis=-1, keepdims=True)
+  return (inputs - mean) * jax.lax.rsqrt(var + epsilon)
 
 
 @nnx.dataclass

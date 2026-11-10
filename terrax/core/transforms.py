@@ -2506,27 +2506,48 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
     return outputs
 
 
-def _sanitize_values(
-    values: typing.Pytree,
-    masks: typing.Pytree,
-) -> dict[str, cx.Field]:
-  """Masks values where mask is True, preserving structure."""
-  _clean = lambda x, m: jnp.where(m, jnp.zeros((), x.dtype), x)
-  return jax.tree.map(_clean, values, masks)
+def _sanitize_nans(values: typing.Pytree) -> typing.Pytree:
+  """Replaces NaN entries in floating-point leaves with zeros."""
+
+  def _clean(x):
+    # Only floating-point (and complex) leaves can hold NaNs. Integer and bool
+    # leaves, and the `float0` cotangents that `jax.vjp` returns for them, are
+    # passed through unchanged (`jnp.isnan` is undefined for `float0`).
+    if jnp.issubdtype(x.dtype, jnp.inexact):
+      return jnp.where(jnp.isnan(x), jnp.zeros((), x.dtype), x)
+    return x
+
+  return jax.tree.map(_clean, values)
 
 
 @nnx.dataclass
 class SanitizeGradients(TransformABC):
   """Wraps a transform to provide NaN-safe gradients.
 
-  Uses a custom VJP to sanitize inputs and gradients by replacing NaNs with
-  zeros during the backward pass, ensuring stable learning, while preserving
-  the original transform's behavior in the forward pass to correctly inform NaN
-  locations for weighting, collecting statistics etc. This effectively results
-  in an additional forward pass in the backward propagation, similar to remat.
+  Uses a custom VJP to sanitize selected inputs and output gradients by
+  replacing NaNs with zeros during the backward pass, ensuring stable learning,
+  while preserving the original transform's behavior in the forward pass to
+  correctly inform NaN locations for weighting, collecting statistics etc. This
+  effectively results in an additional forward pass in the backward propagation,
+  similar to remat. The cotangents returned for the inputs and for the state of
+  ``transform`` are sanitized as well, so NaNs produced by the backward pass of
+  ``transform`` itself (e.g. ``sqrt`` or ``log`` at zero, or ``0 * nan`` against
+  an unsanitized input) do not propagate.
+
+  Input keys whose NaNs carry semantic meaning handled inside ``transform``
+  (e.g. optional features masked via ``ComputeMasks('isnan')`` and ``FillNaNs``)
+  can be excluded with ``keys`` and ``invert=True`` so that the backward pass
+  evaluates ``transform`` under the same NaN masks as the forward pass. Excluded
+  keys must be consumed through ``where``-style masking (``FillNaNs``,
+  ``jnp.where``) inside ``transform``; arithmetic on their NaNs (e.g. ``x * 0``)
+  would propagate NaNs into the forward outputs.
 
   Args:
     transform: The Transform to wrap.
+    keys: Input keys to sanitize in the backward pass (passed to
+      ``SelectKeys(..., strict=False)``). If None, sanitizes all input keys.
+    invert: Whether to invert the ``keys`` selection, sanitizing all input keys
+      except ``keys``. Requires ``keys``.
 
   Examples:
     >>> import coordax as cx
@@ -2535,9 +2556,16 @@ class SanitizeGradients(TransformABC):
     >>> safe_tx = transforms.SanitizeGradients(transforms.Identity())
   """
 
-  transform: Transform
+  transform: Transform = nnx.data()
+  keys: str | Sequence[str] | Callable[[str], bool] | None = None
+  invert: bool = False
 
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    if self.keys is None and self.invert:
+      raise ValueError(
+          'SanitizeGradients(keys=None, invert=True) would sanitize no inputs;'
+          ' pass the keys to exclude.'
+      )
     t_def, t_state_before = nnx.split(self.transform)
 
     def _apply_transform(s, x):
@@ -2564,12 +2592,16 @@ class SanitizeGradients(TransformABC):
     def _sanitized_bwd(res, g):
       out_g, state_updates_g = g
       x, s_before = res
-      is_nan = jax.tree.map(jnp.isnan, x)
-      safe_inputs = _sanitize_values(x, is_nan)  # Sanitize inputs.
-      grad_nans = jax.tree.map(jnp.isnan, out_g)  # Sanitize gradients.
-      safe_out_g = _sanitize_values(out_g, grad_nans)
+      if self.keys is None:
+        to_sanitize = x
+      else:
+        to_sanitize = SelectKeys(self.keys, self.invert, strict=False)(x)
+      safe_selected = _sanitize_nans(to_sanitize)
+      safe_inputs = {k: safe_selected.get(k, v) for k, v in x.items()}
+      safe_out_g = _sanitize_nans(out_g)  # Sanitize gradients.
       _, vjp_fn = jax.vjp(_apply_transform, s_before, safe_inputs)
-      return vjp_fn((safe_out_g, state_updates_g))
+      s_g, x_g = vjp_fn((safe_out_g, state_updates_g))
+      return _sanitize_nans(s_g), _sanitize_nans(x_g)
 
     _sanitized_transform.defvjp(_sanitized_fwd, _sanitized_bwd)
     out, state_updates = _sanitized_transform(t_state_before, inputs)
