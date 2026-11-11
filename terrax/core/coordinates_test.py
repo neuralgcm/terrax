@@ -338,6 +338,23 @@ class CoordinatesMethodsTest(parameterized.TestCase):
     self.assertEqual(grid_cls.F48(), grid_cls.TL95())
     self.assertEqual(grid_cls.F64(), grid_cls.TL127())
 
+  @parameterized.parameters(
+      (120, (240, 121)),
+      (720, (1440, 721)),
+      (1800, (3600, 1801)),
+  )
+  def test_equiangular_linear_grids(self, max_wavenumber, expected_shape):
+    lon_lat = getattr(coordinates.LonLatGrid, f'EL{max_wavenumber}')()
+    ylm = getattr(coordinates.SphericalHarmonicGrid, f'EL{max_wavenumber}')()
+    self.assertEqual(lon_lat.shape, expected_shape)
+    self.assertEqual(lon_lat.latitude_spacing, 'equiangular_with_poles')
+    self.assertEqual(
+        ylm,
+        coordinates.SphericalHarmonicGrid.construct(
+            max_wavenumber=max_wavenumber
+        ),
+    )
+
   def test_lon_lat_grid_construct_explicit_nodes(self):
     grid = coordinates.LonLatGrid.construct(
         longitude_nodes=382, latitude_nodes=191

@@ -631,6 +631,16 @@ class LonLatGrid(cx.Coordinate):
     """Equiangular linear grid resolving up to wavenumber 120."""
     return cls.construct_equiangular_linear(max_wavenumber=120, **kwargs)
 
+  @classmethod
+  def EL720(cls, **kwargs) -> LonLatGrid:
+    """Equiangular linear grid resolving up to wavenumber 720 (0.25 deg)."""
+    return cls.construct_equiangular_linear(max_wavenumber=720, **kwargs)
+
+  @classmethod
+  def EL1800(cls, **kwargs) -> LonLatGrid:
+    """Equiangular linear grid resolving up to wavenumber 1800 (0.1 deg)."""
+    return cls.construct_equiangular_linear(max_wavenumber=1800, **kwargs)
+
   # F* grids are regular Gaussian grids named by the number of latitude nodes
   # between a pole and the equator, i.e. F<N> has shape (4N, 2N). This follows
   # ECMWF's "F<N>" naming for full (regular) Gaussian grids. They are named by
@@ -1109,6 +1119,16 @@ class SphericalHarmonicGrid(cx.Coordinate):
   def EL120(cls, **kwargs) -> SphericalHarmonicGrid:
     """Equiangular linear grid resolving up to wavenumber 120."""
     return cls.construct(max_wavenumber=120, **kwargs)
+
+  @classmethod
+  def EL720(cls, **kwargs) -> SphericalHarmonicGrid:
+    """Equiangular linear grid resolving up to wavenumber 720."""
+    return cls.construct(max_wavenumber=720, **kwargs)
+
+  @classmethod
+  def EL1800(cls, **kwargs) -> SphericalHarmonicGrid:
+    """Equiangular linear grid resolving up to wavenumber 1800."""
+    return cls.construct(max_wavenumber=1800, **kwargs)
 
   def to_xarray(self) -> dict[str, xarray.Variable]:
     variables = super().to_xarray()
