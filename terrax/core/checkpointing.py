@@ -13,7 +13,7 @@
 # limitations under the License.
 """Helper utilities for checkpointing Fiddle configs used in Terrax."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import json
 from typing import Any, NamedTuple
 
@@ -69,6 +69,34 @@ def without_paths(json_data: Any) -> Any:
 _STATE_KEY = 'state'
 _CONFIG_KEY = 'fiddle_config'
 
+# A fiddler modifies a model config in place or returns a new config.
+ConfigFiddler = Callable[[fdl.Config], fdl.Config | None]
+
+
+def apply_config_fiddlers(
+    config: fdl.Config, fiddlers: Sequence[ConfigFiddler]
+) -> fdl.Config:
+  """Returns `config` with `fiddlers` applied in order.
+
+  Checkpoints restore only parameters (and other non-simulation variables), so
+  fiddlers applied to a checkpoint's model config before building may change
+  anything else, e.g. static settings of diagnostics or the simulation state a
+  model tracks, but not the structure of its parameters.
+
+  Args:
+    config: Model config to modify.
+    fiddlers: Functions applied to the config in order. Following the Fiddle
+      convention, a fiddler either modifies the config in place and returns
+      `None` or returns a new config, e.g. a wrapper around the input config.
+
+  Returns:
+    The modified config.
+  """
+  for fiddler in fiddlers:
+    new_config = fiddler(config)
+    config = config if new_config is None else new_config
+  return config
+
 
 def load_model_checkpoint(
     path: str | epath.PathLike,
@@ -76,6 +104,7 @@ def load_model_checkpoint(
     attrs_to_update: Sequence[str] = ('spmd_mesh',),
     *,
     eager: bool = False,
+    config_fiddlers: Sequence[ConfigFiddler] = (),
 ) -> api.Model:
   """Loads a Model from a checkpoint.
 
@@ -91,6 +120,8 @@ def load_model_checkpoint(
       checkpoint's config.
     eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
       `api.Model.from_fiddle_config`.
+    config_fiddlers: Fiddlers applied to the saved model config before the
+      model is built, see `apply_config_fiddlers`.
 
   Returns:
     The restored `api.Model` instance.
@@ -101,6 +132,7 @@ def load_model_checkpoint(
   config_args = ocp.args.Composite(**{_CONFIG_KEY: ocp.args.JsonRestore()})
   model_config_dict = checkpointer.restore(path, config_args)[_CONFIG_KEY]
   model_config = serialization.load_json(json.dumps(model_config_dict))
+  model_config = apply_config_fiddlers(model_config, config_fiddlers)
   model = api.Model.from_fiddle_config(
       model_config,
       mesh=mesh,

@@ -110,6 +110,7 @@ def untrained_model_from_training_dir(
     attrs_to_update: Sequence[str] = ('spmd_mesh',),
     *,
     eager: bool = False,
+    config_fiddlers: Sequence[model_checkpointing.ConfigFiddler] = (),
 ) -> api.Model:
   """Loads a Model from training directory metadata without restoring weights.
 
@@ -123,6 +124,8 @@ def untrained_model_from_training_dir(
       model config when `mesh` is provided. Defaults to `('spmd_mesh',)`.
     eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
       `api.Model.from_fiddle_config`.
+    config_fiddlers: Fiddlers applied to the saved model config before the
+      model is built, see `model_checkpointing.apply_config_fiddlers`.
 
   Returns:
     An initialized `api.Model` instance before checkpoint restoration.
@@ -134,6 +137,9 @@ def untrained_model_from_training_dir(
   # refactoring fiddle.experiment.serialization.
   logging.info('loading model config into fiddle')
   model_config = load_fiddle_json(json.dumps(model_config_dict))
+  model_config = model_checkpointing.apply_config_fiddlers(
+      model_config, config_fiddlers
+  )
   logging.info('building model')
   return api.Model.from_fiddle_config(
       model_config,
@@ -151,6 +157,7 @@ def model_from_training_checkpoint(
     attrs_to_update: Sequence[str] = ('spmd_mesh',),
     *,
     eager: bool = False,
+    config_fiddlers: Sequence[model_checkpointing.ConfigFiddler] = (),
 ) -> api.Model:
   """Loads a Model and its parameters from a training checkpoint.
 
@@ -168,6 +175,9 @@ def model_from_training_checkpoint(
       model config when `mesh` is provided. Defaults to `('spmd_mesh',)`.
     eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
       `api.Model.from_fiddle_config`.
+    config_fiddlers: Fiddlers applied to the saved model config before the
+      model is built, see `model_checkpointing.apply_config_fiddlers`. They must
+      not change the structure of the restored parameters.
 
   Returns:
     The restored `api.Model` instance.
@@ -178,6 +188,7 @@ def model_from_training_checkpoint(
       mesh=mesh,
       attrs_to_update=attrs_to_update,
       eager=eager,
+      config_fiddlers=config_fiddlers,
   )
   state = model_checkpointing.split_model_state_for_saving(model)
 
@@ -213,6 +224,7 @@ def export_training_to_model_checkpoint(
     use_ema_params: bool = True,
     *,
     eager: bool = False,
+    config_fiddlers: Sequence[model_checkpointing.ConfigFiddler] = (),
 ) -> None:
   """Loads a training checkpoint and saves it as a standalone model checkpoint.
 
@@ -224,11 +236,15 @@ def export_training_to_model_checkpoint(
     use_ema_params: Whether to use the EMA params or the non-EMA params.
     eager: Whether to build the model eagerly instead of inside `nnx.jit`. See
       `api.Model.from_fiddle_config`.
+    config_fiddlers: Fiddlers applied to the saved model config before the
+      model is built, see `model_checkpointing.apply_config_fiddlers`. The
+      exported checkpoint stores the modified config.
   """
   model = model_from_training_checkpoint(
       train_checkpoints_dir,
       step=train_step,
       use_ema_params=use_ema_params,
       eager=eager,
+      config_fiddlers=config_fiddlers,
   )
   model_checkpointing.save_checkpoint(model, model_checkpoint_path)

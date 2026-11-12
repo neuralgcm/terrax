@@ -20,6 +20,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import chex
 import coordax as cx
+import fiddle as fdl
 from fiddle.experimental import auto_config
 from flax import nnx
 import jax
@@ -150,6 +151,43 @@ class CheckpointingTest(parameterized.TestCase):
         checkpointing.split_model_state_for_saving(restored_model)
     ):
       self.assertEqual(leaf.sharding, expected_sharding)
+
+  def test_apply_config_fiddlers(self):
+    cfg = build_model.as_buildable()
+
+    def set_t31_grid(cfg):  # Modifies in place, returns None.
+      cfg[0] = fdl.Config(coordinates.LonLatGrid.T31)  # `grid` is positional.
+
+    def wrap(cfg):  # Returns a new config.
+      return fdl.Config(dict, model=cfg)
+
+    result = checkpointing.apply_config_fiddlers(cfg, [set_t31_grid, wrap])
+    self.assertEqual(fdl.get_callable(result), dict)
+    self.assertIs(result.model, cfg)
+    self.assertEqual(cfg[0], fdl.Config(coordinates.LonLatGrid.T31))
+
+  def test_load_with_config_fiddlers(self):
+    path = os.path.join(self.create_tempdir(), 'checkpoint')
+    model = api.Model.from_fiddle_config(build_model.as_buildable())
+    checkpointing.save_checkpoint(model, path)
+
+    def set_t31_grid(cfg):
+      cfg[0] = fdl.Config(coordinates.LonLatGrid.T31)  # `grid` is positional.
+
+    restored = checkpointing.load_model_checkpoint(
+        path, config_fiddlers=[set_t31_grid]
+    )
+    # The grid is not part of the saved state, so it follows the fiddler, while
+    # parameters are restored from the checkpoint.
+    self.assertEqual(
+        restored.process.sampler.sample_coord, coordinates.LonLatGrid.T31()
+    )
+    self.assertEqual(
+        restored.fiddle_config[0], fdl.Config(coordinates.LonLatGrid.T31)
+    )
+    chex.assert_trees_all_equal(
+        nnx.state(restored, nnx.Param), nnx.state(model, nnx.Param)
+    )
 
   def test_without_paths(self):
     serialized = {

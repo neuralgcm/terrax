@@ -645,7 +645,11 @@ class ModelCalibratorsTest(absltest.TestCase):
           is_training_checkpoint=True,
       )(model, None, None)
       mock_untrained.assert_called_once_with(
-          ckpt_dir, mesh=mesh, attrs_to_update=('spmd_mesh',), eager=False
+          ckpt_dir,
+          mesh=mesh,
+          attrs_to_update=('spmd_mesh',),
+          eager=False,
+          config_fiddlers=(),
       )
 
     expected_sharding = jax.sharding.NamedSharding(
