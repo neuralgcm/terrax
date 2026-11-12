@@ -219,6 +219,41 @@ class ReadFromXarrayTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, '.* have different dims'):
       xarray_utils.read_from_xarray(nested_data, inputs_spec)
 
+  @parameterized.named_parameters(
+      dict(testcase_name='strict', strict_matches=True),
+      dict(testcase_name='non_strict', strict_matches=False),
+  )
+  def test_read_from_xarray_sized_axis_spec(self, strict_matches):
+    """Dimensions without coordinate values are read as the spec's SizedAxis."""
+    station = cx.SizedAxis('index', 4)
+    inputs_spec = {
+        'stations': {
+            '2m_temperature': data_specs.CoordSpec.with_any_timedelta(station)
+        }
+    }
+    data = xarray.DataArray(
+        np.ones((2, 4)),
+        dims=('timedelta', 'index'),
+        coords={'timedelta': np.arange(2) * np.timedelta64(1, 'h')},
+    )
+    nested_data = {'stations': xarray.Dataset({'2m_temperature': data})}
+    read_data = xarray_utils.read_from_xarray(
+        nested_data, inputs_spec, strict_matches=strict_matches
+    )
+    actual = read_data['stations']['2m_temperature'].coordinate
+    expected = cx.coords.compose(
+        coordinates.TimeDelta(data.timedelta.values), station
+    )
+    self.assertEqual(actual, expected)
+    # Without a spec, such dimensions still fall back to DummyAxis.
+    self.assertEqual(
+        xarray_utils.from_xarray(data).coordinate,
+        cx.coords.compose(
+            coordinates.TimeDelta(data.timedelta.values),
+            cx.DummyAxis('index', 4),
+        ),
+    )
+
   def test_read_from_xarray_new_coord_type(self):
     """Tests that read_fields_from_xarray works with new coordinate types."""
     custom_axis = CustomCoord(sz=3)

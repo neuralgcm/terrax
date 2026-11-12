@@ -57,8 +57,11 @@ CORE_COORD_TYPES = (
     coordinates.SigmaLevels,
     coordinates.SigmaBoundaries,
     coordinates.LayerLevels,
-    cx.DummyAxis,
 )
+# Generic placeholders for dimensions without coordinate values. Tried after
+# `CORE_COORD_TYPES` and any additional coordinate types, so that a type that
+# describes such a dimension (e.g. `cx.SizedAxis` from a spec) takes precedence.
+FALLBACK_COORD_TYPES = (cx.DummyAxis,)
 
 
 @overload
@@ -160,19 +163,23 @@ def from_xarray(
   * ``dict`` -> ``dict`` with the same keys and converted values.
 
   Unlike `cx.from_xarray`, coordinates are inferred using Terrax coordinate
-  types (see `CORE_COORD_TYPES`). Datasets indexed by absolute ``time`` should
-  be converted with `ensure_timedelta_axis` first. To read data that should
-  match an inputs spec, use `read_from_xarray` instead.
+  types (see `CORE_COORD_TYPES`), with `cx.DummyAxis` as a fallback for
+  dimensions without coordinate values. Datasets indexed by absolute ``time``
+  should be converted with `ensure_timedelta_axis` first. To read data that
+  should match an inputs spec, use `read_from_xarray` instead.
 
   Args:
     data: data array, dataset or (nested) dictionary of datasets to convert.
     additional_coord_types: coordinate types to try in addition to
-      `CORE_COORD_TYPES` when inferring coordinates from the data.
+      `CORE_COORD_TYPES` when inferring coordinates from the data. These take
+      precedence over the `cx.DummyAxis` fallback.
 
   Returns:
     Fields with the same nesting structure as `data`.
   """
-  coord_types = CORE_COORD_TYPES + tuple(additional_coord_types)
+  coord_types = (
+      CORE_COORD_TYPES + tuple(additional_coord_types) + FALLBACK_COORD_TYPES
+  )
   if isinstance(data, xarray.DataArray):
     return cx.from_xarray(data, coord_types)
   if isinstance(data, xarray.Dataset):
