@@ -66,9 +66,32 @@ def _equiangular_240x121_grid(**kwargs) -> Grid:
   )
 
 
+def _equiangular_1440x721_grid(**kwargs) -> Grid:
+  """Constructs a dinosaur Grid for the 0.25° equiangular_with_poles grid.
+
+  This grid has 1440 longitude nodes, 721 latitude nodes (including poles), and
+  resolves up to wavenumber 720 (linear truncation).
+
+  Args:
+    **kwargs: Additional keyword arguments to pass to the Grid constructor.
+
+  Returns:
+    A dinosaur Grid object.
+  """
+  return Grid(
+      longitude_wavenumbers=720,
+      total_wavenumbers=721,
+      longitude_nodes=1440,
+      latitude_nodes=721,
+      latitude_spacing='equiangular_with_poles',
+      **kwargs,
+  )
+
+
 # Additional non-Gaussian linear grids.
 equiangular_linear_dino_grid_constructors = [
     _equiangular_240x121_grid,
+    _equiangular_1440x721_grid,
 ]
 
 # Cubic shape-to-cls dicts.
@@ -400,6 +423,7 @@ class YlmMapper:
         self.partition_schema_key, dims_to_axes
     )
 
+  @functools.lru_cache(maxsize=32)
   def dinosaur_grid(
       self,
       grid: coordinates.LonLatGrid | coordinates.SphericalHarmonicGrid,
@@ -438,6 +462,7 @@ class YlmMapper:
     dino_grid = self.dinosaur_grid(ylm_grid)
     return coordinates.LonLatGrid.from_dinosaur_grid(dino_grid)
 
+  @functools.lru_cache(maxsize=32)
   def ylm_map(
       self, grid: coordinates.SphericalHarmonicGrid | coordinates.LonLatGrid
   ) -> FixedYlmMapping:

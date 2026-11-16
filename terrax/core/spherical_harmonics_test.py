@@ -454,33 +454,33 @@ class GeometryMethodsTest(chex.TestCase):
     np.testing.assert_allclose(actual_u, expected_u)
     np.testing.assert_allclose(actual_v, expected_v)
 
-class Equiangular240x121Test(parameterized.TestCase):
-  """Tests that the equiangular_240x121 grid is recognized by YlmMapper."""
 
-  def test_ylm_mapper_resolves_equiangular_240x121(self):
-    """YlmMapper should resolve the equiangular 240x121 grid shape."""
+class EquiangularGridsTest(parameterized.TestCase):
+  """Tests that equiangular linear grids are recognized by YlmMapper."""
+
+  @parameterized.parameters(
+      dict(longitude_nodes=240, latitude_nodes=121, longitude_wavenumbers=120),
+      dict(longitude_nodes=1440, latitude_nodes=721, longitude_wavenumbers=720),
+  )
+  def test_ylm_mapper_resolves_equiangular_linear_grids(
+      self,
+      longitude_nodes: int,
+      latitude_nodes: int,
+      longitude_wavenumbers: int,
+  ):
+    """YlmMapper should resolve equiangular linear grid shapes."""
     grid = coordinates.LonLatGrid(
-        longitude_nodes=240,
-        latitude_nodes=121,
+        longitude_nodes=longitude_nodes,
+        latitude_nodes=latitude_nodes,
         latitude_spacing='equiangular_with_poles',
     )
     ylm_mapper = spherical_harmonics.YlmMapper(truncation_rule='linear')
     # This should not raise a KeyError.
     dino_grid = ylm_mapper.dinosaur_grid(grid)
-    self.assertEqual(dino_grid.longitude_nodes, 240)
-    self.assertEqual(dino_grid.latitude_nodes, 121)
-
-  def test_ylm_mapper_modal_grid_for_equiangular_240x121(self):
-    """YlmMapper should produce a compatible modal grid."""
-    grid = coordinates.LonLatGrid(
-        longitude_nodes=240,
-        latitude_nodes=121,
-        latitude_spacing='equiangular_with_poles',
-    )
-    ylm_mapper = spherical_harmonics.YlmMapper(truncation_rule='linear')
+    self.assertEqual(dino_grid.longitude_nodes, longitude_nodes)
+    self.assertEqual(dino_grid.latitude_nodes, latitude_nodes)
     modal_grid = ylm_mapper.modal_grid(grid)
-    # 120 longitude wavenumbers, matching with_wavenumbers(120).
-    self.assertEqual(modal_grid.longitude_wavenumbers, 120)
+    self.assertEqual(modal_grid.longitude_wavenumbers, longitude_wavenumbers)
 
   @parameterized.parameters('fast', 'real')
   def test_ylm_mapper_roundtrip_equiangular_240x121(self, method):
@@ -516,6 +516,22 @@ class Equiangular240x121Test(parameterized.TestCase):
     restored_f = ylm_map.to_nodal(modal_f)
     self.assertEqual(cx.get_coordinate(restored_f), nodal_grid)
     np.testing.assert_allclose(restored_f.data, f.data, atol=1e-5)
+
+  def test_ylm_mapper_caches_ylm_map_and_basis(self):
+    """YlmMapper should reuse FixedYlmMapping and dinosaur_grid across calls."""
+    grid = coordinates.LonLatGrid.T21()
+    ylm_mapper = spherical_harmonics.YlmMapper(
+        truncation_rule='cubic',
+        basis_as_jax_arrays=True,
+    )
+    map_1 = ylm_mapper.ylm_map(grid)
+    map_2 = ylm_mapper.ylm_map(grid)
+    self.assertIs(map_1, map_2)
+    self.assertIs(map_1.dinosaur_grid, map_2.dinosaur_grid)
+    self.assertIs(
+        map_1.dinosaur_grid.spherical_harmonics.basis.p,
+        map_2.dinosaur_grid.spherical_harmonics.basis.p,
+    )
 
 
 if __name__ == '__main__':
