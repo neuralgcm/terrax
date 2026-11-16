@@ -740,14 +740,18 @@ class GaussianRandomFieldCore(nnx.Module):
     if sampler is None:
       dist = TruncatedNormalDistribution(-self.clip, self.clip)
       sampler = DistributionSampler(dist, self.core_grid)
+    draw_data = sampler.draw(cx.field(rng)).data  # pyrefly: ignore[bad-argument-type]
+    return self.sample_core_from_draw(draw_data)  # pyrefly: ignore[bad-argument-type]
 
+  def sample_core_from_draw(self, draw_data: jax.Array) -> jax.Array:
+    """Applies GRF sigma weighting and masking to pre-drawn random values."""
     dinosaur_grid = self.ylm_map.dinosaur_grid
     modal_shape = dinosaur_grid.modal_shape
     # By using stationary array we avoid 0/0 division if `dt == 0`.
     sigmas = self._stationary_sigma_array()
     weights = jnp.where(
         dinosaur_grid.mask,
-        sampler.draw(cx.field(rng)).data,  # pyrefly: ignore[bad-argument-type]
+        draw_data,
         jnp.zeros(modal_shape),
     )
     return sigmas * weights
@@ -763,13 +767,18 @@ class GaussianRandomFieldCore(nnx.Module):
     if sampler is None:
       dist = TruncatedNormalDistribution(-self.clip, self.clip)
       sampler = DistributionSampler(dist, self.core_grid)
+    rng = _advance_prng_key(state_key, state_step)
+    draw_data = sampler.draw(cx.field(rng)).data
+    return self.advance_core_from_draw(state_core, draw_data)  # pyrefly: ignore[bad-argument-type]
 
+  def advance_core_from_draw(
+      self, state_core: jax.Array, draw_data: jax.Array
+  ) -> jax.Array:
+    """Applies AR(1) dynamics to core state using pre-drawn random values."""
     dinosaur_grid = self.ylm_map.dinosaur_grid
     modal_shape = dinosaur_grid.modal_shape
-    rng = _advance_prng_key(state_key, state_step)
-    eta = sampler.draw(cx.field(rng)).data
     return state_core * self.phi + self._sigma_array() * jnp.where(
-        dinosaur_grid.mask, eta, jnp.zeros(modal_shape)  # pyrefly: ignore[bad-argument-type]
+        dinosaur_grid.mask, draw_data, jnp.zeros(modal_shape)  # pyrefly: ignore[bad-argument-type]
     )
 
   @property
@@ -988,7 +997,7 @@ class VectorizedGaussianRandomField(RandomProcessModule):
       rngs: nnx.Rngs,
   ):
     dist = TruncatedNormalDistribution(-clip, clip)
-    coord = ylm_map.ylm_grid
+    coord = cx.coords.compose(axis, ylm_map.ylm_grid)
     sampler = DistributionSampler(dist, coord)
     return cls(
         sampler=sampler,
@@ -1015,12 +1024,14 @@ class VectorizedGaussianRandomField(RandomProcessModule):
 
   def _sample_core(self, rng: cx.Field) -> cx.Field:
     """Samples the core state of a collection of gaussian random fields."""
-    split = lambda k: jax.random.split(k, self.n_fields)
-    rngs = cx.cmap(split)(rng).tag(self.axis)
-    sample_single = lambda grf, sampler, rng: grf.sample_core(rng, sampler)
-    sample_collection = nnx.vmap(sample_single, in_axes=(0, 0, 0))
+    # Draw from sampler outside vmap to handle stateful samplers correctly.
+    draws = self.sampler.draw(rng)
+    # Apply per-field GRF sigma weighting inside vmap.
+    sample_single = lambda grf, draw: grf.sample_core_from_draw(draw)
+    sample_collection = nnx.vmap(sample_single, in_axes=(0, 0))
     return cx.cmap(sample_collection, vmap=nnx.vmap, out_axes='leading')(
-        self.batch_grf_core, self.sampler, rngs.untag(self.axis)
+        self.batch_grf_core,
+        draws.untag(self.axis, self.batch_grf_core.core_grid),
     ).tag(self.axis, self.batch_grf_core.core_grid)
 
   def unconditional_sample(self, rng: cx.Field) -> None:
@@ -1033,19 +1044,18 @@ class VectorizedGaussianRandomField(RandomProcessModule):
 
   def advance(self) -> None:
     rng, step = self.state_rng.get_value(), self.rng_step.get_value()
-    split = lambda k: jax.random.split(k, self.n_fields)
-    rngs = cx.cmap(split)(rng).tag(self.axis)
-    advance_keys = cx.cmap(_advance_prng_key)(rngs, step)
-    advance_single = lambda grf, sampler, core, k, step: grf.advance_core(
-        core, k, step, sampler
+    draw_rng = cx.cmap(_advance_prng_key)(rng, step)
+    # Draw from sampler outside vmap to handle stateful samplers correctly.
+    draws = self.sampler.draw(draw_rng)
+    # Apply per-field AR(1) dynamics inside vmap.
+    advance_single = lambda grf, core, draw: grf.advance_core_from_draw(
+        core, draw
     )
-    advance_collection = nnx.vmap(advance_single, in_axes=(0, 0, 0, 0, None))
+    advance_collection = nnx.vmap(advance_single, in_axes=(0, 0, 0))
     next_core = cx.cmap(advance_collection, vmap=nnx.vmap, out_axes='leading')(
         self.batch_grf_core,
-        self.sampler,
         self.core.get_value().untag(self.axis, self.batch_grf_core.core_grid),
-        advance_keys.untag(self.axis),
-        step,
+        draws.untag(self.axis, self.batch_grf_core.core_grid),
     ).tag(self.axis, self.batch_grf_core.core_grid)
     self.rng_step.set_value(self.rng_step.get_value() + 1)
     self.core.set_value(next_core)
