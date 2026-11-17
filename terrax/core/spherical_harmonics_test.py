@@ -460,6 +460,7 @@ class EquiangularGridsTest(parameterized.TestCase):
 
   @parameterized.parameters(
       dict(longitude_nodes=240, latitude_nodes=121, longitude_wavenumbers=120),
+      dict(longitude_nodes=360, latitude_nodes=181, longitude_wavenumbers=180),
       dict(longitude_nodes=1440, latitude_nodes=721, longitude_wavenumbers=720),
   )
   def test_ylm_mapper_resolves_equiangular_linear_grids(
@@ -516,6 +517,64 @@ class EquiangularGridsTest(parameterized.TestCase):
     restored_f = ylm_map.to_nodal(modal_f)
     self.assertEqual(cx.get_coordinate(restored_f), nodal_grid)
     np.testing.assert_allclose(restored_f.data, f.data, atol=1e-5)
+
+  @parameterized.parameters('fast', 'real')
+  def test_standard_grid_takes_precedence_for_shared_modal_shape(self, method):
+    """Modal shape shared by TL179 and EL180 grids resolves to TL179."""
+    ylm_mapper = spherical_harmonics.YlmMapper(
+        truncation_rule='linear',
+        spherical_harmonics_method=method,
+    )
+    equiangular_grid = coordinates.LonLatGrid.EL180()
+    tl179_ylm_grid = coordinates.SphericalHarmonicGrid.TL179(
+        spherical_harmonics_method=method
+    )
+    self.assertEqual(ylm_mapper.modal_grid(equiangular_grid), tl179_ylm_grid)
+    self.assertEqual(
+        ylm_mapper.nodal_grid(tl179_ylm_grid), coordinates.LonLatGrid.TL179()
+    )
+
+  @parameterized.parameters('fast', 'real')
+  def test_el180_transforms_use_nodes_of_inputs(self, method):
+    """Data on the EL180 grid is not transformed as if it were on TL179."""
+    ylm_mapper = spherical_harmonics.YlmMapper(
+        truncation_rule='linear',
+        spherical_harmonics_method=method,
+    )
+    grid = coordinates.LonLatGrid.EL180()
+    tl179_grid = coordinates.LonLatGrid.TL179()
+
+    def smooth_field(lon_lat_grid: coordinates.LonLatGrid) -> cx.Field:
+      lon = np.deg2rad(lon_lat_grid.fields['longitude'].data)[:, np.newaxis]
+      lat = np.deg2rad(lon_lat_grid.fields['latitude'].data)[np.newaxis, :]
+      data = 1 + np.sin(lat) + np.cos(lat) ** 2 * np.cos(2 * lon)
+      return cx.field(data, lon_lat_grid)
+
+    ylm_map = ylm_mapper.ylm_map(grid)
+    f = smooth_field(grid)
+    modal_f = ylm_mapper.to_modal(f)
+
+    with self.subTest('basis_is_evaluated_at_nodes_of_inputs'):
+      self.assertEqual(ylm_map.lon_lat_grid, grid)
+      dino_grid = ylm_map.dinosaur_grid
+      self.assertEqual(dino_grid.latitude_spacing, 'equiangular_with_poles')
+      self.assertEqual(dino_grid.nodal_shape, (360, 181))
+
+    with self.subTest('modal_values_match_those_of_same_field_on_tl179'):
+      modal_tl179_f = ylm_mapper.to_modal(smooth_field(tl179_grid))
+      self.assertEqual(
+          cx.get_coordinate(modal_f), cx.get_coordinate(modal_tl179_f)
+      )
+      np.testing.assert_allclose(modal_f.data, modal_tl179_f.data, atol=1e-4)
+
+    with self.subTest('fixed_mapping_restores_inputs_on_their_grid'):
+      restored_f = ylm_map.to_nodal(modal_f)
+      self.assertEqual(cx.get_coordinate(restored_f), grid)
+      np.testing.assert_allclose(restored_f.data, f.data, atol=1e-4)
+
+    with self.subTest('mapper_restores_modal_values_on_tl179'):
+      restored_f = ylm_mapper.to_nodal(modal_f)
+      self.assertEqual(cx.get_coordinate(restored_f), tl179_grid)
 
   def test_ylm_mapper_caches_ylm_map_and_basis(self):
     """YlmMapper should reuse FixedYlmMapping and dinosaur_grid across calls."""
