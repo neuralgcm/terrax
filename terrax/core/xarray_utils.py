@@ -290,7 +290,8 @@ def read_from_xarray(
   the variables listed in `in_spec`, checks that their dimensions match the
   spec and returns them tagged with coordinates finalized from the spec, see
   `data_specs.finalize_spec`. Datasets indexed by absolute `time` are first
-  converted using `ensure_timedelta_axis`.
+  converted using `ensure_timedelta_axis`. Chunked (e.g. dask) variables are
+  computed when they are read.
 
   Args:
     nested_data: datasets keyed by data key, e.g. ``{'era5': dataset}``.
@@ -300,8 +301,8 @@ def read_from_xarray(
     strict_matches: if True, all coordinates must be inferred from the data
       using coordinate types from `in_spec` and `CORE_COORD_TYPES`, and axes
       with `AxisMatchRules.REPLACED` match rules must already match `in_spec`.
-      If False, dimensions that cannot be inferred fall back to
-      `cx.LabeledAxis` and `REPLACED` axes are replaced by those from `in_spec`.
+      If False, dimensions that cannot be inferred fall back to `cx.LabeledAxis`
+      and `REPLACED` axes are replaced by those from `in_spec`.
 
   Returns:
     Fields keyed by data key and variable name. Data keys for which no
@@ -318,6 +319,8 @@ def read_from_xarray(
     coord_types = data_specs.get_coord_types(spec)
     if not strict_matches:
       coord_types += (cx.LabeledAxis,)
+    if da.chunks is not None:
+      da = da.compute()  # fields cannot hold chunked (e.g. dask) arrays.
     return from_xarray(da, coord_types)
 
   nested_data = ensure_timedelta_axis(nested_data)

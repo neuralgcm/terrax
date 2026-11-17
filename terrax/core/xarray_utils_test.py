@@ -19,6 +19,7 @@ import dataclasses
 from absl.testing import absltest
 from absl.testing import parameterized
 import coordax as cx
+import dask.array
 import jax
 import jax_datetime as jdt
 import numpy as np
@@ -124,6 +125,18 @@ class ReadFromXarrayTest(parameterized.TestCase):
 
     read_data = xarray_utils.read_from_xarray(nested_data, inputs_spec)
     cx.testing.assert_fields_equal(read_data['data']['u'], fields['u'])
+
+  def test_read_from_xarray_with_chunked_data(self):
+    x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
+    values = np.arange(4.0)
+    lazy_values = dask.array.from_array(values, chunks=2)
+    nested_data = {
+        'data': xarray.Dataset({'u': ('x', lazy_values)}, coords={'x': x.ticks})
+    }
+
+    read_data = xarray_utils.read_from_xarray(nested_data, {'data': {'u': x}})
+    self.assertIsInstance(read_data['data']['u'].data, np.ndarray)
+    cx.testing.assert_fields_equal(read_data['data']['u'], cx.field(values, x))
 
   def test_read_from_xarray_with_optional_spec(self):
     x = cx.LabeledAxis('x', np.linspace(0, np.pi, num=4))
