@@ -340,6 +340,7 @@ class CoordinatesMethodsTest(parameterized.TestCase):
 
   @parameterized.parameters(
       (120, (240, 121)),
+      (180, (360, 181)),
       (720, (1440, 721)),
       (1800, (3600, 1801)),
   )

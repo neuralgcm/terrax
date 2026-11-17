@@ -632,6 +632,11 @@ class LonLatGrid(cx.Coordinate):
     return cls.construct_equiangular_linear(max_wavenumber=120, **kwargs)
 
   @classmethod
+  def EL180(cls, **kwargs) -> LonLatGrid:
+    """Equiangular linear grid resolving up to wavenumber 180 (1 deg)."""
+    return cls.construct_equiangular_linear(max_wavenumber=180, **kwargs)
+
+  @classmethod
   def EL720(cls, **kwargs) -> LonLatGrid:
     """Equiangular linear grid resolving up to wavenumber 720 (0.25 deg)."""
     return cls.construct_equiangular_linear(max_wavenumber=720, **kwargs)
@@ -1119,6 +1124,11 @@ class SphericalHarmonicGrid(cx.Coordinate):
   def EL120(cls, **kwargs) -> SphericalHarmonicGrid:
     """Equiangular linear grid resolving up to wavenumber 120."""
     return cls.construct(max_wavenumber=120, **kwargs)
+
+  @classmethod
+  def EL180(cls, **kwargs) -> SphericalHarmonicGrid:
+    """Equiangular linear grid resolving up to wavenumber 180."""
+    return cls.construct(max_wavenumber=180, **kwargs)
 
   @classmethod
   def EL720(cls, **kwargs) -> SphericalHarmonicGrid:
