@@ -845,6 +845,38 @@ class TransformsTest(parameterized.TestCase):
     }
     chex.assert_trees_all_close(actual_not_y, expected_not_y)
 
+  def test_switch_on_keys(self):
+    x = cx.SizedAxis('x', 3)
+    a = cx.field(np.array([1.0, 2.0, 3.0]), x)
+    b = cx.field(np.array([4.0, 5.0, 6.0]), x)
+    default = cx.field(np.zeros(3), x)
+    double_a = transforms.Sequential([
+        transforms.SelectKeys('a'),
+        transforms.ScaleFields(cx.field(2.0)),
+        transforms.RenameKeys({'a': 'out'}),
+    ])
+    transform = transforms.SwitchOnKeys(
+        transform=double_a,
+        keys='a',
+        otherwise=transforms.PrescribedFields({'out': default}),
+    )
+    with self.subTest('present'):
+      actual = transform({'a': a, 'b': b})
+      chex.assert_trees_all_close(actual, {'out': 2.0 * a})
+    with self.subTest('missing'):
+      actual = transform({'b': b})
+      chex.assert_trees_all_close(actual, {'out': default})
+    with self.subTest('resolved_at_trace_time'):
+      actual = nnx.jit(lambda tx, inputs: tx(inputs))(transform, {'a': a})
+      chex.assert_trees_all_close(actual, {'out': 2.0 * a})
+    with self.subTest('all_keys_are_required'):
+      both = transforms.SwitchOnKeys(transforms.Identity(), keys=('a', 'b'))
+      self.assertEqual(set(both({'a': a, 'b': b})), {'a', 'b'})
+      # `otherwise` returns an empty dict by default.
+      self.assertEqual(both({'a': a}), {})
+    with self.subTest('deprecated_alias'):
+      self.assertIs(transforms.ApplyIfPresent, transforms.SwitchOnKeys)
+
   def test_apply_fn_to_keys(self):
     x = cx.SizedAxis('x', 3)
     inputs = {
@@ -1528,6 +1560,140 @@ class ExtractLocalPatchFromGridTest(parameterized.TestCase):
       }
       padded_out = transform(padded_inputs)
       self.assertIn('delta_x_coarse', padded_out)
+
+  @parameterized.parameters(1, 2, 3, 4)
+  def test_interpolation_weights(self, width):
+    """Weights interpolate fields that are linear in longitude and latitude."""
+    lons = np.arange(0, 360, 10)
+    # Non-uniformly spaced latitudes with nodes at the poles.
+    lats = np.array([-90, -70, -55, -30, -20, -5, 0, 10, 30, 35, 60, 85, 90])
+    grid = cx.coords.compose(
+        cx.LabeledAxis('longitude', lons),
+        cx.LabeledAxis('latitude', lats),
+    )
+    field = cx.field(2.0 * lons[:, None] - 3.0 * lats[None, :] + 1.0, grid)
+    points = cx.SizedAxis('points', 6)
+    # Points 2 and 3 are on a grid line and on a grid node, the last two are
+    # at the poles.
+    lon_q = np.array([13.0, 127.5, 350.0, 240.0, 77.0, 77.0])
+    lat_q = np.array([-41.0, 28.0, 3.0, -55.0, 90.0, -90.0])
+    transform = transforms.ExtractLocalPatchFromGrid(
+        width=width, include_offset=False, include_interpolation_weights=True
+    )
+    output = transform({
+        'longitude': cx.field(lon_q, points),
+        'latitude': cx.field(lat_q, points),
+        'f': field,
+    })
+    self.assertEqual(set(output), {'f', 'interpolation_weights_0'})
+    weights = output['interpolation_weights_0']
+    self.assertEqual(weights.dims, output['f'].dims)
+    patch_dims = [d for d in weights.dims if d != 'points']
+    total = cx.cmap(jnp.sum)(weights.untag(*patch_dims))
+    np.testing.assert_allclose(total.data, np.ones(6), rtol=1e-6)
+    self.assertGreaterEqual(weights.data.min(), 0.0)
+    if width > 1:
+      interpolated = cx.cmap(jnp.sum)(
+          (weights * output['f']).untag(*patch_dims)
+      )
+      np.testing.assert_allclose(
+          interpolated.data, 2.0 * lon_q - 3.0 * lat_q + 1.0, rtol=1e-5
+      )
+
+    with self.subTest('integer_queries_have_float_weights'):
+      int_out = transform({
+          'longitude': cx.field(15),
+          'latitude': cx.field(5),
+          'f': field,
+      })
+      int_weights = int_out['interpolation_weights_0']
+      self.assertTrue(jnp.issubdtype(int_weights.dtype, jnp.floating))
+      np.testing.assert_allclose(int_weights.data.sum(), 1.0, rtol=1e-6)
+      if width > 1:
+        np.testing.assert_allclose(
+            (int_weights * int_out['f']).data.sum(),
+            2.0 * 15.0 - 3.0 * 5.0 + 1.0,
+            rtol=1e-5,
+        )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='beyond_northernmost_latitude',
+          width=2,
+          lat_q=88.0,
+          # Between latitude 85 and its ghost row across the pole at "95".
+          lat_weights=[0.7, 0.3],
+          lon_weights=[0.75, 0.25],
+      ),
+      dict(
+          testcase_name='beyond_southernmost_latitude',
+          width=2,
+          lat_q=-88.0,
+          lat_weights=[0.3, 0.7],
+          lon_weights=[0.75, 0.25],
+      ),
+      dict(
+          testcase_name='next_to_northernmost_latitude',
+          width=3,
+          lat_q=82.0,
+          # Between latitudes 75 and 85; the ghost row is not used.
+          lat_weights=[0.3, 0.7, 0.0],
+          lon_weights=[0.0, 0.75, 0.25],
+      ),
+  )
+  def test_interpolation_weights_near_poles(
+      self, width, lat_q, lat_weights, lon_weights
+  ):
+    lons = np.arange(0, 360, 60)
+    lats = np.arange(-85, 90, 10)
+    grid = cx.coords.compose(
+        cx.LabeledAxis('longitude', lons),
+        cx.LabeledAxis('latitude', lats),
+    )
+    rng = np.random.default_rng(0)
+    values = rng.normal(size=grid.shape)
+    transform = transforms.ExtractLocalPatchFromGrid(
+        width=width, include_offset=False, include_interpolation_weights=True
+    )
+    output = transform({
+        'longitude': cx.field(15.0),
+        'latitude': cx.field(lat_q),
+        'f': cx.field(values, grid),
+    })
+    weights = output['interpolation_weights_0']
+    self.assertEqual(weights.dims, ('longitude', 'latitude'))
+    np.testing.assert_allclose(
+        weights.data, np.outer(lon_weights, lat_weights), rtol=1e-5, atol=1e-7
+    )
+    if width == 2:
+      # Ghost cells hold values of the cells across the pole.
+      lon_interpolated = 0.75 * values + 0.25 * np.roll(values, -1, axis=0)
+      edge = -1 if lat_q > 0 else 0
+      across_pole = np.roll(lon_interpolated, 3, axis=0)
+      expected = 0.7 * lon_interpolated[0, edge] + 0.3 * across_pole[0, edge]
+      np.testing.assert_allclose(
+          (weights * output['f']).data.sum(), expected, rtol=1e-5
+      )
+
+  def test_interpolation_weights_across_longitude_wrap(self):
+    grid = cx.coords.compose(
+        cx.LabeledAxis('longitude', np.arange(0, 360, 60)),
+        cx.LabeledAxis('latitude', np.arange(-20, 30, 10)),
+    )
+    transform = transforms.ExtractLocalPatchFromGrid(
+        width=2, include_offset=False, include_interpolation_weights=True
+    )
+    # Longitude 345 is a quarter of the way from 0 (i.e. 360) to 300.
+    output = transform({
+        'longitude': cx.field(345.0),
+        'latitude': cx.field(5.0),
+        'f': cx.field(np.zeros(grid.shape), grid),
+    })
+    weights = output['interpolation_weights_0']
+    self.assertEqual(weights.dims, ('longitude', 'latitude'))
+    np.testing.assert_allclose(
+        weights.data, [[0.125, 0.125], [0.375, 0.375]], rtol=1e-6
+    )
 
   def test_odd_width_patch(self):
     """Verifies odd width=3 patch is centered on the nearest neighbor."""

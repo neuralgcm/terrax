@@ -1008,6 +1008,52 @@ class ApplyToFilteredKeys(TransformABC):
 
 
 @nnx.dataclass
+class SwitchOnKeys(TransformABC):
+  """Applies `transform` if `keys` are in ``inputs`` and `otherwise` if not.
+
+  Which of the transforms is applied depends only on the keys of ``inputs`` and
+  is hence resolved when the transform is traced. This supports optional
+  inputs, which are processed by `transform` when provided and replaced by the
+  outputs of `otherwise` (e.g. defaults) when not.
+
+  Args:
+    transform: The ``Transform`` applied to ``inputs`` holding all of `keys`.
+    keys: Key or keys that ``inputs`` must hold for `transform` to be applied.
+    otherwise: The ``Transform`` applied to ``inputs`` missing any of `keys`.
+      Returns an empty dict by default.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import transforms
+    >>> double = transforms.ScaleFields(cx.field(2.0))
+    >>> double_a = transforms.Sequential([transforms.SelectKeys('a'), double])
+    >>> tx = transforms.SwitchOnKeys(
+    ...     transform=double_a, keys='a', otherwise=transforms.SelectKeys('b')
+    ... )
+    >>> inputs = {'a': cx.field(jnp.ones(2)), 'b': cx.field(jnp.zeros(2))}
+    >>> list(tx(inputs).keys())
+    ['a']
+    >>> list(tx({'b': cx.field(jnp.zeros(2))}).keys())
+    ['b']
+  """
+
+  transform: Transform = nnx.data()
+  keys: str | Sequence[str]
+  otherwise: Transform = nnx.data(default_factory=Empty)
+
+  def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
+    keys = (self.keys,) if isinstance(self.keys, str) else self.keys
+    if all(k in inputs for k in keys):
+      return self.transform(inputs)
+    return self.otherwise(inputs)
+
+
+# TODO(dkochkov): Remove this deprecated alias.
+ApplyIfPresent = SwitchOnKeys
+
+
+@nnx.dataclass
 class ApplyFnToKeys(PytreeTransformABC):
   """Applies a Field -> Field function to a subset of keys.
 
@@ -2339,8 +2385,8 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
     width: The width of the square patch to extract. Defaults to 1.
     lon_query_key: Key for query longitudes in inputs.
     lat_query_key: Key for query latitudes in inputs.
-    include_offset: Whether to include coordinates offset relative to queries
-      in degrees, as `delta_longitude_<name>` and `delta_latitude_<name>`.
+    include_offset: Whether to include coordinates offset relative to queries in
+      degrees, as `delta_longitude_<name>` and `delta_latitude_<name>`.
     offset_names: Optional mapping from a name to a horizontal grid (e.g. a
       `LonLatGrid`). Offsets of fields on that grid are reported under that
       name; without it, grids are named by their index of first appearance. If
@@ -2349,6 +2395,11 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
       from the query points on a sphere of this radius are included as
       `delta_x_<name>` and `delta_y_<name>` (`radius * cos(lat) * dlon` and
       `radius * dlat` with angles in radians).
+    include_interpolation_weights: Whether to include weights of the bilinear
+      interpolation of patch values to the query points, as
+      `interpolation_weights_<name>`. Weights are non-zero for the two cells
+      that bracket the query along each patch dimension (across the pole for
+      queries beyond the last latitude) and sum to one over the patch.
   """
 
   width: int = 1
@@ -2357,6 +2408,7 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
   include_offset: bool = True
   offset_names: Mapping[str, cx.Coordinate] | None = None
   offset_radius: float | None = None
+  include_interpolation_weights: bool = False
   boundary_condition: boundaries.BoundaryCondition = nnx.data(init=False)
   padding: int = nnx.static(init=False)
 
@@ -2431,6 +2483,49 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
 
     return lon_indices, lat_indices, patch_coord
 
+  def _interpolation_weights(
+      self,
+      lon_1d: cx.Field,
+      lat_1d: cx.Field,
+      lon_indices: cx.Field,
+      lat_indices: cx.Field,
+      lon_query: cx.Field,
+      lat_query: cx.Field,
+  ) -> cx.Field:
+    """Returns bilinear interpolation weights of patch cells for the queries."""
+    dtype = jnp.result_type(lon_1d.dtype, lat_1d.dtype, jnp.float32)
+    if self.width == 1:
+      return cx.cmap(lambda lo, la: jnp.ones((), dtype=dtype))(
+          lon_query, lat_query
+      )
+    # Coordinates of the padded cells. Latitudes of ghost rows continue beyond
+    # the poles, as ghost rows hold values of the rows across the pole.
+    pad = self.padding
+    lons = jnp.pad(jnp.asarray(lon_1d.data, dtype=dtype), pad, mode='wrap')
+    lats = jnp.asarray(lat_1d.data, dtype=dtype)
+    lats = jnp.concatenate(
+        [-180 - lats[:pad][::-1], lats, 180 - lats[-pad:][::-1]]
+    )
+    center = (self.width - 1) // 2
+
+    def linear_weights(delta):
+      # The query is in the interval next to the center cell of the patch.
+      lower = center - (delta[center] > 0)
+      spacing = delta[lower + 1] - delta[lower]
+      # Nodes at the poles coincide with their ghosts (zero spacing).
+      upper_weight = -delta[lower] / jnp.where(spacing > 0, spacing, 1)
+      weights = jnp.zeros_like(delta).at[lower].set(1 - upper_weight)
+      return weights.at[lower + 1].set(upper_weight)
+
+    lon_weights = cx.cmap(
+        lambda i, q: linear_weights(jnp.mod(lons[i] - q + 180.0, 360.0) - 180.0)
+    )(lon_indices, lon_query)
+    lat_weights = cx.cmap(lambda i, q: linear_weights(lats[i] - q))(
+        lat_indices, lat_query
+    )
+    weights = lon_weights.tag('longitude') * lat_weights.tag('latitude')
+    return weights.order_as(..., 'longitude', 'latitude')
+
   @nnx.jit
   def __call__(self, inputs: dict[str, cx.Field]) -> dict[str, cx.Field]:
     inputs = inputs.copy()
@@ -2476,7 +2571,8 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
       outputs[k] = patch
 
     radius = self.offset_radius
-    if self.include_offset or radius is not None:
+    include_weights = self.include_interpolation_weights
+    if self.include_offset or radius is not None or include_weights:
       for grid_idx, (grid, cached_values) in enumerate(cache.items()):
         lon_indices, lat_indices, patch_coord, lon_1d, lat_1d = cached_values
         name = self._offset_name(grid, grid_idx)
@@ -2502,6 +2598,12 @@ class ExtractLocalPatchFromGrid(PytreeTransformABC):
           arc = cx.cmap(lambda x: radius * jnp.deg2rad(x))
           outputs[f'delta_x_{name}'] = arc(delta_lon) * cos_lat
           outputs[f'delta_y_{name}'] = arc(delta_lat)
+        if include_weights:
+          outputs[f'interpolation_weights_{name}'] = (
+              self._interpolation_weights(
+                  lon_1d, lat_1d, lon_indices, lat_indices, lon_query, lat_query
+              )
+          )
 
     return outputs
 
