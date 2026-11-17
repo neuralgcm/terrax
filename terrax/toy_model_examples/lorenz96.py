@@ -253,6 +253,12 @@ class Lorenz96(Lorenz96Base):
       next_x += parameterization({'x': x, 'time': time}, self.dt)
     self.x.set_value(next_x)
     self.time.set_value(self.time.get_value() + self.timestep)
+    # Advance any random processes.
+    randomness_modules = module_utils.retrieve_subclass_modules(
+        self, random_processes.RandomProcessModule
+    )
+    for randomness in randomness_modules:
+      randomness.advance()
 
 
 @nnx.dataclass
