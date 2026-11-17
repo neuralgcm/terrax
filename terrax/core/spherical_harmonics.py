@@ -66,6 +66,29 @@ def _equiangular_240x121_grid(**kwargs) -> Grid:
   )
 
 
+def _equiangular_360x181_grid(**kwargs) -> Grid:
+  """Constructs a dinosaur Grid for the 1° equiangular_with_poles grid.
+
+  This grid has 360 longitude nodes, 181 latitude nodes (including poles), and
+  resolves up to wavenumber 180 (linear truncation). Its modal representation
+  has the same shape as that of `Grid.TL179`.
+
+  Args:
+    **kwargs: Additional keyword arguments to pass to the Grid constructor.
+
+  Returns:
+    A dinosaur Grid object.
+  """
+  return Grid(
+      longitude_wavenumbers=180,
+      total_wavenumbers=181,
+      longitude_nodes=360,
+      latitude_nodes=181,
+      latitude_spacing='equiangular_with_poles',
+      **kwargs,
+  )
+
+
 def _equiangular_1440x721_grid(**kwargs) -> Grid:
   """Constructs a dinosaur Grid for the 0.25° equiangular_with_poles grid.
 
@@ -91,6 +114,7 @@ def _equiangular_1440x721_grid(**kwargs) -> Grid:
 # Additional non-Gaussian linear grids.
 equiangular_linear_dino_grid_constructors = [
     _equiangular_240x121_grid,
+    _equiangular_360x181_grid,
     _equiangular_1440x721_grid,
 ]
 
@@ -111,9 +135,11 @@ REAL_CUBIC_MODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=RealSphericalHarmonics).modal_shape: grid
     for grid in cubic_dino_grid_constructors
 }
-# Linear shape-to-cls dicts.
+# Linear shape-to-cls dicts. Standard grids are listed last, so that they take
+# precedence over equiangular grids with the same shape (the modal shapes of
+# `Grid.TL179` and `_equiangular_360x181_grid` coincide).
 _all_linear_constructors = (
-    linear_dino_grid_constructors + equiangular_linear_dino_grid_constructors
+    equiangular_linear_dino_grid_constructors + linear_dino_grid_constructors
 )
 FAST_LINEAR_NODAL_SHAPE_TO_GRID = {
     grid(spherical_harmonics_impl=FastSphericalHarmonics).nodal_shape: grid
