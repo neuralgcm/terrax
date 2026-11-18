@@ -17,6 +17,7 @@
 from __future__ import annotations
 import abc
 import collections
+from collections.abc import Iterable
 import dataclasses
 from typing import Iterator
 import coordax as cx
@@ -182,6 +183,19 @@ class PerVariableStatistic(Statistic):
     }
 
 
+def _unique_statistics(metrics: Iterable[Metric]) -> dict[str, Statistic]:
+  """Returns statistics required by `metrics`, keyed by their unique names."""
+  # Metrics name their statistics independently of each other, so a key of
+  # `Metric.statistics` can refer to different statistics in different metrics.
+  # Only unique names identify statistics across metrics: statistics with the
+  # same unique name are assumed to be interchangeable and the last one is kept.
+  unique_statistics: dict[str, Statistic] = {}
+  for metric in metrics:
+    for statistic in metric.statistics.values():
+      unique_statistics[statistic.unique_name] = statistic
+  return unique_statistics
+
+
 @dataclasses.dataclass
 class MultiMetric(Metric):
   """A metric that combines multiple metrics.
@@ -194,11 +208,8 @@ class MultiMetric(Metric):
 
   @property
   def statistics(self) -> dict[str, Statistic]:
-    """Union of statistics from all term metrics."""
-    all_stats = {}
-    for metric in self.terms.values():
-      all_stats.update(metric.statistics)
-    return all_stats
+    """Union of statistics from all term metrics, keyed by unique names."""
+    return _unique_statistics(self.terms.values())
 
   def _values_from_mean_statistics_with_internal_names(
       self,
@@ -207,18 +218,8 @@ class MultiMetric(Metric):
     """Computes values for each term and returns a flattened dictionary."""
     all_metric_values = {}
     for term_name, metric_term in sorted(self.terms.items()):
-      term_statistic_values = {
-          k: statistic_values[k]
-          for k in metric_term.statistics
-          if k in statistic_values
-      }
-      # pylint: disable=protected-access
-      term_values = (
-          metric_term._values_from_mean_statistics_with_internal_names(
-              term_statistic_values
-          )
-      )
-      # pylint: enable=protected-access
+      # `statistic_values` are keyed by unique names, see `statistics`.
+      term_values = metric_term.values_from_mean_statistics(statistic_values)
       for metric_name, value in sorted(term_values.items()):
         all_metric_values[f'{term_name}.{metric_name}'] = value
     return all_metric_values
@@ -289,11 +290,8 @@ class SumLoss(Loss):
 
   @property
   def statistics(self) -> dict[str, Statistic]:
-    """Union of statistics from all term losses."""
-    all_stats = {}
-    for loss in self.terms.values():
-      all_stats.update(loss.statistics)
-    return all_stats
+    """Union of statistics from all term losses, keyed by unique names."""
+    return _unique_statistics(self.terms.values())
 
   def _values_from_mean_statistics_with_internal_names(
       self,
@@ -302,15 +300,8 @@ class SumLoss(Loss):
     """Computes values for each term and returns a flattened dictionary."""
     all_metric_values = {}
     for term_name, loss_term in sorted(self.terms.items()):
-      # Get the stats required by the loss term, using its internal names.
-      term_statistic_values = {
-          k: statistic_values[k] for k in loss_term.statistics
-      }
-      # pylint: disable=protected-access
-      term_values = loss_term._values_from_mean_statistics_with_internal_names(
-          term_statistic_values
-      )
-      # pylint: enable=protected-access
+      # `statistic_values` are keyed by unique names, see `statistics`.
+      term_values = loss_term.values_from_mean_statistics(statistic_values)
       for var_name, value in term_values.items():
         all_metric_values[f'{term_name}.{var_name}'] = value
     return all_metric_values
@@ -391,10 +382,7 @@ def generate_unique_statistics_for_all_metrics(
     Tuples of (unique_statistic_name, statistic_value), where
     statistic_value is a dictionary mapping variable names to `cx.Field`s.
   """
-  unique_statistics = {}
-  for m in metrics.values():
-    for _, stat in m.statistics.items():
-      unique_statistics[stat.unique_name] = stat
+  unique_statistics = _unique_statistics(metrics.values())
   for k, stat in unique_statistics.items():
     try:
       yield k, stat.compute(predictions, targets)

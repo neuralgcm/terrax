@@ -305,6 +305,44 @@ class DeterministicMetricsTest(parameterized.TestCase):
           0.7 * expected_mae / expected_total,
       )
 
+  def test_multi_metric(self):
+    predictions = {'x': cx.field(3.0), 'y': cx.field(2.0)}
+    targets = {'x': cx.field(1.0), 'y': cx.field(5.0)}
+    metric = base.MultiMetric(
+        terms={
+            'rmse': deterministic_metrics.RMSE(),
+            'squared_error': deterministic_metrics.SquaredError(),
+            'absolute_error': deterministic_metrics.AbsoluteError(),
+        }
+    )
+    with self.subTest('statistics'):
+      # `rmse` and `squared_error` share a statistic.
+      self.assertEqual(
+          set(metric.statistics), {'SquaredError', 'AbsoluteError'}
+      )
+
+    statistics = {
+        s.unique_name: s.compute(predictions, targets)
+        for s in metric.statistics.values()
+    }
+    metric_values = metric.values_from_mean_statistics(statistics)
+    # Statistics used as metrics all refer to themselves as `self`; their
+    # values must not be mixed up.
+    expected_values = {
+        'rmse.x': 2.0,
+        'rmse.y': 3.0,
+        'squared_error.x': 4.0,
+        'squared_error.y': 9.0,
+        'absolute_error.x': 2.0,
+        'absolute_error.y': 3.0,
+    }
+    with self.subTest('values'):
+      self.assertEqual(set(metric_values), set(expected_values))
+      for key, expected in expected_values.items():
+        cx.testing.assert_fields_allclose(
+            metric_values[key], cx.field(expected)
+        )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='prediction_passthrough',

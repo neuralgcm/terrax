@@ -926,14 +926,16 @@ class TrainerTest(parameterized.TestCase):
       trainable_parameters_filter: nnx.filterlib.Filter | None = None,
       online_metrics_saver: trainer.OnlineMetricsSaver | None = None,
       evaluate_on_restore: bool = False,
+      loss: trainer.EvaluatorLike | None = None,
   ) -> trainer.RolloutTrainer:
     """Returns a trainer for a model created by `_make_coupled_model`."""
     queries_specs = self._create_queries_specs(model)
-    eval_metrics, loss = self._create_evaluators(
+    eval_metrics, crps_loss = self._create_evaluators(
         dims_to_reduce=('ensemble', 'batch', 'k')
     )
     eval_metrics = evaluators.FlattenedEvaluator(eval_metrics)
-    loss = evaluators.FlattenedEvaluator(loss)
+    if loss is None:
+      loss = evaluators.FlattenedEvaluator(crps_loss)
     dt_slow = model.timestep * 4
     timedelta = coordinates.TimeDelta(np.arange(2) * dt_slow)
     inputs_spec = _construct_spec(model.inputs_spec, timedelta)
@@ -1204,6 +1206,50 @@ class TrainerTest(parameterized.TestCase):
       self.assertNotIn(2, resumed_steps)
     self.assertIn(3, resumed_steps)
     self.assertIn(4, resumed_steps)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='nested', nested=True),
+      dict(testcase_name='flattened', nested=False),
+  )
+  def test_debug_terms_are_recorded_for_each_loss_term(self, nested: bool):
+    _, all_data = self.create_model_and_data(multiscale=False)
+    aggregator = aggregation.Aggregator(
+        dims_to_reduce=('ensemble', 'batch', 'k'), weight_by=[]
+    )
+    # Both terms return debug terms of the same names.
+    loss = evaluators.Evaluator(
+        metrics={
+            'crps': probabilistic_losses.CRPS(),
+            'pseudo_huber': probabilistic_losses.CRPS(delta=1.0),
+        },
+        aggregators=aggregator,
+    )
+    if nested:
+      loss = evaluators.NestedEvaluators(evaluators={'slow': loss})
+      dataset_prefix, variable = 'slow_', 'x'
+    else:
+      loss = evaluators.FlattenedEvaluator(loss)
+      dataset_prefix, variable = '', 'slow.x'
+    metrics_saver = InMemorySaver()
+    rollout_trainer = self._create_coupled_model_trainer(
+        _make_coupled_model(),
+        self._create_data_loader(all_data),
+        self.test_dir,
+        online_metrics_saver=metrics_saver,
+        loss=loss,
+    )
+    rollout_trainer.run_training()
+
+    _, online_metrics = metrics_saver.metrics[0]
+    # The loss is recorded for the train stage (`loss`) and the `eval` schema.
+    expected_keys = []
+    for schema in ('loss', 'eval'):
+      for term in ('crps', 'pseudo_huber'):
+        group = f'{schema}_{dataset_prefix}{term}'
+        expected_keys.append(f'{group}/relative_crps_{variable}')
+        expected_keys.append(f'{group}/spread_skill_ratio_{variable}')
+    self.assertContainsSubset(expected_keys, online_metrics.train)
+    self.assertContainsSubset(expected_keys, online_metrics.eval)
 
   @parameterized.named_parameters(
       dict(

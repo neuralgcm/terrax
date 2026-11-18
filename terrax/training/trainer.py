@@ -2533,12 +2533,14 @@ class RolloutTrainer:
           else:
             values_to_record[relative_value_key] = 0.0
 
-          # Recording debug terms for each loss term.
+          # Recording debug terms for each loss term. Keys include `term_key`,
+          # since different terms can return debug terms of the same names.
+          group = '_'.join([eval_schema.name, *current_prefix, term_key])
           mean_stats = agg_state[term_key].mean_statistics()
           debug_terms = term_metric.debug_terms(mean_stats, term_metric_values)
           for debug_term_name in sorted(debug_terms.keys()):
             v = debug_terms[debug_term_name]
-            key = f'{eval_schema.name}_{data_key}/{debug_term_name}'
+            key = f'{group}/{debug_term_name}'
             values_to_record[key] = float(v.data)  # pyrefly: ignore[bad-argument-type]
 
       _collect_loss_terms(loss_evaluator, total_loss_agg, [])

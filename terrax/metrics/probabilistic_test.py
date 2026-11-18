@@ -169,6 +169,55 @@ class ProbabilisticMetricsTest(parameterized.TestCase):
     expected_crps = expected_skill - 0.5 * expected_spread
     cx.testing.assert_fields_allclose(values['x'], expected_crps, atol=1e-6)
 
+  def test_sum_loss_of_crps_with_different_kernels(self):
+    """Each term of a `SumLoss` is computed from its own skill and spread."""
+    e, d = cx.SizedAxis('ensemble', 4), cx.SizedAxis('d', 3)
+    rng = np.random.default_rng(seed=0)
+    predictions = {'x': cx.field(rng.normal(size=e.shape + d.shape), e, d)}
+    targets = {'x': cx.field(rng.normal(size=d.shape), d)}
+    terms = {
+        'crps': probabilistic_losses.CRPS(),
+        'pseudo_huber': probabilistic_losses.CRPS(delta=0.7),
+    }
+    loss = base.SumLoss(terms, term_weights={'pseudo_huber': 2.0})
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'loss': loss}, predictions, targets
+    )
+    self.assertLen(stats, 4)  # skill and spread of each kernel.
+    values = loss.values_from_mean_statistics(stats)
+    term_values = {
+        name: term.values_from_mean_statistics(stats)
+        for name, term in terms.items()
+    }
+
+    with self.subTest('values'):
+      self.assertEqual(set(values), {'crps.x', 'pseudo_huber.x'})
+      for name in terms:
+        cx.testing.assert_fields_allclose(
+            values[f'{name}.x'], term_values[name]['x']
+        )
+
+    with self.subTest('total'):
+      expected_total = (
+          term_values['crps']['x'] + 2.0 * term_values['pseudo_huber']['x']
+      )
+      cx.testing.assert_fields_allclose(loss.total(values), expected_total)
+
+    with self.subTest('debug_terms'):
+      debug_terms = loss.debug_terms(stats, values)
+      for name, term in terms.items():
+        term_debug_terms = term.debug_terms(stats, term_values[name])
+        for key, expected in term_debug_terms.items():
+          cx.testing.assert_fields_allclose(
+              debug_terms[f'{name}.{key}'], expected
+          )
+
+    with self.subTest('missing_statistics'):
+      incomplete_stats = dict(stats)
+      del incomplete_stats['EnergySkill_ensemble_beta_1.0']
+      with self.assertRaisesRegex(ValueError, 'do not contain all required'):
+        loss.values_from_mean_statistics(incomplete_stats)
+
   @parameterized.parameters(dict(delta=0.0), dict(delta=0.7))
   def test_energy_spread_algorithms(self, delta):
     def make_stat(algorithm):
