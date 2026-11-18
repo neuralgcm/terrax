@@ -188,6 +188,31 @@ class EvaluatorsTest(parameterized.TestCase):
       # mae = (abs(1 - 1) + abs(2 - 5)) / 3 = 1.0
       np.testing.assert_almost_equal(total_loss.data, 1.0)
 
+  def test_evaluator_energy_score_with_skipna(self):
+    """Events with NaN targets are left out of the aggregated energy score."""
+    ens, d = cx.SizedAxis('ensemble', 3), cx.SizedAxis('d', 4)
+    p = cx.SizedAxis('p', 2)
+    rng = np.random.default_rng(seed=0)
+    pred_data = rng.normal(size=ens.shape + d.shape + p.shape)
+    target_data = rng.normal(size=d.shape + p.shape)
+    target_data[1, 0] = np.nan  # invalidates event 1.
+    predictions = {'x': cx.field(pred_data, ens, d, p)}
+    targets = {'x': cx.field(target_data, d, p)}
+
+    evaluator = evaluators.Evaluator(
+        metrics={'es': probabilistic_losses.EnergyScore(event_dims=('p',))},
+        aggregators=aggregation.Aggregator(dims_to_reduce=('d',), skipna=True),
+    )
+    total_loss = evaluator.evaluate_total(predictions, targets)
+
+    norm = lambda diff: np.sqrt(np.sum(diff**2, axis=-1))
+    skill = norm(pred_data - target_data).mean(axis=0)
+    pair_norms = norm(pred_data[:, np.newaxis] - pred_data[np.newaxis])
+    spread = pair_norms.sum(axis=(0, 1)) / (ens.size * (ens.size - 1))
+    scores = skill - 0.5 * spread
+    valid = np.array([True, False, True, True])
+    np.testing.assert_allclose(total_loss.data, scores[valid].mean(), rtol=1e-5)
+
   def test_evaluator_multiple_terms_with_weighting(self):
     ens = cx.SizedAxis('ensemble', 2)
     grid = coordinates.LonLatGrid.T21()

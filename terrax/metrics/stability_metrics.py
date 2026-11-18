@@ -42,11 +42,7 @@ def _dims_suffix(event_dims: Sequence[cx.Coordinate | str] | None) -> str:
   """Returns a string suffix encoding event_dims for unique naming."""
   if event_dims is None:
     return 'all'
-  dim_names = []
-  for d in event_dims:
-    d_dims = d.dims if cx.is_coord(d) else (d,)
-    dim_names.extend(d_dims)
-  return '_'.join(dim_names) or 'scalar'
+  return '_'.join(base.dim_names(event_dims)) or 'scalar'
 
 
 def _is_finite_indicator(

@@ -22,6 +22,44 @@ from terrax.metrics import base
 from terrax.metrics import probabilistic_metrics
 
 
+def _skill_spread_debug_terms(
+    loss: CRPS | EnergyScore,
+    mean_stats: dict[str, dict[str, cx.Field]],
+    metric_values: dict[str, cx.Field],
+    name: str,
+) -> dict[str, cx.Field]:
+  """Returns relative losses and spread-skill ratios of an energy-like loss.
+
+  Args:
+    loss: Loss that is computed from `skill` and `spread` statistics.
+    mean_stats: Aggregated statistics keyed by their unique names.
+    metric_values: Values of the loss for each variable.
+    name: Name of the loss used in the keys of relative losses.
+
+  Returns:
+    Debug terms `relative_<name>_<variable>` and `spread_skill_ratio_<variable>`
+    for each variable.
+  """
+  total = loss.total(metric_values)
+  mean_stats = {
+      k: mean_stats[v.unique_name] for k, v in loss.statistics.items()
+  }
+  skills = mean_stats['skill']
+  spreads = mean_stats['spread']
+  weighted_spreads = {
+      k: loss.spread_term_weight * v for k, v in spreads.items()
+  }
+  ws = collections.defaultdict(lambda: 1.0) | (loss.variable_weights or {})
+  relative_losses = {
+      f'relative_{name}_{k}': ws[k] * (skills[k] - weighted_spreads[k]) / total
+      for k in skills
+  }
+  skill_spread_ratio = {
+      f'spread_skill_ratio_{k}': spreads[k] / skills[k] for k in skills
+  }
+  return relative_losses | skill_spread_ratio
+
+
 @dataclasses.dataclass
 class CRPS(probabilistic_metrics.CRPS, base.PerVariableLoss):
   """CRPS loss."""
@@ -31,23 +69,20 @@ class CRPS(probabilistic_metrics.CRPS, base.PerVariableLoss):
       mean_stats: dict[str, dict[str, cx.Field]],
       metric_values: dict[str, cx.Field],
   ) -> dict[str, cx.Field]:
-    """Returns debug terms. Defaults to metric_values and relative losses."""
-    total = self.total(metric_values)
-    mean_stats = {
-        k: mean_stats[v.unique_name] for k, v in self.statistics.items()
-    }
-    skills = mean_stats['skill']
-    spreads = mean_stats['spread']
-    weighted_spreads = {
-        k: self.spread_term_weight * v for k, v in spreads.items()
-    }
-    ws = collections.defaultdict(lambda: 1.0) | (self.variable_weights or {})
-    relative_crps = {
-        f'relative_crps_{k}': ws[k] * (skills[k] - weighted_spreads[k]) / total
-        for k in skills
-    }
-    skill_spread_ratio = {
-        f'spread_skill_ratio_{k}': spreads[k] / skills[k]
-        for k in skills
-    }
-    return relative_crps | skill_spread_ratio
+    """Returns relative per-variable losses and spread-skill ratios."""
+    return _skill_spread_debug_terms(self, mean_stats, metric_values, 'crps')
+
+
+@dataclasses.dataclass
+class EnergyScore(probabilistic_metrics.EnergyScore, base.PerVariableLoss):
+  """Energy score loss."""
+
+  def debug_terms(
+      self,
+      mean_stats: dict[str, dict[str, cx.Field]],
+      metric_values: dict[str, cx.Field],
+  ) -> dict[str, cx.Field]:
+    """Returns relative per-variable losses and spread-skill ratios."""
+    return _skill_spread_debug_terms(
+        self, mean_stats, metric_values, 'energy_score'
+    )

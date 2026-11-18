@@ -15,6 +15,7 @@
 """Defines probabilistic metrics."""
 
 from __future__ import annotations
+from collections.abc import Sequence
 import dataclasses
 import functools
 import coordax as cx
@@ -26,6 +27,17 @@ from terrax.metrics import base
 def _validate_ens_dim(predictions: cx.Field, ens_dim: str) -> None:
   if ens_dim not in predictions.dims:
     raise ValueError(f'Prediction field must have an "{ens_dim}" axis.')
+
+
+def _validate_event_dims(
+    field: cx.Field, event_dims: Sequence[str | cx.Coordinate]
+) -> None:
+  missing = [dim for dim in event_dims if not cx.contains_dims(field, dim)]
+  if missing:
+    raise ValueError(
+        f'Event dims {missing} are not dimensions of a field with'
+        f' {field.dims=} and {field.axes=}.'
+    )
 
 
 def _abs_beta(x: cx.Field, beta: float) -> cx.Field:
@@ -41,39 +53,82 @@ def _validate_delta(delta: float) -> None:
     raise ValueError(f'delta must be non-negative, got {delta=}')
 
 
-def _kernel(x: cx.Field, beta: float, delta: float) -> cx.Field:
-  """Computes `(x² + δ²)^(β/2) - δ^β`, i.e. |x|^β smoothed at zero.
+def _zero_safe_power(x: jax.Array, power: float) -> jax.Array:
+  """Computes `x**power` for `x >= 0`, with zero gradient at exactly zero.
 
-  For `delta == 0` this is `|x|^β`. For `delta > 0` and `beta == 1` this is the
-  pseudo-Huber function `sqrt(x² + δ²) - δ`, which behaves like `x² / (2δ)` for
-  |x| << δ (continuous gradient at zero) and like |x| - δ for |x| >> δ. For
-  `beta` in (0, 2] the kernel is conditionally negative definite for any
-  `delta >= 0` (it is a Bernstein function of x²), so energy-like scores built
-  from it remain proper scoring rules.
+  For `power < 1` the derivative of `x**power` is infinite at zero, which turns
+  into NaN gradients of norms `sqrt(sum(r**2))` at `r == 0`. Unlike
+  `base.safe_sqrt`, which also zeroes gradients for small positive `x`, the
+  exact gradient is kept everywhere else, so that norms of small-valued inputs
+  still provide a training signal. For kernels `‖r‖^β` with `β < 1` this exact
+  gradient is unbounded as `‖r‖` approaches zero.
+
+  Args:
+    x: Non-negative values.
+    power: Exponent.
+
+  Returns:
+    `x**power`.
+  """
+  is_zero = x == 0
+  safe_x = jnp.where(is_zero, 1.0, x)
+  return jnp.where(is_zero, 0.0, safe_x**power)
+
+
+def _kernel(
+    x: cx.Field,
+    beta: float,
+    delta: float,
+    event_dims: Sequence[str | cx.Coordinate],
+) -> cx.Field:
+  """Computes `(‖x‖² + δ²)^(β/2) - δ^β`, i.e. ‖x‖^β smoothed at zero.
+
+  Here ‖x‖ is the Euclidean norm of `x` over `event_dims`, which reduces to |x|
+  without event dimensions. For `delta == 0` the kernel is `‖x‖^β`. For
+  `delta > 0` and `beta == 1` it is the pseudo-Huber function
+  `sqrt(‖x‖² + δ²) - δ`, which behaves like `‖x‖² / (2δ)` for ‖x‖ << δ
+  (continuous gradient at zero) and like ‖x‖ - δ for ‖x‖ >> δ. For `beta` in
+  (0, 2] the kernel is conditionally negative definite for any `delta >= 0` (it
+  is a Bernstein function of ‖x‖²), so energy-like scores built from it remain
+  proper scoring rules.
 
   Args:
     x: Input field.
     beta: Power parameter of the kernel.
     delta: Smoothing scale of the kernel, in units of the inputs. Must be
       non-negative.
+    event_dims: Dimensions of `x` over which the norm is computed. These
+      dimensions are reduced.
 
   Returns:
-    The kernel function applied to the input field.
+    The kernel function applied to the input field, without `event_dims`.
   """
   _validate_delta(delta)
   if delta == 0.0:
-    return _abs_beta(x, beta)
+    if not event_dims:
+      return _abs_beta(x, beta)
+    squared_norm = cx.reduce(jnp.sum, x * x, *event_dims)
+    norm_power = functools.partial(_zero_safe_power, power=beta / 2)
+    return cx.cmap(norm_power)(squared_norm)
 
-  def kernel_fn(v):
-    # Equivalent to (v² + δ²)^(β/2) - δ^β, but without the catastrophic
-    # cancellation of the direct form for |v| << δ (e.g. in float32).
-    return delta**beta * jnp.expm1(0.5 * beta * jnp.log1p((v / delta) ** 2))
+  scaled_squared_norm = (x / delta) ** 2
+  if event_dims:
+    scaled_squared_norm = cx.reduce(jnp.sum, scaled_squared_norm, *event_dims)
 
-  return cx.cmap(kernel_fn)(x)
+  def kernel_fn(r):
+    # Equivalent to δ^β ((1 + r)^(β/2) - 1) for r = ‖x/δ‖², but without the
+    # catastrophic cancellation of the direct form for r << 1 (e.g. in float32).
+    return delta**beta * jnp.expm1(0.5 * beta * jnp.log1p(r))
+
+  return cx.cmap(kernel_fn)(scaled_squared_norm)
 
 
 def _flip_2_ens_spread(
-    x: cx.Field, ens_dim: str, beta: float, delta: float = 0.0
+    x: cx.Field,
+    ens_dim: str,
+    beta: float,
+    delta: float = 0.0,
+    event_dims: Sequence[str | cx.Coordinate] = (),
 ) -> cx.Field:
   """Computes spread for exactly 2 ensemble members using jnp.flip."""
   if x.named_shape[ens_dim] != 2:
@@ -82,8 +137,8 @@ def _flip_2_ens_spread(
         f' {x.named_shape[ens_dim]}'
     )
   x_prime = cx.cmap(jnp.flip)(x.untag(ens_dim)).tag(ens_dim)
-  err = x - x_prime
-  return cx.cmap(jnp.mean)(_kernel(err, beta, delta).untag(ens_dim))
+  kernel = _kernel(x - x_prime, beta, delta, event_dims)
+  return cx.cmap(jnp.mean)(kernel.untag(ens_dim))
 
 
 def _sort_ens_spread(
@@ -109,7 +164,11 @@ def _sort_ens_spread(
 
 
 def _all_pairs_ens_spread(
-    x: cx.Field, ens_dim: str, beta: float, delta: float = 0.0
+    x: cx.Field,
+    ens_dim: str,
+    beta: float,
+    delta: float = 0.0,
+    event_dims: Sequence[str | cx.Coordinate] = (),
 ) -> cx.Field:
   """Computes unbiased expected pairwise difference over rolling shifts."""
   n = x.named_shape[ens_dim]
@@ -121,15 +180,19 @@ def _all_pairs_ens_spread(
 
   def shift_spread(shift):
     x_shifted = roll_m(x.untag(ens_dim), shift).tag(ens_dim)
-    err = x - x_shifted
-    return cx.cmap(jnp.mean)(_kernel(err, beta, delta).untag(ens_dim))
+    kernel = _kernel(x - x_shifted, beta, delta, event_dims)
+    return cx.cmap(jnp.mean)(kernel.untag(ens_dim))
 
   total_spread = sum(shift_spread(s) for s in range(1, n))
   return total_spread * (1.0 / (n - 1))  # pyrefly: ignore[bad-return]
 
 
 def _ring_chain_ens_spread(
-    x: cx.Field, ens_dim: str, beta: float, delta: float = 0.0
+    x: cx.Field,
+    ens_dim: str,
+    beta: float,
+    delta: float = 0.0,
+    event_dims: Sequence[str | cx.Coordinate] = (),
 ) -> cx.Field:
   """Computes unbiased expected pairwise difference using ring chaining."""
   n = x.named_shape[ens_dim]
@@ -143,8 +206,8 @@ def _ring_chain_ens_spread(
   curr_x = x
   for _ in range(1, n):
     curr_x = roll_once(curr_x.untag(ens_dim)).tag(ens_dim)
-    err = x - curr_x
-    spread_s = cx.cmap(jnp.mean)(_kernel(err, beta, delta).untag(ens_dim))
+    kernel = _kernel(x - curr_x, beta, delta, event_dims)
+    spread_s = cx.cmap(jnp.mean)(kernel.untag(ens_dim))
     if total_spread is None:
       total_spread = spread_s
     else:
@@ -153,12 +216,40 @@ def _ring_chain_ens_spread(
   return total_spread * (1.0 / (n - 1))  # pyrefly: ignore[bad-return, unsupported-operation]
 
 
-def _kernel_name_suffix(beta: float, delta: float) -> str:
+def _kernel_name_suffix(
+    beta: float, delta: float, event_dims: Sequence[str | cx.Coordinate]
+) -> str:
   """Returns the suffix identifying kernel parameters in statistic names."""
   suffix = f'_beta_{beta}'
   if delta != 0.0:
     suffix += f'_delta_{delta}'
+  if event_dims:
+    # The norm does not depend on the order of event dimensions.
+    suffix += '_event_' + '_'.join(sorted(base.dim_names(event_dims)))
   return suffix
+
+
+def _as_event_dims(
+    event_dims: Sequence[str | cx.Coordinate],
+) -> tuple[str | cx.Coordinate, ...]:
+  """Returns `event_dims` as a tuple, rejecting a single dimension name."""
+  if isinstance(event_dims, str):
+    raise TypeError(
+        'event_dims must be a sequence of dimension names or coordinates,'
+        f' got the string {event_dims!r}.'
+    )
+  return tuple(event_dims)
+
+
+def _validate_kernel_args(
+    ens_dim: str, delta: float, event_dims: tuple[str | cx.Coordinate, ...]
+) -> None:
+  _validate_delta(delta)
+  names = base.dim_names(event_dims)
+  if ens_dim in names:
+    raise ValueError(f'{event_dims=} must not include the {ens_dim=}.')
+  if len(set(names)) != len(names):
+    raise ValueError(f'{event_dims=} must not repeat dimensions.')
 
 
 @dataclasses.dataclass
@@ -169,31 +260,38 @@ class EnergySkill(base.PerVariableStatistic):
   the expected error against the target. In a 2-member ensemble setting, this
   is computed as:
     Skill = 0.5 * (ρ(X - Y) + ρ(X' - Y))
-  where ρ(r) = (r² + δ²)^(β/2) - δ^β reduces to |r|^β for δ = 0 and to the
-  pseudo-Huber function sqrt(r² + δ²) - δ for β = 1.
+  where ρ(r) = (‖r‖² + δ²)^(β/2) - δ^β and ‖r‖ is the Euclidean norm over
+  `event_dims` (|r| without event dimensions). ρ reduces to ‖r‖^β for δ = 0 and
+  to the pseudo-Huber function sqrt(‖r‖² + δ²) - δ for β = 1.
 
-  When β=1 and δ=0, this is the skill term for the CRPS. For energy score based
-  on this statistics to be strictly proper beta must be belong to `(0, 2)`.
+  When β=1, δ=0 and there are no event dimensions, this is the skill term for
+  the CRPS. For an energy score based on this statistic to be strictly proper,
+  beta must belong to `(0, 2)`.
 
   Attributes:
     ensemble_dim: Name of the ensemble dimension in predictions.
     beta: Power parameter of the kernel.
     delta: Smoothing scale of the kernel, in units of the inputs. Must be
-      non-negative. Zero recovers the |r|^β kernel; positive values make the
-      gradient continuous at zero error (behaving like r² / (2δ) for |r| << δ)
-      while leaving errors |r| >> δ essentially unchanged.
+      non-negative. Zero recovers the ‖r‖^β kernel; positive values make the
+      gradient continuous at zero error (behaving like ‖r‖² / (2δ) for ‖r‖ << δ)
+      while leaving errors ‖r‖ >> δ essentially unchanged.
+    event_dims: Dimensions of predictions and targets that form a single
+      (vector-valued) event. Errors are combined over these dimensions with the
+      Euclidean norm and the dimensions are reduced.
   """
 
   ensemble_dim: str = 'ensemble'
   beta: float = 1.0
   delta: float = 0.0
+  event_dims: Sequence[str | cx.Coordinate] = ()
 
   def __post_init__(self):
-    _validate_delta(self.delta)
+    self.event_dims = _as_event_dims(self.event_dims)
+    _validate_kernel_args(self.ensemble_dim, self.delta, self.event_dims)
 
   @property
   def unique_name(self) -> str:
-    suffix = _kernel_name_suffix(self.beta, self.delta)
+    suffix = _kernel_name_suffix(self.beta, self.delta, self.event_dims)
     return f'EnergySkill_{self.ensemble_dim}{suffix}'
 
   def _compute_per_variable(
@@ -201,9 +299,11 @@ class EnergySkill(base.PerVariableStatistic):
   ) -> cx.Field:
     """Computes E[ρ(prediction - target)] over the ensemble axis."""
     _validate_ens_dim(predictions, self.ensemble_dim)
+    _validate_event_dims(predictions, self.event_dims)
+    _validate_event_dims(targets, self.event_dims)
     targets = targets.broadcast_like(predictions)  # Needed?
     err = predictions - targets
-    kernel = _kernel(err, self.beta, self.delta)
+    kernel = _kernel(err, self.beta, self.delta, self.event_dims)
     return cx.cmap(jnp.mean)(kernel.untag(self.ensemble_dim))
 
 
@@ -213,22 +313,26 @@ class EnergySpread(base.PerVariableStatistic):
 
   With X, X' two i.i.d. predictions, the spread is defined as the expected
   difference between predictions under the kernel
-  ρ(r) = (r² + δ²)^(β/2) - δ^β (see `EnergySkill`).
+  ρ(r) = (‖r‖² + δ²)^(β/2) - δ^β (see `EnergySkill`).
 
   Attributes:
     ensemble_dim: Name of the ensemble dimension in predictions.
     beta: Power parameter for the energy spread calculation.
     broadcast_target_nans: If True, ensures computed spread becomes NaN at
-      locations where target fields are NaN (masking unobserved targets).
+      locations where target fields are NaN (masking unobserved targets). With
+      `event_dims`, a NaN anywhere in an event masks the whole event.
     algorithm: Method used to compute the expected pairwise difference. Options:
-      - 'auto': Dynamically selects optimal algorithm ('flip' for n=2; 'sort' on
-        CPU and 'all_pairs' on TPU/GPU for n>2).
+      - 'auto': Dynamically selects optimal algorithm ('flip' for n=2; for n>2
+        'sort' on CPU if it is supported, 'all_pairs' otherwise).
       - 'all_pairs': Evaluates pairwise differences via sequential shifts.
       - 'ring_chain': Similar to 'all_pairs', but uses sequential ring shifts.
       - 'flip': Evaluates difference with reversed array (for n=2 only).
-      - 'sort': Evaluates difference using sorted predictions (beta=1.0 only).
+      - 'sort': Evaluates difference using sorted predictions (beta=1.0,
+        delta=0.0 and no event dimensions only).
     delta: Smoothing scale of the kernel (see `EnergySkill`). Must match the
       `delta` of the skill term for the resulting score to be proper.
+    event_dims: Dimensions of predictions that form a single event (see
+      `EnergySkill`). Must match the `event_dims` of the skill term.
   """
 
   ensemble_dim: str = 'ensemble'
@@ -236,18 +340,24 @@ class EnergySpread(base.PerVariableStatistic):
   broadcast_target_nans: bool = False
   algorithm: str = 'auto'
   delta: float = 0.0
+  event_dims: Sequence[str | cx.Coordinate] = ()
 
   def __post_init__(self):
-    _validate_delta(self.delta)
-    if self.algorithm == 'sort' and (self.beta != 1.0 or self.delta != 0.0):
+    self.event_dims = _as_event_dims(self.event_dims)
+    _validate_kernel_args(self.ensemble_dim, self.delta, self.event_dims)
+    if self.algorithm == 'sort' and not self._supports_sort:
       raise ValueError(
-          'sort algorithm only supports beta=1.0 and delta=0.0, got'
-          f' {self.beta=}, {self.delta=}'
+          'sort algorithm only supports beta=1.0, delta=0.0 and no event'
+          f' dims, got {self.beta=}, {self.delta=}, {self.event_dims=}'
       )
 
   @property
+  def _supports_sort(self) -> bool:
+    return self.beta == 1.0 and self.delta == 0.0 and not self.event_dims
+
+  @property
   def unique_name(self) -> str:
-    suffix = _kernel_name_suffix(self.beta, self.delta)
+    suffix = _kernel_name_suffix(self.beta, self.delta, self.event_dims)
     return f'EnergySpread_{self.ensemble_dim}{suffix}'
 
   def _compute_per_variable(
@@ -257,39 +367,55 @@ class EnergySpread(base.PerVariableStatistic):
     ens_dim = self.ensemble_dim
     beta = self.beta
     delta = self.delta
+    event_dims = self.event_dims
     _validate_ens_dim(predictions, ens_dim)
+    _validate_event_dims(predictions, event_dims)
 
     if self.algorithm == 'flip':
-      spread = _flip_2_ens_spread(predictions, ens_dim, beta, delta)
+      spread = _flip_2_ens_spread(predictions, ens_dim, beta, delta, event_dims)
     elif self.algorithm == 'sort':
       spread = _sort_ens_spread(predictions, ens_dim, beta, delta)
     elif self.algorithm == 'all_pairs':
-      spread = _all_pairs_ens_spread(predictions, ens_dim, beta, delta)
+      spread = _all_pairs_ens_spread(
+          predictions, ens_dim, beta, delta, event_dims
+      )
     elif self.algorithm == 'ring_chain':
-      spread = _ring_chain_ens_spread(predictions, ens_dim, beta, delta)
+      spread = _ring_chain_ens_spread(
+          predictions, ens_dim, beta, delta, event_dims
+      )
     elif self.algorithm == 'auto':
       if predictions.named_shape[ens_dim] == 2:
-        spread = _flip_2_ens_spread(predictions, ens_dim, beta, delta)
-      else:
-        use_sort = beta == 1.0 and delta == 0.0
-        cpu_fn = functools.partial(
-            _sort_ens_spread if use_sort else _all_pairs_ens_spread,
+        spread = _flip_2_ens_spread(
+            predictions, ens_dim, beta, delta, event_dims
+        )
+      elif self._supports_sort:
+        default_fn = functools.partial(
+            _all_pairs_ens_spread,
             ens_dim=ens_dim,
             beta=beta,
             delta=delta,
+            event_dims=event_dims,
         )
-        default_fn = functools.partial(
-            _all_pairs_ens_spread, ens_dim=ens_dim, beta=beta, delta=delta
+        cpu_fn = functools.partial(
+            _sort_ens_spread, ens_dim=ens_dim, beta=beta, delta=delta
         )
         spread = jax.lax.platform_dependent(
             predictions, cpu=cpu_fn, default=default_fn
+        )
+      else:
+        spread = _all_pairs_ens_spread(
+            predictions, ens_dim, beta, delta, event_dims
         )
     else:
       raise ValueError(f'Unknown algorithm: {self.algorithm}')
 
     if self.broadcast_target_nans:
-      # Ensure spread is nan where targets are nan.
-      spread = spread + 0.0 * targets.broadcast_like(spread)
+      # Ensure spread is nan where targets are nan (anywhere in the event).
+      _validate_event_dims(targets, event_dims)
+      target_nans = 0.0 * targets
+      if event_dims:
+        target_nans = cx.reduce(jnp.sum, target_nans, *event_dims)
+      spread = spread + target_nans.broadcast_like(spread)
     return spread
 
 
@@ -365,6 +491,98 @@ class CRPS(base.PerVariableMetric):
     # Then CRPS = Skill - spread_term_weight * Spread.
     # This subtraction is performed per-location, before spatial aggregation,
     # which is more numerically stable.
+    return (
+        statistic_values['skill']
+        - self.spread_term_weight * statistic_values['spread']
+    )
+
+
+@dataclasses.dataclass
+class EnergyScore(base.PerVariableMetric):
+  """Energy score, a generalization of the CRPS to vector-valued events.
+
+  The energy score takes the form (with E being expectation over the ensemble):
+    ES = E[‖X - Y‖^β] - spread_term_weight * E[‖X - X'‖^β]
+  where X, X' are i.i.d. predictions, Y is the target and ‖·‖ is the Euclidean
+  norm over `event_dims`. It is a strictly proper scoring rule for β in (0, 2)
+  and `spread_term_weight=0.5`, see formula 22 in [1]. Without event dimensions
+  and with β=1 it is the `CRPS`.
+
+  The CRPS scores each point separately and hence only constrains marginal
+  distributions: it cannot tell apart ensembles that differ in how values at
+  different points depend on each other. The energy score treats all values
+  along `event_dims` as a single event, which makes it sensitive to such
+  dependence, e.g. to spatial correlations within a patch of grid points. This
+  sensitivity is limited and tends to degrade as events get larger [2], so
+  events are best kept small, e.g. by scoring local patches that a transform
+  stacks along a new dimension. All remaining dimensions are scored
+  independently.
+
+  All values of an event enter a single norm, so they should be commensurate,
+  e.g. normalized by a transform applied to predictions and targets. The score
+  also grows with the number of values in an event (like d^(β/2) for d values
+  of similar magnitude), which matters when it is weighted against other terms
+  of a loss. `event_dims` are reduced when the statistics are computed,
+  hence weights and scales of an `Aggregator` that are defined along these
+  dimensions are not applied.
+
+  With `delta > 0`, ‖r‖^β is replaced in both terms by the smooth kernel
+  (‖r‖² + δ²)^(β/2) - δ^β (see `CRPS`), which keeps the score proper. This is
+  recommended when training with β < 1, for which gradients of ‖r‖^β are
+  unbounded at small errors (without event dimensions they are instead set to
+  zero below a small threshold, see `base.safe_sqrt`).
+
+  References:
+    [1]: Gneiting, T., & Raftery, A. E. (2007). Strictly proper scoring rules,
+         prediction, and estimation. Journal of the American statistical
+         Association, 102(477), 359-378.
+    [2]: Pinson, P., & Tastu, J. (2013). Discrimination ability of the Energy
+         score. Technical University of Denmark.
+
+  Attributes:
+    ensemble_dim: Name of the ensemble dimension in predictions.
+    event_dims: Dimensions of predictions and targets that form a single event.
+      The score is reduced over these dimensions.
+    beta: Power parameter of the kernel, in (0, 2].
+    spread_term_weight: Weight of the spread term.
+    delta: Smoothing scale of the kernel, in units of the inputs. Must be
+      non-negative.
+  """
+
+  ensemble_dim: str = 'ensemble'
+  event_dims: Sequence[str | cx.Coordinate] = ()
+  beta: float = 1.0
+  spread_term_weight: float = 0.5
+  delta: float = 0.0
+
+  def __post_init__(self):
+    self.event_dims = _as_event_dims(self.event_dims)
+    _validate_kernel_args(self.ensemble_dim, self.delta, self.event_dims)
+    if not 0 < self.beta <= 2:
+      raise ValueError(f'beta must be in (0, 2], got {self.beta=}')
+
+  @property
+  def statistics(self) -> dict[str, base.Statistic]:
+    return {
+        'skill': EnergySkill(
+            ensemble_dim=self.ensemble_dim,
+            beta=self.beta,
+            delta=self.delta,
+            event_dims=self.event_dims,
+        ),
+        'spread': EnergySpread(
+            ensemble_dim=self.ensemble_dim,
+            beta=self.beta,
+            broadcast_target_nans=True,
+            delta=self.delta,
+            event_dims=self.event_dims,
+        ),
+    }
+
+  def _values_from_mean_statistics_per_variable(
+      self, statistic_values: dict[str, cx.Field]
+  ) -> cx.Field:
+    """Computes the energy score from skill and spread statistics."""
     return (
         statistic_values['skill']
         - self.spread_term_weight * statistic_values['spread']

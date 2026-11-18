@@ -122,6 +122,7 @@ class ProbabilisticMetricsTest(parameterized.TestCase):
       probabilistic_metrics.EnergySkill,
       probabilistic_metrics.EnergySpread,
       probabilistic_metrics.CRPS,
+      probabilistic_metrics.EnergyScore,
   )
   def test_negative_delta_raises_at_construction(self, cls):
     with self.assertRaisesRegex(ValueError, 'delta must be non-negative'):
@@ -255,6 +256,264 @@ class ProbabilisticMetricsTest(parameterized.TestCase):
         with self.subTest(n=n, algorithm=algorithm):
           spread = stat.compute(predictions, targets)['x']
           cx.testing.assert_fields_allclose(spread, expected, atol=1e-6)
+
+  @parameterized.parameters(
+      dict(n=2, beta=1.0, delta=0.0),
+      dict(n=2, beta=1.0, delta=0.5),
+      dict(n=4, beta=1.0, delta=0.0),
+      dict(n=4, beta=1.5, delta=0.0),
+      dict(n=4, beta=0.5, delta=0.0),
+      dict(n=4, beta=1.0, delta=0.5),
+      dict(n=4, beta=1.5, delta=0.5),
+  )
+  def test_energy_score_with_event_dims(self, n, beta, delta):
+    """Energy score over event dims matches an explicit calculation."""
+    e, x = cx.SizedAxis('ensemble', n), cx.SizedAxis('x', 3)
+    p, q = cx.SizedAxis('p', 2), cx.SizedAxis('q', 4)
+    rng = np.random.default_rng(seed=0)
+    # Event dims are not adjacent on predictions, ordered differently on
+    # targets and listed in yet another order in `event_dims`.
+    pred_data = rng.normal(size=p.shape + e.shape + x.shape + q.shape)
+    target_data = rng.normal(size=x.shape + q.shape + p.shape)
+    predictions = {'a': cx.field(pred_data, p, e, x, q)}
+    targets = {'a': cx.field(target_data, x, q, p)}
+    event_dims = ('q', p)
+
+    def rho(diff):  # diff has events along the last axis.
+      squared_norm = np.sum(diff**2, axis=-1)
+      return (squared_norm + delta**2) ** (beta / 2) - delta**beta
+
+    events_pred = pred_data.transpose(1, 2, 0, 3).reshape(n, 3, 8)  # e, x, pq.
+    events_target = target_data.transpose(0, 2, 1).reshape(3, 8)  # x, pq.
+    expected_skill = rho(events_pred - events_target).mean(axis=0)
+    pair_diffs = events_pred[:, None] - events_pred[None, :]
+    expected_spread = rho(pair_diffs).sum(axis=(0, 1)) / (n * (n - 1))
+    expected_score = cx.field(expected_skill - 0.5 * expected_spread, x)
+
+    metric = probabilistic_metrics.EnergyScore(
+        event_dims=event_dims, beta=beta, delta=delta
+    )
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'es': metric}, predictions, targets
+    )
+    values = metric.values_from_mean_statistics(stats)
+    with self.subTest('metric_values'):
+      cx.testing.assert_fields_allclose(
+          values['a'], expected_score, rtol=1e-5, atol=1e-6
+      )
+
+    with self.subTest('jit'):
+
+      @jax.jit
+      def compute(predictions, targets):
+        stats = base.compute_unique_statistics_for_all_metrics(
+            {'es': metric}, predictions, targets
+        )
+        return metric.values_from_mean_statistics(stats)
+
+      cx.testing.assert_fields_allclose(
+          compute(predictions, targets)['a'],
+          expected_score,
+          rtol=1e-5,
+          atol=1e-6,
+      )
+
+    algorithms = ['all_pairs', 'ring_chain', 'auto']
+    if n == 2:
+      algorithms.append('flip')
+    for algorithm in algorithms:
+      with self.subTest(algorithm=algorithm):
+        spread_stat = probabilistic_metrics.EnergySpread(
+            beta=beta, algorithm=algorithm, delta=delta, event_dims=event_dims
+        )
+        spread = spread_stat.compute(predictions, targets)['a']
+        cx.testing.assert_fields_allclose(
+            spread, cx.field(expected_spread, x), rtol=1e-5, atol=1e-6
+        )
+
+    loss = probabilistic_losses.EnergyScore(
+        event_dims=event_dims, beta=beta, delta=delta
+    )
+    with self.subTest('loss_total'):
+      cx.testing.assert_fields_allclose(
+          loss.total(values), expected_score, rtol=1e-5, atol=1e-6
+      )
+
+    with self.subTest('loss_debug_terms'):
+      debug_terms = loss.debug_terms(stats, values)
+      cx.testing.assert_fields_allclose(
+          debug_terms['spread_skill_ratio_a'],
+          cx.field(expected_spread / expected_skill, x),
+          rtol=1e-5,
+      )
+      cx.testing.assert_fields_allclose(
+          debug_terms['relative_energy_score_a'],
+          cx.field(np.ones(x.shape), x),
+          rtol=1e-5,
+      )
+
+  def test_energy_score_without_event_dims_is_crps(self):
+    e, d = cx.SizedAxis('ensemble', 4), cx.SizedAxis('d', 5)
+    rng = np.random.default_rng(seed=0)
+    predictions = {'x': cx.field(rng.normal(size=e.shape + d.shape), e, d)}
+    targets = {'x': cx.field(rng.normal(size=d.shape), d)}
+    crps = probabilistic_metrics.CRPS()
+    energy_score = probabilistic_metrics.EnergyScore()
+    self.assertEqual(
+        {k: v.unique_name for k, v in crps.statistics.items()},
+        {k: v.unique_name for k, v in energy_score.statistics.items()},
+    )
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'crps': crps, 'es': energy_score}, predictions, targets
+    )
+    cx.testing.assert_fields_allclose(
+        energy_score.values_from_mean_statistics(stats)['x'],
+        crps.values_from_mean_statistics(stats)['x'],
+    )
+
+  def test_energy_score_is_sensitive_to_dependence(self):
+    """Energy score penalizes wrong dependence within events, CRPS does not."""
+    e, s = cx.SizedAxis('ensemble', 8), cx.SizedAxis('sample', 20_000)
+    p = cx.SizedAxis('p', 2)
+    rng = np.random.default_rng(seed=0)
+    # Both entries of each target event are equal. `dependent` predictions
+    # share this structure, `independent` ones only match the marginals.
+    target = np.repeat(rng.normal(size=s.shape + (1,)), 2, axis=-1)
+    dependent = np.repeat(rng.normal(size=s.shape + e.shape + (1,)), 2, axis=-1)
+    independent = rng.normal(size=s.shape + e.shape + p.shape)
+    targets = {'x': cx.field(target, s, p)}
+    metrics = {
+        'crps': probabilistic_metrics.CRPS(),
+        'es': probabilistic_metrics.EnergyScore(event_dims=('p',)),
+    }
+
+    def mean_scores(pred_data):
+      predictions = {'x': cx.field(pred_data, s, e, p)}
+      stats = base.compute_unique_statistics_for_all_metrics(
+          metrics, predictions, targets
+      )
+      return {
+          k: float(np.mean(m.values_from_mean_statistics(stats)['x'].data))
+          for k, m in metrics.items()
+      }
+
+    dependent_scores = mean_scores(dependent)
+    independent_scores = mean_scores(independent)
+    # Expected CRPS is 1 / sqrt(pi) for both; expected energy scores are
+    # sqrt(2 / pi) ~ 0.798 for `dependent` and ~0.857 for `independent`.
+    expected_crps, expected_es = np.pi**-0.5, (2 / np.pi) ** 0.5
+    self.assertAlmostEqual(dependent_scores['crps'], expected_crps, delta=0.02)
+    self.assertAlmostEqual(
+        independent_scores['crps'], expected_crps, delta=0.02
+    )
+    self.assertAlmostEqual(dependent_scores['es'], expected_es, delta=0.02)
+    self.assertGreater(independent_scores['es'], dependent_scores['es'] + 0.03)
+
+  def _total_energy_score(self, pred_data, target_data, **kwargs):
+    """Sum of energy scores for events along the last axis of the data."""
+    e = cx.SizedAxis('ensemble', pred_data.shape[0])
+    d, p = cx.SizedAxis('d', 3), cx.SizedAxis('p', 2)
+    predictions = {'x': cx.field(pred_data, e, d, p)}
+    targets = {'x': cx.field(target_data, d, p)}
+    metric = probabilistic_metrics.EnergyScore(event_dims=('p',), **kwargs)
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'es': metric}, predictions, targets
+    )
+    return metric.values_from_mean_statistics(stats)['x'].data.sum()
+
+  @parameterized.parameters(dict(beta=1.0), dict(beta=0.5))
+  def test_energy_score_gradient_at_zero_error(self, beta):
+    """Gradients are finite when all members coincide with the target."""
+    target_data = np.random.default_rng(seed=0).normal(size=(3, 2))
+    pred_data = np.stack([target_data, target_data])
+    grad = jax.grad(self._total_energy_score)(pred_data, target_data, beta=beta)
+    np.testing.assert_array_equal(grad, np.zeros_like(grad))
+
+  def test_energy_score_gradient_for_small_errors(self):
+    """Gradients do not vanish when all errors are small."""
+    noise = np.random.default_rng(seed=0).normal(size=(4, 3, 2))
+    target_data = np.zeros((3, 2))
+    # With beta=1 and delta=0 the score is homogeneous of degree 1 in the
+    # errors, so its gradient does not depend on their scale.
+    grad_fn = jax.grad(self._total_energy_score)
+    grad = grad_fn(noise, target_data)
+    self.assertGreater(np.linalg.norm(grad), 0.1)
+    np.testing.assert_allclose(
+        grad_fn(1e-5 * noise, target_data), grad, rtol=1e-4, atol=1e-5
+    )
+
+  def test_energy_statistics_event_dims_validation(self):
+    e, d = cx.SizedAxis('ensemble', 4), cx.SizedAxis('d', 3)
+    p = cx.SizedAxis('p', 2)
+    predictions = {'x': cx.field(np.ones(e.shape + d.shape + p.shape), e, d, p)}
+    targets = {'x': cx.field(np.ones(d.shape + p.shape), d, p)}
+
+    for cls in (
+        probabilistic_metrics.EnergySkill,
+        probabilistic_metrics.EnergySpread,
+        probabilistic_metrics.EnergyScore,
+    ):
+      with self.subTest('ensemble_dim_in_event_dims', cls=cls.__name__):
+        with self.assertRaisesRegex(ValueError, 'must not include'):
+          cls(event_dims=('p', 'ensemble'))
+
+      with self.subTest('repeated_event_dims', cls=cls.__name__):
+        with self.assertRaisesRegex(ValueError, 'must not repeat'):
+          cls(event_dims=('p', 'p'))
+        # A coordinate repeats the name of its dimension.
+        with self.assertRaisesRegex(ValueError, 'must not repeat'):
+          cls(event_dims=(p, 'd', 'p'))
+
+      with self.subTest('string_event_dims', cls=cls.__name__):
+        with self.assertRaisesRegex(TypeError, 'must be a sequence'):
+          cls(event_dims='p')
+
+      with self.subTest('one_shot_iterable_event_dims', cls=cls.__name__):
+        event_dims = cls(event_dims=(dim for dim in ('p', 'd'))).event_dims
+        self.assertEqual(event_dims, ('p', 'd'))
+
+    with self.subTest('beta_out_of_range'):
+      with self.assertRaisesRegex(ValueError, 'beta must be in'):
+        probabilistic_metrics.EnergyScore(event_dims=('p',), beta=2.5)
+
+    with self.subTest('unique_name_ignores_order_of_event_dims'):
+      self.assertEqual(
+          probabilistic_metrics.EnergySkill(event_dims=('p', 'd')).unique_name,
+          probabilistic_metrics.EnergySkill(event_dims=('d', 'p')).unique_name,
+      )
+
+    with self.subTest('sort_algorithm'):
+      with self.assertRaisesRegex(ValueError, 'sort algorithm only supports'):
+        probabilistic_metrics.EnergySpread(algorithm='sort', event_dims=('p',))
+
+    with self.subTest('missing_in_predictions'):
+      spread = probabilistic_metrics.EnergySpread(event_dims=('q',))
+      with self.assertRaisesRegex(ValueError, 'are not dimensions of'):
+        spread.compute(predictions, targets)
+
+    with self.subTest('missing_in_targets'):
+      skill = probabilistic_metrics.EnergySkill(event_dims=('p',))
+      targets_without_p = {'x': cx.field(np.ones(d.shape), d)}
+      with self.assertRaisesRegex(ValueError, 'are not dimensions of'):
+        skill.compute(predictions, targets_without_p)
+
+  def test_energy_statistics_target_nans_with_event_dims(self):
+    """A NaN target masks its whole event in both skill and spread."""
+    e, d = cx.SizedAxis('ensemble', 2), cx.SizedAxis('d', 3)
+    p = cx.SizedAxis('p', 2)
+    predictions = {'x': cx.field(np.ones(e.shape + d.shape + p.shape), e, d, p)}
+    target_data = np.ones(d.shape + p.shape)
+    target_data[1, 0] = np.nan
+    targets = {'x': cx.field(target_data, d, p)}
+    expected = cx.field(np.array([0.0, np.nan, 0.0]), d)
+    skill = probabilistic_metrics.EnergySkill(event_dims=('p',))
+    spread = probabilistic_metrics.EnergySpread(
+        broadcast_target_nans=True, event_dims=('p',)
+    )
+    for name, statistic in {'skill': skill, 'spread': spread}.items():
+      with self.subTest(name):
+        result = statistic.compute(predictions, targets)['x']
+        cx.testing.assert_fields_equal(result, expected)
 
   @parameterized.parameters(
       dict(n=2),

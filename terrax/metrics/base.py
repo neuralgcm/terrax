@@ -18,12 +18,21 @@ from __future__ import annotations
 import abc
 import collections
 from collections.abc import Iterable
+from collections.abc import Sequence
 import dataclasses
 from typing import Iterator
 import coordax as cx
 import jax
 import jax.numpy as jnp
 from terrax.core import typing
+
+
+def dim_names(dims: Sequence[str | cx.Coordinate]) -> tuple[str, ...]:
+  """Returns the names of all dimensions in `dims`, in order of appearance."""
+  names = []
+  for dim in dims:
+    names.extend(dim.dims if cx.is_coord(dim) else (dim,))
+  return tuple(names)
 
 
 @jax.custom_jvp

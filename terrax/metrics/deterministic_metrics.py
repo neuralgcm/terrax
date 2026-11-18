@@ -176,13 +176,7 @@ class ProductStatistic(base.PerVariableStatistic):
   def unique_name(self) -> str:
     x_name = 'pred' if self.x_is_prediction else 'target'
     y_name = 'target' if self.y_is_target else 'pred'
-    dim_names = []
-    for d in self.product_dims:
-      if isinstance(d, cx.Coordinate):
-        dim_names.extend(d.dims)
-      else:
-        dim_names.append(d)
-    dims_str = '_'.join(str(d) for d in dim_names)
+    dims_str = '_'.join(base.dim_names(self.product_dims))
     return f'ProductStatistic_{x_name}_{y_name}_{dims_str}'
 
   def _compute_per_variable(
