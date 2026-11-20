@@ -215,6 +215,12 @@ class InferenceRunner:
   max_nan_retries: int = 3  # only used when bad_state_strategy='retry'.
   check_dynamic_inputs_data: bool = False
   random_seed: int = 0
+  # History of `inputs` passed to `model.assimilate`: data at times in
+  # `[init_time - input_lookback, init_time]` on a `timedelta` axis ending at 0.
+  # A dict sets lookback per key of `inputs`; omitted keys default to 0.
+  input_lookback: np.timedelta64 | dict[str, np.timedelta64] = np.timedelta64(
+      0, 's'
+  )
   _dynamic_queries_read_spec: _ReadSpec = dataclasses.field(
       default_factory=dict, init=False
   )
@@ -290,11 +296,30 @@ class InferenceRunner:
       )
     if isinstance(self.init_times, pd.DatetimeIndex):
       self.init_times = self.init_times.to_numpy()
-    for key, dataset in self.inputs.items():
-      time_index: pd.Index = dataset.indexes['time']
-      if (time_index.get_indexer(self.init_times) == -1).any():
+    lookbacks = (
+        self.input_lookback.values()
+        if isinstance(self.input_lookback, dict)
+        else (self.input_lookback,)
+    )
+    if any(lb < np.timedelta64(0, 's') for lb in lookbacks):
+      raise ValueError(
+          f'input_lookback must be >= 0, got {self.input_lookback}'
+      )
+    if self.inputs and isinstance(self.input_lookback, dict):
+      if unknown_keys := set(self.input_lookback) - set(self.inputs):
         raise ValueError(
-            f'inputs {key!r} does not contain all init_times:\n'
+            f'input_lookback has {sorted(unknown_keys)=} not in inputs'
+        )
+    for key, dataset in self.inputs.items():
+      lookback = self.input_lookbacks[key]
+      time_index: pd.Index = dataset.indexes['time']
+      required_times = np.concatenate(
+          [self.init_times - lookback, self.init_times]
+      )
+      if (time_index.get_indexer(required_times) == -1).any():
+        raise ValueError(
+            f'inputs {key!r} does not contain all init_times'
+            f' (with {lookback=}):\n'
             f'inputs={self.inputs}\ninit_times={self.init_times}'
         )
 
@@ -344,6 +369,14 @@ class InferenceRunner:
           ' them from the model when data is not provided.'
       )
     self._dynamic_queries_read_spec = dynamic_queries_read_spec
+
+  @property
+  def input_lookbacks(self) -> dict[str, np.timedelta64]:
+    """Lookback duration for each dataset key in `inputs`."""
+    if isinstance(self.input_lookback, dict):
+      zero = np.timedelta64(0, 's')
+      return {k: self.input_lookback.get(k, zero) for k in self.inputs}
+    return {k: self.input_lookback for k in self.inputs}
 
   @property
   def output_freqs(self) -> dict[str, np.timedelta64]:
@@ -688,12 +721,12 @@ class InferenceRunner:
       logging.info(f'no state checkpoint found for task {task_id=}')
       rng = self._make_rng(task_id, init_time_index, realization_start, attempt)
 
-      # TODO(shoyer): Can we get the number of time-steps to include in model
-      # inputs from the model (or at least an InferenceRunner property) instead
-      # of hard-coding it here?
-      selected_inputs = {
-          k: v.sel(time=[init_time]) for k, v in self.inputs.items()
-      }
+      selected_inputs = {}
+      for k, v in self.inputs.items():
+        lookback = self.input_lookbacks[k]
+        v = v.sel(time=slice(init_time - lookback, init_time))
+        origin = v.time.values[0] - init_time if v.sizes['time'] else -lookback
+        selected_inputs[k] = xarray_utils.ensure_timedelta_axis(v, origin)
       input_obs = xarray_utils.model_inputs_from_xarray(
           selected_inputs, self.model
       )

@@ -782,6 +782,115 @@ class SplitQueriesByFrequencyTest(absltest.TestCase):
     self.assertEqual(actual, expected)
 
 
+_HISTORY = np.array([-24, 0], 'timedelta64[h]')
+
+
+@nnx.dataclass
+class HistoryModel(MockModel):
+  """MockModel whose inputs need `_HISTORY` timedeltas."""
+
+  @property
+  def inputs_spec(self):
+    with_td = lambda c: data_specs.CoordSpec.with_given_timedelta(c, _HISTORY)
+    return jax.tree.map(with_td, self.input_specs, is_leaf=cx.is_coord)
+
+  def assimilate(self, observations: typing.Observation) -> None:
+    deltas = observations['state']['foo'].axes['timedelta'].deltas  # pyrefly: ignore[missing-attribute]
+    if not np.isin(_HISTORY, deltas).all():
+      raise ValueError(f'Inputs must include {_HISTORY}, got {deltas=}')
+    i0, i1 = np.searchsorted(deltas, _HISTORY)
+    obs = cx.untag(observations['state'], 'timedelta')
+    self.prognostics.set_value({  # foo(t-24h) + 10 * foo(t0), time(t0).
+        'foo': cx.cmap(lambda x: x[i0] + 10 * x[i1])(obs['foo']),
+        'time': cx.cmap(lambda x: x[i1])(obs['time']),
+    })
+
+
+class InputLookbackTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # 12h state data (like 12h ocean inputs for a 24h-history model).
+    state_times = np.arange(
+        '2025-01-01T00', '2025-01-03T12', 12, dtype='datetime64[h]'
+    ).astype('datetime64[ns]')
+    self.times = state_times[::2]  # daily: Jan 1, Jan 2, Jan 3.
+    self.inputs = {
+        'state': xarray.Dataset(
+            {'foo': ('time', [2.0, 99.0, 3.0, 99.0, 5.0])},
+            coords={'time': state_times},
+        )
+    }
+    dyn_ds = xarray.Dataset(
+        {'foo': ('time', np.ones(3))}, coords={'time': self.times}
+    )
+    model = HistoryModel(
+        input_specs={'state': {'foo': cx.Scalar(), 'time': cx.Scalar()}},
+        dynamic_input_specs={'data': {'foo': cx.Scalar(), 'time': cx.Scalar()}},
+        dynamic_input_slice=dynamic_io.DynamicInputSlice(
+            keys_to_coords={'foo': cx.Scalar()}, observation_key='data'
+        ),
+        assimilation_noise=None,
+    )
+    self.kwargs = dict(
+        model=api.InferenceModel.from_model_api(model),
+        inputs=self.inputs,
+        dynamic_inputs=dynamic_inputs_lib.Persistence(
+            {'data': dyn_ds}, None, np.timedelta64(6, 'h')
+        ),
+        output_query={'state': {'foo': cx.Scalar()}},
+    )
+
+  def test_validation_errors(self):
+    with self.assertRaisesRegex(ValueError, 'input_lookback must be >= 0'):
+      make_runner(
+          init_times=self.times[1:],
+          input_lookback=np.timedelta64(-1, 'h'),
+          **self.kwargs,
+      )
+    with self.assertRaisesRegex(ValueError, 'not in inputs'):
+      make_runner(
+          init_times=self.times[1:],
+          input_lookback={'other': np.timedelta64(24, 'h')},
+          **self.kwargs,
+      )
+    # Validates lookback timestamps even when model=None (e.g. Flume driver).
+    with self.assertRaisesRegex(ValueError, 'does not contain all init_times'):
+      make_runner(
+          init_times=self.times[:1],
+          input_lookback=np.timedelta64(24, 'h'),
+          **(self.kwargs | {'model': None}),
+      )
+
+  def test_missing_lookback_fails_in_run(self):
+    output_path = self.create_tempdir().full_path
+    runner = make_runner(
+        init_times=self.times[1:], output_path=output_path, **self.kwargs
+    )
+    runner.setup()
+    with self.assertRaisesRegex(ValueError, 'Inputs must include'):
+      runner.run(0)
+
+  def test_runner_with_per_key_input_lookback(self):
+    # `aux` only covers `self.times[1:]`, verifying omitted dict keys use 0s.
+    aux_ds = xarray.Dataset(
+        {'bar': ('time', [1.0, 2.0])}, coords={'time': self.times[1:]}
+    )
+    output_path = self.create_tempdir().full_path
+    runner = make_runner(
+        init_times=self.times[1:],
+        output_path=output_path,
+        input_lookback={'state': np.timedelta64(24, 'h')},
+        **(self.kwargs | {'inputs': self.inputs | {'aux': aux_ds}}),
+    )
+    runner.setup()
+    for task_id in range(runner.task_count):
+      runner.run(task_id)
+    actual = xarray.open_datatree(output_path, engine='zarr')['state']['foo']
+    # 2 + 10*3 = 32 and 3 + 10*5 = 53 at lead_time=0.
+    np.testing.assert_allclose(actual.to_numpy()[:, 0], [32.0, 53.0])
+
+
 class AtomicWriteTest(absltest.TestCase):
 
   def test_successful(self):
