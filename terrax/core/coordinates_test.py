@@ -21,6 +21,7 @@ from coordax import testing as coordax_testing
 from dinosaur import hybrid_coordinates
 from dinosaur import sigma_coordinates
 import jax
+import jax.numpy as jnp
 import numpy as np
 from terrax.core import coordinates
 from terrax.core import parallelism
@@ -684,6 +685,201 @@ class CoordinatesSelectionTest(parameterized.TestCase):
       axis = coordinates.SoilLevels([0.1, 1.5])
       sel = soil.sel(soil_levels=axis)
       self.assertEqual(sel, axis)
+
+  def test_swath_patch_viewing_geometry(self):
+    patch = coordinates.SwathPatch.atms(scanlines=10)
+    self.assertEqual(patch.dims, ('scanline', 'fov'))
+    self.assertEqual(patch.shape, (10, 96))
+    _, fov_axis = patch.axes
+
+    with self.subTest('scan_angles_symmetry'):
+      expected_angles = cx.field(
+          np.linspace(-52.725, 52.725, 96, dtype=np.float32), fov_axis
+      )
+      cx.testing.assert_fields_allclose(
+          patch.scan_angles, expected_angles, rtol=1e-5
+      )
+      flipped = cx.field(-patch.scan_angles.data[::-1], fov_axis)
+      cx.testing.assert_fields_allclose(
+          patch.scan_angles, flipped, atol=1e-5
+      )
+
+    with self.subTest('footprint_weights_and_spherical_quadrature'):
+      cx.testing.assert_fields_allclose(
+          cx.cmap(jnp.mean)(patch.footprint_weights.untag(fov_axis)),
+          cx.field(np.float32(1.0)),
+          rtol=1e-5,
+      )
+      # Limb cell Jacobian (~4.27x nadir on ATMS) exceeds nadir without squaring
+      # slant_range (~8.28x).
+      ratio = float(
+          patch.footprint_weights.data[0] / patch.footprint_weights.data[47]
+      )
+      self.assertGreater(ratio, 4.0)
+      self.assertLess(ratio, 4.6)
+
+      # Quadrature check: spherical band mean of f(psi) = cos(4 * psi) across
+      # the ATMS swath (with spherical surface element dA ~ cos(psi) dphi dpsi)
+      # matches exact \int cos(4*psi)*cos(psi) dpsi / \int cos(psi) dpsi.
+      r_ratio = 1.0 + patch.satellite_altitude_km / 6371.0
+      scan_rad = np.deg2rad(np.abs(patch.scan_angles.data))
+      psi = np.arcsin(r_ratio * np.sin(scan_rad)) - scan_rad
+      half_step_rad = np.deg2rad(patch.max_scan_angle / (patch.fov - 1))
+      beta_edge = np.deg2rad(patch.max_scan_angle) + half_step_rad
+      psi_edge = np.arcsin(r_ratio * np.sin(beta_edge)) - beta_edge
+      exact_band_mean = (
+          0.1 * np.sin(5.0 * psi_edge) + (1.0 / 6.0) * np.sin(3.0 * psi_edge)
+      ) / np.sin(psi_edge)
+      f_psi = cx.field(
+          np.broadcast_to(np.cos(4.0 * psi).astype(np.float32), patch.shape),
+          patch,
+      )
+      cx.testing.assert_fields_allclose(
+          patch.mean(f_psi, area_weighted=True),
+          cx.field(np.float32(exact_band_mean)),
+          atol=5e-4,
+      )
+
+    with self.subTest('horizon_and_altitude_validation'):
+      with self.assertRaisesRegex(ValueError, 'exceeds geometric horizon'):
+        coordinates.SwathPatch(
+            scanlines=10,
+            fov=96,
+            max_scan_angle=75.0,
+            satellite_altitude_km=833.0,
+        )
+      with self.assertRaisesRegex(
+          ValueError, 'Underground satellites are not supported yet'
+      ):
+        coordinates.SwathPatch(
+            scanlines=10,
+            fov=96,
+            max_scan_angle=45.0,
+            satellite_altitude_km=-10.0,
+        )
+
+  def test_patch_coordinate_abc_and_reductions(self):
+    with self.subTest('incomplete_subclass_raises_type_error'):
+
+      class _IncompletePatch(coordinates.PatchCoordinate):
+        pass
+
+      with self.assertRaises(TypeError):
+        _IncompletePatch()  # pyrefly: ignore[bad-instantiation]
+
+    patch = coordinates.SwathPatch(
+        scanlines=6,
+        fov=4,
+        max_scan_angle=52.725,
+        satellite_altitude_km=833.0,
+    )
+    with self.subTest('mean_and_area_weighted_mean'):
+      ones = cx.field(np.ones(patch.shape, dtype=np.float32), patch)
+      cx.testing.assert_fields_allclose(
+          patch.mean(ones, area_weighted=True),
+          cx.field(np.float32(1.0)),
+          rtol=1e-5,
+      )
+      with_nans = np.ones(patch.shape, dtype=np.float32)
+      with_nans[3:, :] = np.nan
+      f_nans = cx.field(with_nans, patch)
+      cx.testing.assert_fields_allclose(
+          patch.mean(f_nans, area_weighted=True, skipna=True),
+          cx.field(np.float32(1.0)),
+          rtol=1e-5,
+      )
+      mean_no_skip = patch.mean(f_nans, area_weighted=True, skipna=False)
+      self.assertTrue(np.isnan(float(mean_no_skip.data)))
+      # Unnormalized weights must be normalized by sum(w) even for skipna=False.
+      unnorm_w = cx.field(np.full(patch.shape, 5.0, dtype=np.float32), patch)
+      cx.testing.assert_fields_allclose(
+          patch._reduce_mean(ones * 3.0, weights=unnorm_w, skipna=False),
+          cx.field(np.float32(3.0)),
+          rtol=1e-5,
+      )
+
+  def test_swath_patch_selection_and_xarray_roundtrip(self):
+    patch = coordinates.SwathPatch.atms(scanlines=20)
+    with self.subTest('isel_full_and_slice'):
+      self.assertEqual(patch.isel(scanline=slice(None)), patch)
+      sub = patch.isel(scanline=slice(0, 5), fov=0)
+      self.assertEqual(sub.dims, ('scanline',))
+      self.assertEqual(sub.shape, (5,))
+
+    with self.subTest('xarray_roundtrip'):
+      f = cx.field(np.zeros(patch.shape, dtype=np.float32), patch)
+      da = f.to_xarray()
+      restored = cx.Field.from_xarray(da, (coordinates.SwathPatch,))
+      cx.testing.assert_fields_equal(restored, f)
+      self.assertEqual(restored.coordinate, patch)
+
+      # Missing attributes should not match SwathPatch.
+      da_no_attrs = da.copy()
+      da_no_attrs.coords['scanline'].attrs = {}
+      da_no_attrs.coords['fov'].attrs = {}
+      with self.assertRaises(ValueError):
+        cx.Field.from_xarray(da_no_attrs, (coordinates.SwathPatch,))
+
+  def test_lon_lat_patch_and_local_grid_patch(self):
+    with self.subTest('lon_lat_patch'):
+      ll_patch = coordinates.LonLatPatch(longitude_nodes=12, latitude_nodes=8)
+      self.assertIsInstance(ll_patch, coordinates.PatchCoordinate)
+      self.assertEqual(ll_patch.dims, ('patch_lon', 'patch_lat'))
+      self.assertEqual(ll_patch.shape, (12, 8))
+      ones = cx.field(np.ones(ll_patch.shape, dtype=np.float32), ll_patch)
+      lats = cx.field(
+          np.broadcast_to(
+              np.linspace(-30.0, 30.0, 8, dtype=np.float32), ll_patch.shape
+          ),
+          ll_patch,
+      )
+      cx.testing.assert_fields_allclose(
+          ll_patch.mean(ones, latitude=lats),
+          cx.field(np.float32(1.0)),
+          rtol=1e-5,
+      )
+      batch_ax = cx.SizedAxis('patch_index', 2)
+      batched_coord = cx.coords.compose(batch_ax, ll_patch)
+      batched_lats = cx.field(
+          np.stack([lats.data, lats.data + 15.0], axis=0), batched_coord
+      )
+      batched_vals = cx.field(
+          np.full(batched_coord.shape, 2.5, dtype=np.float32), batched_coord
+      )
+      cx.testing.assert_fields_allclose(
+          ll_patch.mean(batched_vals, latitude=batched_lats, skipna=False),
+          cx.field(np.full((2,), 2.5, dtype=np.float32), batch_ax),
+          rtol=1e-5,
+      )
+      da = ones.to_xarray()
+      restored = cx.Field.from_xarray(da, (coordinates.LonLatPatch,))
+      cx.testing.assert_fields_equal(restored, ones)
+
+    with self.subTest('local_grid_patch'):
+      local_patch = coordinates.LocalGridPatch(
+          x_nodes=9, y_nodes=7, dx_deg=0.5, dy_deg=0.5
+      )
+      self.assertIsInstance(local_patch, coordinates.PatchCoordinate)
+      self.assertEqual(local_patch.dims, ('patch_x', 'patch_y'))
+      self.assertEqual(local_patch.shape, (9, 7))
+      x_axis, y_axis = local_patch.axes
+      cx.testing.assert_fields_allclose(
+          local_patch.fields['patch_x'],
+          cx.field(np.linspace(-2.0, 2.0, 9, dtype=np.float32), x_axis),
+      )
+      cx.testing.assert_fields_allclose(
+          local_patch.fields['patch_y'],
+          cx.field(np.linspace(-1.5, 1.5, 7, dtype=np.float32), y_axis),
+      )
+      ones = cx.field(np.ones(local_patch.shape, dtype=np.float32), local_patch)
+      cx.testing.assert_fields_allclose(
+          local_patch.mean(ones, area_weighted=True),
+          cx.field(np.float32(1.0)),
+          rtol=1e-5,
+      )
+      da = ones.to_xarray()
+      restored = cx.Field.from_xarray(da, (coordinates.LocalGridPatch,))
+      cx.testing.assert_fields_equal(restored, ones)
 
 
 if __name__ == '__main__':

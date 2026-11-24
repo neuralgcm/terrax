@@ -108,6 +108,64 @@ class BoundariesTest(parameterized.TestCase):
       self.assertEqual(trimmed.shape, data.shape)
       np.testing.assert_array_equal(trimmed, data)
 
+  @parameterized.named_parameters(
+      dict(testcase_name='edge_mode', mode='edge', constant_value=0.0),
+      dict(testcase_name='constant_mode', mode='constant', constant_value=-1.0),
+  )
+  def test_patch_boundary_pad_and_trim(self, mode: str, constant_value: float):
+    self.assertIs(boundaries.SwathBoundary, boundaries.PatchBoundary)
+    bc = boundaries.PatchBoundary(mode=mode, constant_value=constant_value)
+    patch = coordinates.SwathPatch(
+        scanlines=12,
+        fov=8,
+        max_scan_angle=52.725,
+        satellite_altitude_km=833.0,
+    )
+    pad_sizes = {'scanline': (2, 3), 'fov': (1, 2)}
+    rng = jax.random.PRNGKey(42)
+    data = jax.random.normal(rng, patch.shape)
+
+    with self.subTest('on_field_inputs'):
+      f = cx.field(data, patch)
+      padded = bc.pad(f, pad_sizes)
+      self.assertEqual(padded.shape, (17, 11))
+      if mode == 'edge':
+        np.testing.assert_array_equal(padded.data[0, 1:-2], f.data[0, :])
+        np.testing.assert_array_equal(padded.data[-1, 1:-2], f.data[-1, :])
+      else:
+        np.testing.assert_array_equal(padded.data[0, :], constant_value)
+      trimmed = bc.trim(padded)
+      cx.testing.assert_fields_equal(trimmed, f)
+
+    with self.subTest('on_local_grid_patch'):
+      local_patch = coordinates.LocalGridPatch(
+          x_nodes=8, y_nodes=6, dx_deg=0.5, dy_deg=0.5
+      )
+      f_local = cx.field(
+          jax.random.normal(rng, local_patch.shape), local_patch
+      )
+      padded_local = bc.pad(f_local, {'patch_x': (1, 1), 'patch_y': (2, 2)})
+      self.assertEqual(padded_local.shape, (10, 10))
+      cx.testing.assert_fields_equal(bc.trim(padded_local), f_local)
+
+    with self.subTest('on_multiple_padded_coordinates'):
+      other_padded = coordinates.CoordinateWithPadding(
+          cx.LabeledAxis('sensor_fov', np.arange(4)), {'sensor_fov': (1, 1)}
+      )
+      multi_coord = cx.coords.compose(other_padded, patch)
+      f_multi = cx.field(
+          jax.random.normal(rng, multi_coord.shape), multi_coord
+      )
+      padded_multi = bc.pad(f_multi, pad_sizes)
+      cx.testing.assert_fields_equal(bc.trim(padded_multi), f_multi)
+
+    with self.subTest('on_array_inputs'):
+      pad_width = ((2, 3), (1, 2))
+      padded_arr = bc.pad_array(data, pad_width)
+      self.assertEqual(padded_arr.shape, (17, 11))
+      trimmed_arr = bc.trim_array(padded_arr, pad_width)
+      np.testing.assert_array_equal(trimmed_arr, data)
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')
