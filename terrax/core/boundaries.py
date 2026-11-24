@@ -15,6 +15,7 @@
 """Defines boundary conditions for standard computational domains."""
 
 import abc
+from typing import Literal
 import coordax as cx
 from flax import nnx
 import jax
@@ -148,3 +149,93 @@ class LonLatBoundary(BoundaryCondition):
     trimmed_grid = grid.coordinate
     x = x.untag(grid)
     return cx.cpmap(self.trim_array)(x, pads).tag(trimmed_grid)
+
+
+@nnx.dataclass
+class PatchBoundary(BoundaryCondition):
+  """Implements open-boundary padding and trimming for 2D patch coordinates.
+
+  Both 2D patch axes (e.g. `('scanline', 'fov')`, `('patch_lon', 'patch_lat')`,
+  or `('patch_x', 'patch_y')`) are open boundaries and are padded using either
+  edge replication (`mode='edge'`) or a constant value (`mode='constant'`,
+  `constant_value`).
+
+  Attributes:
+    mode: Padding mode, either `'edge'` or `'constant'`.
+    constant_value: Fill value used when `mode='constant'`.
+  """
+
+  mode: Literal['edge', 'constant'] = nnx.static(default='edge')
+  constant_value: float = nnx.static(default=0.0)
+
+  def __post_init__(self):
+    if self.mode not in ('edge', 'constant'):
+      raise ValueError(
+          f"mode must be 'edge' or 'constant', got {self.mode=!r}."
+      )
+
+  @property
+  def ndim(self) -> int:
+    return 2
+
+  def pad_array(
+      self,
+      x: typing.Array,
+      pad_width: tuple[tuple[int, int], ...],
+  ) -> typing.Array:
+    if x.ndim != 2 or len(pad_width) != 2:
+      raise ValueError(
+          f'pad_array was called with {x.ndim=} and {len(pad_width)=} which '
+          'are expected to be equal to 2 representing the 2D patch axes.'
+      )
+    if all(pad == 0 for pad in jax.tree.leaves(pad_width)):
+      return x
+    if self.mode == 'edge':
+      return jnp.pad(x, pad_width, mode='edge')
+    return jnp.pad(
+        x, pad_width, mode='constant', constant_values=self.constant_value
+    )
+
+  def trim_array(
+      self,
+      x: typing.Array,
+      pad_width: tuple[tuple[int, int], ...],
+  ) -> typing.Array:
+    if x.ndim != 2 or len(pad_width) != 2:
+      raise ValueError(
+          f'trim_array was called with {x.ndim=} and {len(pad_width)=} which '
+          'are expected to be equal to 2 representing the 2D patch axes.'
+      )
+    if all(pad == 0 for pad in jax.tree.leaves(pad_width)):
+      return x
+    row_pad, col_pad = pad_width
+    row_slice = slice(row_pad[0], x.shape[0] - row_pad[1])
+    col_slice = slice(col_pad[0], x.shape[1] - col_pad[1])
+    return x[row_slice, col_slice]
+
+  def pad(self, x: cx.Field, pad_sizes: dict[str, tuple[int, int]]) -> cx.Field:
+    patch = cx.coords.extract(x.coordinate, coordinates.PatchCoordinate)
+    pads = tuple(pad_sizes[d] for d in patch.dims)
+    padded_patch = coordinates.CoordinateWithPadding(patch, pad_sizes)
+    return cx.cpmap(self.pad_array)(x.untag(patch), pads).tag(padded_patch)
+
+  def trim(self, x: cx.Field) -> cx.Field:
+    padded_candidates = [
+        c
+        for c in cx.coords.canonicalize(x.coordinate)
+        if isinstance(c, coordinates.CoordinateWithPadding)
+        and isinstance(c.coordinate, coordinates.PatchCoordinate)
+    ]
+    if len(padded_candidates) != 1:
+      raise ValueError(
+          'PatchBoundary.trim expected exactly one padded PatchCoordinate in'
+          f' {x.coordinate=}, got {padded_candidates=}.'
+      )
+    padded_patch = padded_candidates[0]
+    patch = padded_patch.coordinate
+    assert isinstance(patch, coordinates.PatchCoordinate)
+    pads = tuple(padded_patch.pad_sizes[d] for d in patch.dims)
+    return cx.cpmap(self.trim_array)(x.untag(padded_patch), pads).tag(patch)
+
+
+SwathBoundary = PatchBoundary
