@@ -409,6 +409,27 @@ class ToFromXarrayTest(parameterized.TestCase):
     self.assertIsInstance(data_array, xarray.DataArray)
     cx.testing.assert_fields_equal(xarray_utils.from_xarray(data_array), field)
 
+  def test_swath_patch_round_trip(self):
+    timedelta = coordinates.TimeDelta(np.arange(2) * np.timedelta64(6, 'h'))
+    swath = coordinates.SwathPatch.atms(scanlines=15)
+    ll_patch = coordinates.LonLatPatch(longitude_nodes=12, latitude_nodes=8)
+    local_patch = coordinates.LocalGridPatch(
+        x_nodes=10, y_nodes=10, dx_deg=0.5, dy_deg=0.5
+    )
+    for name, patch in [
+        ('atms_1', swath),
+        ('subgrid', ll_patch),
+        ('local', local_patch),
+    ]:
+      coord = cx.coords.compose(timedelta, patch)
+      field = cx.field(
+          np.random.RandomState(0).randn(*coord.shape).astype(np.float32), coord
+      )
+      ds = xarray_utils.to_xarray({name: field})
+      restored = xarray_utils.from_xarray(ds)
+      cx.testing.assert_fields_equal(restored[name], field)
+      self.assertEqual(restored[name].coordinate, coord)
+
   def test_fields_round_trip(self):
     timedelta_values = np.arange(3, dtype='timedelta64[D]')
     timedelta = coordinates.TimeDelta(timedelta_values)
