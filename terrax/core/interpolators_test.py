@@ -21,6 +21,7 @@ import jax
 import numpy as np
 from terrax.core import coordinates
 from terrax.core import interpolators
+from terrax.core import patch_geometry
 
 
 class InterpolatorsTest(parameterized.TestCase):
@@ -297,6 +298,257 @@ class InterpolatorsTest(parameterized.TestCase):
     lon_neighbors_shape = (target_grid.shape[0], 2)
     lon_neighbors = [c for c in consts if np.shape(c) == lon_neighbors_shape]
     self.assertLen(lon_neighbors, 2)  # indices and weights.
+
+  @parameterized.named_parameters(
+      dict(testcase_name='bilinear', method='bilinear'),
+      dict(testcase_name='nearest', method='nearest'),
+  )
+  def test_lon_lat_to_swath_interpolator(self, method: str):
+    grid = coordinates.LonLatGrid.TL63()
+    lon_1d = np.deg2rad(grid.fields['longitude'].data)[:, None]
+    lat_1d = np.deg2rad(grid.fields['latitude'].data)[None, :]
+    smooth_fn = lambda lon_r, lat_r: np.sin(lon_r) * np.cos(lat_r)
+    f_grid = cx.field(smooth_fn(lon_1d, lat_1d).astype(np.float32), grid)
+
+    patch = coordinates.SwathPatch(
+        scanlines=8,
+        fov=6,
+        max_scan_angle=52.725,
+        satellite_altitude_km=833.0,
+    )
+    patch_axis = cx.LabeledAxis('patch_index', np.arange(2))
+    coord = cx.coords.compose(patch_axis, patch)
+
+    # Patch 0 crosses 360->0 boundary; Patch 1 has trailing NaN scanlines.
+    lons_p0 = np.linspace(355.0, 365.0, 6, dtype=np.float32) % 360.0
+    lats_p0 = np.linspace(-20.0, 20.0, 8, dtype=np.float32)
+    lon_p0, lat_p0 = np.meshgrid(lons_p0, lats_p0)
+
+    lon_p1 = lon_p0.copy()
+    lat_p1 = lat_p0.copy()
+    lon_p1[5:, :] = np.nan
+    lat_p1[5:, :] = np.nan
+
+    lon_query = cx.field(np.stack([lon_p0, lon_p1], axis=0), coord)
+    lat_query = cx.field(np.stack([lat_p0, lat_p1], axis=0), coord)
+
+    interp = interpolators.LonLatToSwathInterpolator(method=method)
+    out = interp(f_grid, lon_query, lat_query)
+    self.assertEqual(out.coordinate, coord)
+
+    expected_p0 = smooth_fn(np.deg2rad(lon_p0), np.deg2rad(lat_p0))
+    atol = 0.02 if method == 'bilinear' else 0.1
+    np.testing.assert_allclose(out.data[0], expected_p0, atol=atol)
+    # Trailing NaN scanlines in Patch 1 must remain NaN (even for nearest).
+    self.assertTrue(np.all(np.isnan(out.data[1, 5:, :])))
+    self.assertTrue(np.all(np.isfinite(out.data[1, :5, :])))
+
+    with self.subTest('skip_missing_and_include_query_fields'):
+      scalar_f = cx.field(np.float32(3.0))
+      with self.assertRaises(ValueError):
+        interp({'a': f_grid, 's': scalar_f}, lon_query, lat_query)
+      interp_skip = interpolators.LonLatToSwathInterpolator(
+          method=method,
+          skip_missing=True,
+          include_query_fields_in_output=True,
+      )
+      out_dict = interp_skip({
+          'a': f_grid,
+          's': scalar_f,
+          'longitude': lon_query,
+          'latitude': lat_query,
+      })
+      cx.testing.assert_fields_equal(out_dict['s'], scalar_f)
+      cx.testing.assert_fields_equal(out_dict['longitude'], lon_query)
+
+    with self.subTest('shares_neighbors_across_dict_keys_and_levels'):
+      lev = cx.SizedAxis('level', 4)
+      f_3d = cx.field(
+          np.ones((4,) + grid.shape, dtype=np.float32), lev, grid
+      )
+      jaxpr = jax.make_jaxpr(interp)(
+          {'a': f_3d, 'b': f_3d, 'longitude': lon_query, 'latitude': lat_query}
+      )
+      # Latitude searchsorted constant table (shape == (n_lat,)) must be bound
+      # only once across both 3D fields and all 4 vertical levels, and uniform
+      # longitude needs no (n_lon,) searchsorted table at all.
+      lat_tables = [
+          c for c in jaxpr.consts if np.shape(c) == (grid.shape[1],)
+      ]
+      lon_tables = [
+          c for c in jaxpr.consts if np.shape(c) == (grid.shape[0],)
+      ]
+      self.assertLen(lat_tables, 1)
+      self.assertEmpty(lon_tables)
+
+  def test_swath_to_lon_lat_interpolator_and_gradients(self):
+    target_grid = coordinates.LonLatGrid.T21()
+    patch = coordinates.SwathPatch(
+        scanlines=20,
+        fov=16,
+        max_scan_angle=52.725,
+        satellite_altitude_km=833.0,
+    )
+    sat_axis = cx.LabeledAxis('satellite', np.array([224, 225]))
+    patch_axis = cx.LabeledAxis('patch_index', np.arange(2))
+    coord = cx.coords.compose(sat_axis, patch_axis, patch)
+
+    # Construct swath patches including footprints at the northernmost corner
+    # grid cells (lon_idx in {0, n_lon - 1}, lat_idx == n_lat - 1) alongside an
+    # all-NaN padded patch (satellite=1, patch_index=1) to verify NaN queries
+    # never corrupt corner cells via 0.0 * NaN.
+    lons = np.linspace(330.0, 390.0, 16, dtype=np.float32) % 360.0
+    lats = np.linspace(50.0, 89.0, 20, dtype=np.float32)
+    lon_2d, lat_2d = np.meshgrid(lons, lats)
+    lon_data = np.broadcast_to(lon_2d, coord.shape).copy()
+    lat_data = np.broadcast_to(lat_2d, coord.shape).copy()
+    lon_data[1, 1, :, :] = np.nan
+    lat_data[1, 1, :, :] = np.nan
+
+    lon_q = cx.field(lon_data, coord)
+    lat_q = cx.field(lat_data, coord)
+    val_data = np.where(np.isfinite(lon_data), 250.0, np.nan).astype(np.float32)
+    f_swath = cx.field(val_data, coord)
+
+    splat = interpolators.SwathToLonLatInterpolator(
+        target_grid=target_grid,
+        method='bilinear',
+        reduction_dims=('satellite', 'patch_index'),
+    )
+    gridded = splat(
+        {'tb': f_swath, 'longitude': lon_q, 'latitude': lat_q}
+    )['tb']
+    self.assertEqual(gridded.coordinate, target_grid)
+    # Corner cells (0, -1) and (-1, -1) covered by valid footprints must remain
+    # finite (250.0), uncorrupted by the NaN-padded patch.
+    np.testing.assert_allclose(gridded.data[0, -1], 250.0, rtol=1e-5)
+    np.testing.assert_allclose(gridded.data[-1, -1], 250.0, rtol=1e-5)
+    valid_cells = np.isfinite(gridded.data)
+    self.assertGreater(np.sum(valid_cells), 20)
+    np.testing.assert_allclose(gridded.data[valid_cells], 250.0, rtol=1e-5)
+
+    # Verify gradients w.r.t. swath values are finite everywhere (no 0*NaN or
+    # 0/0 corruption from unobserved grid cells or NaN footprints).
+    def _loss(raw_swath_vals):
+      f = cx.field(raw_swath_vals, coord)
+      g = splat.interpolate_field(f, lon_q, lat_q)
+      return jax.numpy.nansum(g.data**2)
+
+    grads = jax.grad(_loss)(jax.numpy.ones(coord.shape, dtype=np.float32))
+    self.assertTrue(np.all(np.isfinite(np.asarray(grads))))
+
+  def test_weighted_patch_stitching(self):
+    target_grid = coordinates.LonLatGrid.T21()
+    patch = coordinates.LocalGridPatch(
+        x_nodes=16, y_nodes=16, dx_deg=2.0, dy_deg=2.0
+    )
+    patch_axis = cx.LabeledAxis('patch_index', np.arange(2))
+    c_lon = cx.field(np.array([100.0, 115.0], dtype=np.float32), patch_axis)
+    c_lat = cx.field(np.array([0.0, 0.0], dtype=np.float32), patch_axis)
+    lon_q, lat_q = patch_geometry.local_patch_lon_lat(patch, c_lon, c_lat)
+
+    # Patch 0 has value 10.0, Patch 1 has value 20.0; with raised-cosine
+    # blending weights, the boundary of Patch 1 approaches weight 0.
+    vals = np.ones((2, 16, 16), dtype=np.float32)
+    vals[0] = 10.0
+    vals[1] = 20.0
+    f_patches = cx.field(vals, cx.coords.compose(patch_axis, patch))
+    weights = patch_geometry.patch_blending_weights(patch, taper_fraction=0.35)
+
+    stitcher = interpolators.PatchToLonLatInterpolator(
+        target_grid=target_grid,
+        method='bilinear',
+        reduction_dims=('patch_index',),
+    )
+    out = stitcher(
+        {'val': f_patches, 'longitude': lon_q, 'latitude': lat_q},
+        weights=weights,
+    )['val']
+    self.assertEqual(out.coordinate, target_grid)
+    valid = out.data[np.isfinite(out.data)]
+    self.assertGreater(valid.size, 10)
+    self.assertTrue(np.all((valid >= 10.0 - 1e-4) & (valid <= 20.0 + 1e-4)))
+
+  def test_patch_to_local_patch_interpolator(self):
+    swath = coordinates.SwathPatch(
+        scanlines=24, fov=20, max_scan_angle=45.0, satellite_altitude_km=833.0
+    )
+    local_patch = coordinates.LocalGridPatch(
+        x_nodes=12, y_nodes=12, dx_deg=1.0, dy_deg=1.0
+    )
+    # Create a swath covering roughly lon in [95, 110], lat in [-8, 8], which
+    # partially overlaps a LocalGridPatch centered at (105, 0) spanning
+    # roughly [99.5, 110.5] x [-5.5, 5.5].
+    lons = np.linspace(95.0, 105.0, 20, dtype=np.float32)
+    lats = np.linspace(-8.0, 8.0, 24, dtype=np.float32)
+    lon_2d, lat_2d = np.meshgrid(lons, lats)
+    lon_s = cx.field(lon_2d, swath)
+    lat_s = cx.field(lat_2d, swath)
+    tb = cx.field(np.full(swath.shape, 275.0, dtype=np.float32), swath)
+
+    co_proj = interpolators.SwathToLocalPatchInterpolator(
+        target_patch=local_patch,
+        method='bilinear',
+        return_coverage_mask=True,
+    )
+    res = co_proj(
+        {'tb': tb, 'longitude': lon_s, 'latitude': lat_s},
+        center_lon=cx.field(np.float32(105.0)),
+        center_lat=cx.field(np.float32(0.0)),
+    )
+    self.assertEqual(res['tb'].coordinate, local_patch)
+    self.assertIn('coverage_mask', res)
+    mask = res['coverage_mask'].data
+    # Left half of local_patch (lon <= 105) is covered; right edge is uncovered.
+    self.assertGreater(np.sum(mask > 0.5), 20)
+    self.assertGreater(np.sum(mask == 0.0), 10)
+    covered_vals = res['tb'].data[mask > 0.5]
+    np.testing.assert_allclose(covered_vals, 275.0, rtol=1e-5)
+    self.assertTrue(np.all(np.isnan(res['tb'].data[mask == 0.0])))
+
+    # Verify NaN-padded scanlines do not corrupt corner cells of local_patch,
+    # and coverage_mask stays strictly 2D on local_patch even with skip_missing
+    # scalar keys first and 3D level fields.
+    lon_full, lat_full = patch_geometry.local_patch_lon_lat(
+        local_patch, cx.field(np.float32(105.0)), cx.field(np.float32(0.0))
+    )
+    swath_small = coordinates.SwathPatch(
+        scanlines=14, fov=12, max_scan_angle=45.0, satellite_altitude_km=833.0
+    )
+    lon_pad = np.full(swath_small.shape, np.nan, dtype=np.float32)
+    lat_pad = np.full(swath_small.shape, np.nan, dtype=np.float32)
+    lon_pad[:12, :] = lon_full.data
+    lat_pad[:12, :] = lat_full.data
+    lev = cx.SizedAxis('level', 3)
+    tb_3d = cx.field(
+        np.full((3,) + swath_small.shape, 300.0, dtype=np.float32),
+        lev,
+        swath_small,
+    )
+    co_proj_skip = interpolators.PatchToLocalPatchInterpolator(
+        target_patch=local_patch,
+        method='bilinear',
+        skip_missing=True,
+        return_coverage_mask=True,
+    )
+    res_3d = co_proj_skip(
+        {
+            'scalar_meta': cx.field(np.float32(1.0)),
+            'tb_3d': tb_3d,
+            'longitude': cx.field(lon_pad, swath_small),
+            'latitude': cx.field(lat_pad, swath_small),
+        },
+        center_lon=cx.field(np.float32(105.0)),
+        center_lat=cx.field(np.float32(0.0)),
+    )
+    self.assertEqual(res_3d['coverage_mask'].coordinate, local_patch)
+    self.assertEqual(
+        res_3d['tb_3d'].coordinate, cx.coords.compose(lev, local_patch)
+    )
+    np.testing.assert_allclose(
+        res_3d['tb_3d'].data[:, -1, -1], 300.0, rtol=1e-5
+    )
+    np.testing.assert_allclose(res_3d['coverage_mask'].data[-1, -1], 1.0)
 
 
 if __name__ == '__main__':
