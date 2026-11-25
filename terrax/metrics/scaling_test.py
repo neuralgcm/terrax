@@ -431,6 +431,12 @@ class CompileTimeEvalTest(parameterized.TestCase):
     grid = coordinates.LonLatGrid.T21()
     field = cx.field(np.ones(grid.shape), grid)
     scaler = scaling.GridAreaScaler()
+    scales = scaler.scales(field)
+    self.assertIsInstance(scales.data, np.ndarray)
+    self.assertTrue(scales.data.flags.c_contiguous)
+    np.testing.assert_allclose(
+        scales.data.sum(axis=1), np.full(grid.shape[0], 2.0), atol=1e-6
+    )
 
     def fn(f):
       return scaler.scales(f).data

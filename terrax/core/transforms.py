@@ -30,6 +30,7 @@ import dataclasses
 import functools
 import itertools
 import logging
+import math
 import operator
 import re
 import types
@@ -1568,6 +1569,219 @@ class Regrid(PytreeFieldTransformABC):
 
   def _transform_field(self, field: cx.Field) -> cx.Field:
     return self.regridder(field)
+
+
+_POLE_SLICES: dict[str, tuple[slice, int]] = {
+    'south': (slice(1, None), 1),
+    'north': (slice(None, -1), 1),
+    'both': (slice(1, -1), 2),
+}
+
+
+@nnx.dataclass
+class TrimLonLatPoles(PytreeFieldTransformABC):
+  """Drops pole latitude(s) from `'equiangular_with_poles'` `LonLatGrid` fields.
+
+  Slices `'latitude'` to drop the South pole (`index 0`), North pole
+  (`index -1`), or both poles, and tags the result with an `'equiangular'`
+  `coordinates.LonLatGrid` of the reduced latitude size.
+
+  Args:
+    poles: Which pole latitude(s) to drop: `'south'`, `'north'`, or `'both'`.
+    skip_missing: If `True`, fields without a `LonLatGrid` are returned
+      unchanged instead of raising `ValueError`.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import coordinates, transforms
+    >>> grid = coordinates.LonLatGrid.EL180()
+    >>> f = cx.field(jnp.ones(grid.shape), grid)
+    >>> out = transforms.TrimLonLatPoles('south')(f)
+    >>> out.shape
+    (360, 180)
+  """
+
+  poles: Literal['south', 'north', 'both'] = 'both'
+  skip_missing: bool = False
+
+  def __post_init__(self):
+    if self.poles not in _POLE_SLICES:
+      raise ValueError(
+          "`poles` must be 'south', 'north', or 'both', got"
+          f' {self.poles!r}.'
+      )
+
+  def _validate_source_grid(
+      self, field: cx.Field, grid: coordinates.LonLatGrid
+  ) -> None:
+    """Validates that `field` and `grid` support trimming `self.poles`."""
+    if field.positional_shape:
+      raise ValueError(
+          'TrimLonLatPoles requires fully labeled fields, got'
+          f' {field.dims=}.'
+      )
+    if grid.latitude_spacing != 'equiangular_with_poles':
+      raise ValueError(
+          'TrimLonLatPoles requires'
+          " latitude_spacing='equiangular_with_poles', got"
+          f' {grid.latitude_spacing!r}.'
+      )
+    if grid.lon_lat_padding != (0, 0):
+      raise ValueError(
+          'TrimLonLatPoles requires an unpadded grid, got'
+          f' {grid.lon_lat_padding=}.'
+      )
+    _, n_dropped = _POLE_SLICES[self.poles]
+    if grid.latitude_nodes <= n_dropped:
+      raise ValueError(
+          f'Cannot drop {self.poles!r} pole(s) from {grid.latitude_nodes=}.'
+      )
+
+  def _transform_field(self, field: cx.Field) -> cx.Field:
+    try:
+      grid = cx.coords.extract(field.coordinate, coordinates.LonLatGrid)
+    except ValueError:
+      if self.skip_missing:
+        return field
+      raise
+    self._validate_source_grid(field, grid)
+
+    lat_slice, n_dropped = _POLE_SLICES[self.poles]
+    out_grid = coordinates.LonLatGrid(
+        longitude_nodes=grid.longitude_nodes,
+        latitude_nodes=grid.latitude_nodes - n_dropped,
+        latitude_spacing='equiangular',
+        longitude_offset=grid.longitude_offset,
+    )
+    trim_fn = cx.cpmap(lambda x: x[:, lat_slice])
+    return trim_fn(field.untag(grid)).tag(out_grid)
+
+
+@nnx.dataclass
+class PatchifyLonLatGrid(PytreeFieldTransformABC):
+  """Folds `LonLatGrid` dimensions into `target_grid` and 2D patch axes.
+
+  Reshapes `'longitude'` and `'latitude'` of a fully labeled, unpadded source
+  `LonLatGrid` field into `target_grid` followed by `SizedAxis` patch axes.
+
+  The source and target grids must be unpadded, share the same
+  `latitude_spacing` (excluding `'equiangular_with_poles'` when `p_lat > 1`),
+  have source node counts divisible by `target_grid`, and have
+  `target_grid.longitude_offset` within the first longitude patch.
+
+  Args:
+    target_grid: Coarse `coordinates.LonLatGrid` for the output spatial axes.
+    patch_dims: Names of the output `(lon, lat)` `cx.SizedAxis` patch axes.
+    skip_missing: If `True`, fields without a `LonLatGrid` are returned
+      unchanged instead of raising `ValueError`.
+
+  Examples:
+    >>> import coordax as cx
+    >>> import jax.numpy as jnp
+    >>> from terrax.core import coordinates, transforms
+    >>> src, dst = coordinates.LonLatGrid.TL63(), coordinates.LonLatGrid.T21()
+    >>> f = cx.field(jnp.ones(src.shape), src)
+    >>> out = transforms.PatchifyLonLatGrid(dst)(f)
+    >>> out.dims
+    ('longitude', 'latitude', 'patch_longitude', 'patch_latitude')
+    >>> out.shape
+    (64, 32, 2, 2)
+  """
+
+  target_grid: coordinates.LonLatGrid
+  patch_dims: tuple[str, str] = ('patch_longitude', 'patch_latitude')
+  skip_missing: bool = False
+
+  def __post_init__(self):
+    if self.target_grid.lon_lat_padding != (0, 0):
+      raise ValueError(
+          'PatchifyLonLatGrid requires an unpadded `target_grid`, got'
+          f' {self.target_grid.lon_lat_padding=}.'
+      )
+    if (
+        len(self.patch_dims) != 2
+        or not all(self.patch_dims)
+        or self.patch_dims[0] == self.patch_dims[1]
+    ):
+      raise ValueError(
+          '`patch_dims` must be two distinct non-empty dimension names,'
+          f' got {self.patch_dims=}.'
+      )
+
+  def _validate_source_grid(
+      self, field: cx.Field, grid: coordinates.LonLatGrid
+  ) -> None:
+    """Validates that `field` and `grid` are compatible with `target_grid`."""
+    if field.positional_shape:
+      raise ValueError(
+          'PatchifyLonLatGrid requires fully labeled fields, got'
+          f' {field.dims=}.'
+      )
+    if grid.lon_lat_padding != (0, 0):
+      raise ValueError(
+          'PatchifyLonLatGrid requires an unpadded source grid, got'
+          f' {grid.lon_lat_padding=}.'
+      )
+    n_lon, n_lat = grid.longitude_nodes, grid.latitude_nodes
+    t_lon, t_lat = (
+        self.target_grid.longitude_nodes,
+        self.target_grid.latitude_nodes,
+    )
+    if n_lon % t_lon != 0 or n_lat % t_lat != 0:
+      raise ValueError(
+          f'Source grid shape {(n_lon, n_lat)} must be divisible by'
+          f' target_grid shape {(t_lon, t_lat)}.'
+      )
+    p_lon, p_lat = n_lon // t_lon, n_lat // t_lat
+    if grid.latitude_spacing != self.target_grid.latitude_spacing or (
+        grid.latitude_spacing == 'equiangular_with_poles' and p_lat > 1
+    ):
+      raise ValueError(
+          f'Incompatible latitude_spacing between {grid=} and'
+          f' {self.target_grid=}.'
+      )
+    lon_step = 2.0 * math.pi / n_lon
+    eps = 1e-6
+    offset_diff = (
+        self.target_grid.longitude_offset - grid.longitude_offset + eps
+    ) % (2.0 * math.pi) - eps
+    if not (-eps <= offset_diff <= (p_lon - 1) * lon_step + eps):
+      raise ValueError(
+          f'Incompatible longitude_offset between {grid=} and'
+          f' {self.target_grid=}.'
+      )
+
+  def _transform_field(self, field: cx.Field) -> cx.Field:
+    try:
+      grid = cx.coords.extract(field.coordinate, coordinates.LonLatGrid)
+    except ValueError:
+      if self.skip_missing:
+        return field
+      raise
+    self._validate_source_grid(field, grid)
+
+    t_lon = self.target_grid.longitude_nodes
+    t_lat = self.target_grid.latitude_nodes
+    p_lon = grid.longitude_nodes // t_lon
+    p_lat = grid.latitude_nodes // t_lat
+    p_lon_ax = cx.SizedAxis(self.patch_dims[0], p_lon)
+    p_lat_ax = cx.SizedAxis(self.patch_dims[1], p_lat)
+    lon_ax, lat_ax = grid.axes
+    t_lon_ax, t_lat_ax = self.target_grid.axes
+
+    fold_lon = cx.cpmap(lambda x: x.reshape(t_lon, p_lon))
+    out = fold_lon(field.untag(lon_ax)).tag(t_lon_ax, p_lon_ax)
+
+    t_lat_slot = cx.DummyAxis(None, t_lat)
+    p_lat_slot = cx.DummyAxis(None, p_lat)
+    lat_out_axes = cx.coords.replace_axes(
+        field.coordinate,
+        grid,
+        cx.coords.compose(t_lon_ax, t_lat_slot, p_lon_ax, p_lat_slot),
+    ).dims
+    fold_lat = cx.cmap(lambda x: x.reshape(t_lat, p_lat), out_axes=lat_out_axes)
+    return fold_lat(out.untag(lat_ax)).tag(t_lat_ax, p_lat_ax)
 
 
 @nnx.dataclass

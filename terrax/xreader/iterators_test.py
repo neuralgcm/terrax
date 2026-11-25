@@ -293,6 +293,57 @@ class IteratorsTest(parameterized.TestCase):
     ]
     assert_xarray_trees_identical(actual, expected)
 
+  def test_group_slices_stops_groups_at_breaks_in_sample_origins(self):
+    sample_origins = np.array([0, 1, 2, 3, 4, 100, 101, 102])
+    stencil = xreader.Stencil(start=0, stop=2, step=1, closed='both')
+    slices = xreader.stencils.build_sampling_slices(
+        np.arange(200), sample_origins, stencil
+    )
+    groups = xreader.iterators.group_slices(
+        slices, group_size=3, sample_origins=sample_origins
+    )
+    blocks = [block for block, _ in groups]
+    # Each sample reads 3 points, e.g., origin 0 reads slice(0, 3). With
+    # group_size=3, origins are grouped as [0, 1, 2], [3, 4], [100, 101, 102]:
+    # the break between 4 and 100 ends the second group early. Without it, that
+    # group would be [3, 4, 100], read as a single block slice(3, 103).
+    self.assertEqual(blocks, [slice(0, 5), slice(3, 7), slice(100, 105)])
+
+  def test_training_iterator_blocks_stop_at_breaks_in_sample_origins(self):
+    source = {
+        'a': xarray.Dataset(
+            {'x': ('time', np.arange(1000, dtype=np.float32))},
+            coords={'time': np.arange(1000)},
+        ),
+        'b': xarray.Dataset(
+            {'y': ('time', np.arange(500, dtype=np.float32))},
+            coords={'time': np.arange(0, 1000, 2)},
+        ),
+    }
+    stencil = {
+        'a': xreader.Stencil(start=0, stop=2, step=1, closed='both'),
+        'b': xreader.Stencil(start=0, stop=2, step=2, closed='both'),
+    }
+    sample_origins = np.array([0, 2, 4, 900, 902, 904])
+
+    # The buffer is large enough to read all samples as one block. Blocks are
+    # assigned to shards whole, so the samples can only be divided between two
+    # shards if the break in sample_origins separates them into two blocks.
+    def read_origins(shard_index):
+      data = xreader.training_iterator(
+          source,
+          stencil,
+          sample_origins,
+          buffer_size_in_bytes=1_000_000,
+          buffer_diversity=1,
+          shard_index=shard_index,
+          shard_count=2,
+      )
+      return sorted(item['a']['time'][0].item() for item in data)
+
+    self.assertEqual(read_origins(0), [0, 2, 4])
+    self.assertEqual(read_origins(1), [900, 902, 904])
+
 
 if __name__ == '__main__':
   absltest.main()
