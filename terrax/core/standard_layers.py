@@ -514,6 +514,8 @@ class ConvLonLat(nnx.Module):
       use_bias: bool = True,
       kernel_size: tuple[int, int] = (3, 3),
       dilation: int = 1,
+      w_init: nnx.initializers.Initializer = default_w_init,
+      b_init: nnx.initializers.Initializer = default_b_init,
       rngs: nnx.Rngs,
   ):
     self.input_size = input_size
@@ -526,6 +528,8 @@ class ConvLonLat(nnx.Module):
         padding='same',
         kernel_dilation=dilation,
         use_bias=use_bias,
+        kernel_init=w_init,
+        bias_init=b_init,
     )
     lon_pad = kernel_size[0] * dilation // 2
     lat_pad = kernel_size[1] * dilation // 2
@@ -724,6 +728,7 @@ class CnnLonLat(nnx.Module, pytree=False):
   conv_layers: Sequence[ConvLonLat] = nnx.data()
   activation: Callable[[jax.Array], jax.Array]
   activation_final: Callable[[jax.Array], jax.Array] = lambda x: x
+  pre_norm: nnx.Module | None = nnx.data(default=None)
 
   @property
   def input_size(self) -> int:
@@ -746,12 +751,23 @@ class CnnLonLat(nnx.Module, pytree=False):
       activation: Callable[[jax.Array], jax.Array] = jax.nn.gelu,
       activation_final: Callable[[jax.Array], jax.Array] = lambda x: x,
       use_bias: bool = True,
+      w_init: nnx.initializers.Initializer = default_w_init,
+      b_init: nnx.initializers.Initializer = default_b_init,
+      w_init_final: nnx.initializers.Initializer | None = None,
+      b_init_final: nnx.initializers.Initializer | None = None,
+      pre_normalization_factory: Callable[..., nnx.Module] | None = None,
       rngs: nnx.Rngs,
   ) -> CnnLonLat:
     """Builds a ConvLonLatTower with the given parameters."""
+    if w_init_final is None:
+      w_init_final = w_init
+    if b_init_final is None:
+      b_init_final = b_init
     sizes = [input_size] + [hidden_size] * (hidden_layers + 1) + [output_size]
+    num_conv_layers = len(sizes) - 1
     layers = []
-    for d_in, d_out in itertools.pairwise(sizes):
+    for i, (d_in, d_out) in enumerate(itertools.pairwise(sizes)):
+      is_final = i == num_conv_layers - 1
       layers.append(
           ConvLonLat(
               input_size=d_in,
@@ -759,16 +775,25 @@ class CnnLonLat(nnx.Module, pytree=False):
               use_bias=use_bias,
               kernel_size=kernel_size,
               dilation=dilation,
+              w_init=w_init_final if is_final else w_init,
+              b_init=b_init_final if is_final else b_init,
               rngs=rngs,
           )
       )
+    if pre_normalization_factory is None:
+      pre_norm = None
+    else:
+      pre_norm = pre_normalization_factory(input_size, rngs=rngs)
     return cls(
         conv_layers=tuple(layers),
         activation=activation,
         activation_final=activation_final,
+        pre_norm=pre_norm,
     )
 
   def __call__(self, inputs: jax.Array) -> jax.Array:
+    if self.pre_norm is not None:
+      inputs = self.pre_norm(inputs)
     for i, layer in enumerate(self.conv_layers):
       inputs = layer(inputs)
       if i != len(self.conv_layers) - 1:

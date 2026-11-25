@@ -483,6 +483,101 @@ class StandardLayersTest(parameterized.TestCase):
       actual = count_actual_params(cnn_lon_lat)
       self.assertEqual(actual, expected)
 
+  def test_cnn_lon_lat_pre_norm_and_zero_init_final(self):
+    channel_ln = functools.partial(
+        nnx.LayerNorm,
+        reduction_axes=0,
+        feature_axes=0,
+        use_fast_variance=False,
+    )
+    cnn = standard_layers.CnnLonLat.build_using_factories(
+        input_size=4,
+        output_size=4,
+        hidden_size=8,
+        hidden_layers=0,
+        kernel_size=(3, 3),
+        w_init_final=nnx.initializers.zeros_init(),
+        pre_normalization_factory=channel_ln,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(cnn))
+    expected_params = (
+        count_cnn_conv_params(
+            input_size=4,
+            output_size=4,
+            kernel_size=(3, 3),
+            hidden_size=8,
+            hidden_layers=0,
+            use_bias=True,
+        )
+        + 2 * 4
+    )
+    self.assertEqual(count_actual_params(cnn), expected_params)
+
+    inputs = 500.0 * jax.random.normal(jax.random.key(0), (4, 8, 5)) + 1e3
+    np.testing.assert_allclose(cnn(inputs), 0.0)
+
+    def loss_fn(module, x):
+      return jnp.mean(jnp.square(x + module(x) - 1.0))
+
+    grads = nnx.grad(loss_fn)(cnn, inputs)
+    final_grad = grads.conv_layers[1].conv_layer.kernel[...]
+    self.assertTrue(np.all(np.isfinite(final_grad)))
+    self.assertGreater(float(jnp.abs(final_grad).max()), 0.0)
+
+  def test_epd_cnn_pre_ln_deep_bounded_scale_and_gradient_flow(self):
+    channel_ln = functools.partial(
+        nnx.LayerNorm,
+        reduction_axes=0,
+        feature_axes=0,
+        use_fast_variance=False,
+    )
+    conv_factory = functools.partial(
+        standard_layers.ConvLonLat, kernel_size=(3, 3)
+    )
+    process_factory = functools.partial(
+        standard_layers.CnnLonLat.build_using_factories,
+        hidden_size=8,
+        hidden_layers=0,
+        kernel_size=(3, 3),
+        w_init_final=nnx.initializers.zeros_init(),
+        pre_normalization_factory=channel_ln,
+    )
+    epd = standard_layers.Epd.build_using_factories(
+        input_size=4,
+        output_size=2,
+        latent_size=8,
+        num_process_blocks=3,
+        encode_factory=conv_factory,
+        process_factory=process_factory,
+        decode_factory=conv_factory,
+        pre_decode_normalization_factory=channel_ln,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEmpty(nnx.find_duplicates(epd))
+    x_unit = jax.random.normal(jax.random.key(1), (4, 8, 5))
+    x_huge = 1e3 * x_unit + 500.0
+    out_unit = epd(x_unit)
+    out_huge = epd(x_huge)
+    self.assertEqual(out_huge.shape, (2, 8, 5))
+    # Pre-decode channel LayerNorm keeps outputs O(1) even for 1000x inputs.
+    self.assertLess(float(jnp.std(out_huge)), 5.0 * float(jnp.std(out_unit)))
+
+    # Even if a residual block's hidden GELU is pushed deep negative, the
+    # linear encode/decode skip stream preserves finite non-zero gradients.
+    epd.process_blocks[0].conv_layers[0].conv_layer.bias.set_value(
+        jnp.full((8,), -50.0)
+    )
+    grads = nnx.grad(lambda m, inp: jnp.mean(jnp.square(m(inp) - 1.0)))(
+        epd, x_unit
+    )
+    self.assertGreater(
+        float(jnp.abs(grads.encode.conv_layer.kernel[...]).max()), 0.0
+    )
+    self.assertGreater(
+        float(jnp.abs(grads.decode.conv_layer.kernel[...]).max()), 0.0
+    )
+
   def test_epd_layer(self):
     mlp_factory = functools.partial(
         standard_layers.Mlp.uniform,
