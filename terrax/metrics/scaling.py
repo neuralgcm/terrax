@@ -187,6 +187,11 @@ class GridAreaScaler(ScaleFactor):
       with jax.ensure_compile_time_eval():
         weights = get_weight(grid.fields['latitude'].untag(lat_ax)).tag(lat_ax)
         weights = weights.broadcast_like(grid)
+      # NOTE: Moving the folded weights to a host NumPy array is an empirical
+      # workaround for resolving an error in multi-host TPU training. The error
+      # message was "Computation was compiled for input layouts that disagree
+      # with the layouts of arguments passed to it".
+      weights = cx.field(np.asarray(weights.data), weights.coordinate)
     elif cx.contains_dims(field, *ylm_dims):
       ylm_grid = cx.coords.extract(
           field.coordinate, coordinates.SphericalHarmonicGrid
