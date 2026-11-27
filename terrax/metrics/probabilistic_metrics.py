@@ -18,10 +18,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 import dataclasses
 import functools
+from typing import Literal
 import coordax as cx
 import jax
 import jax.numpy as jnp
 from terrax.metrics import base
+
+EventReduction = Literal['sum', 'mean', 'nanmean']
+_EVENT_REDUCTIONS = ('sum', 'mean', 'nanmean')
 
 
 def _validate_ens_dim(predictions: cx.Field, ens_dim: str) -> None:
@@ -75,30 +79,74 @@ def _zero_safe_power(x: jax.Array, power: float) -> jax.Array:
   return jnp.where(is_zero, 0.0, safe_x**power)
 
 
+def _reduce_event_sq(
+    x_sq: cx.Field,
+    event_dims: Sequence[str | cx.Coordinate],
+    event_reduction: EventReduction,
+    valid_count: cx.Field | None,
+) -> cx.Field:
+  """Reduces squared errors `x_sq` across `event_dims`."""
+  if event_reduction == 'sum':
+    return cx.reduce(jnp.sum, x_sq, *event_dims)
+  if event_reduction == 'mean':
+    return cx.reduce(jnp.mean, x_sq, *event_dims)
+  if event_reduction == 'nanmean':
+    assert valid_count is not None
+    sum_sq = cx.reduce(jnp.sum, x_sq, *event_dims)
+    div_safe = lambda s, c: s / jnp.where(c > 0, c, 1).astype(s.dtype)
+    return cx.cmap(div_safe, out_axes=sum_sq.dims)(sum_sq, valid_count)
+  raise ValueError(f'Unknown {event_reduction=}')
+
+
+def _prepare_nanmean_field(
+    field: cx.Field,
+    valid: cx.Field,
+) -> cx.Field:
+  """Replaces invalid entries (`~valid`) of `field` with zeros safely for AD."""
+  zero_invalid = lambda a, v: jnp.where(v, a, jnp.zeros((), a.dtype))
+  return cx.cmap(zero_invalid, out_axes=field.dims)(field, valid)
+
+
+def _mask_empty_events(
+    stat: cx.Field,
+    valid_count: cx.Field,
+) -> cx.Field:
+  """Sets `stat` to NaN wherever `valid_count == 0`."""
+  mask_empty = lambda s, ok: jnp.where(ok, s, jnp.asarray(jnp.nan, s.dtype))
+  return cx.cmap(mask_empty, out_axes=stat.dims)(stat, valid_count > 0)
+
+
 def _kernel(
     x: cx.Field,
     beta: float,
     delta: float,
     event_dims: Sequence[str | cx.Coordinate],
+    event_reduction: EventReduction = 'sum',
+    valid_count: cx.Field | None = None,
 ) -> cx.Field:
-  """Computes `(‖x‖² + δ²)^(β/2) - δ^β`, i.e. ‖x‖^β smoothed at zero.
+  """Computes `(r + δ²)^(β/2) - δ^β` where `r` reduces `x²` over `event_dims`.
 
-  Here ‖x‖ is the Euclidean norm of `x` over `event_dims`, which reduces to |x|
-  without event dimensions. For `delta == 0` the kernel is `‖x‖^β`. For
+  For `event_reduction='sum'`, `r = ‖x‖²` is the squared Euclidean norm of `x`
+  over `event_dims` (reducing to `|x|` without event dimensions). For `'mean'`
+  and `'nanmean'`, `r` is the mean of `x²` over all or valid event entries, so
+  constant errors have scale independent of event size and `delta` stays in
+  per-entry units of `x`. For `delta == 0` the kernel is `r^(β/2)`. For
   `delta > 0` and `beta == 1` it is the pseudo-Huber function
-  `sqrt(‖x‖² + δ²) - δ`, which behaves like `‖x‖² / (2δ)` for ‖x‖ << δ
-  (continuous gradient at zero) and like ‖x‖ - δ for ‖x‖ >> δ. For `beta` in
-  (0, 2] the kernel is conditionally negative definite for any `delta >= 0` (it
-  is a Bernstein function of ‖x‖²), so energy-like scores built from it remain
-  proper scoring rules.
+  `sqrt(r + δ²) - δ`. For `beta` in `(0, 2]` the kernel is conditionally
+  negative definite for any `delta >= 0` (a Bernstein function of `r`), so
+  energy-like scores built from it remain proper scoring rules.
 
   Args:
-    x: Input field.
+    x: Input field (already zeroed on invalid entries when
+      `event_reduction == 'nanmean'`).
     beta: Power parameter of the kernel.
     delta: Smoothing scale of the kernel, in units of the inputs. Must be
       non-negative.
-    event_dims: Dimensions of `x` over which the norm is computed. These
-      dimensions are reduced.
+    event_dims: Dimensions of `x` over which squared values are reduced.
+    event_reduction: Reduction across `event_dims` (`'sum'`, `'mean'`, or
+      `'nanmean'`).
+    valid_count: Count of valid entries per event, required when `event_dims` is
+      non-empty and `event_reduction == 'nanmean'`.
 
   Returns:
     The kernel function applied to the input field, without `event_dims`.
@@ -107,13 +155,17 @@ def _kernel(
   if delta == 0.0:
     if not event_dims:
       return _abs_beta(x, beta)
-    squared_norm = cx.reduce(jnp.sum, x * x, *event_dims)
+    squared_norm = _reduce_event_sq(
+        x * x, event_dims, event_reduction, valid_count
+    )
     norm_power = functools.partial(_zero_safe_power, power=beta / 2)
     return cx.cmap(norm_power)(squared_norm)
 
   scaled_squared_norm = (x / delta) ** 2
   if event_dims:
-    scaled_squared_norm = cx.reduce(jnp.sum, scaled_squared_norm, *event_dims)
+    scaled_squared_norm = _reduce_event_sq(
+        scaled_squared_norm, event_dims, event_reduction, valid_count
+    )
 
   def kernel_fn(r):
     # Equivalent to δ^β ((1 + r)^(β/2) - 1) for r = ‖x/δ‖², but without the
@@ -129,6 +181,8 @@ def _flip_2_ens_spread(
     beta: float,
     delta: float = 0.0,
     event_dims: Sequence[str | cx.Coordinate] = (),
+    event_reduction: EventReduction = 'sum',
+    valid_count: cx.Field | None = None,
 ) -> cx.Field:
   """Computes spread for exactly 2 ensemble members using jnp.flip."""
   if x.named_shape[ens_dim] != 2:
@@ -137,7 +191,9 @@ def _flip_2_ens_spread(
         f' {x.named_shape[ens_dim]}'
     )
   x_prime = cx.cmap(jnp.flip)(x.untag(ens_dim)).tag(ens_dim)
-  kernel = _kernel(x - x_prime, beta, delta, event_dims)
+  kernel = _kernel(
+      x - x_prime, beta, delta, event_dims, event_reduction, valid_count
+  )
   return cx.cmap(jnp.mean)(kernel.untag(ens_dim))
 
 
@@ -169,6 +225,8 @@ def _all_pairs_ens_spread(
     beta: float,
     delta: float = 0.0,
     event_dims: Sequence[str | cx.Coordinate] = (),
+    event_reduction: EventReduction = 'sum',
+    valid_count: cx.Field | None = None,
 ) -> cx.Field:
   """Computes unbiased expected pairwise difference over rolling shifts."""
   n = x.named_shape[ens_dim]
@@ -180,7 +238,9 @@ def _all_pairs_ens_spread(
 
   def shift_spread(shift):
     x_shifted = roll_m(x.untag(ens_dim), shift).tag(ens_dim)
-    kernel = _kernel(x - x_shifted, beta, delta, event_dims)
+    kernel = _kernel(
+        x - x_shifted, beta, delta, event_dims, event_reduction, valid_count
+    )
     return cx.cmap(jnp.mean)(kernel.untag(ens_dim))
 
   total_spread = sum(shift_spread(s) for s in range(1, n))
@@ -193,6 +253,8 @@ def _ring_chain_ens_spread(
     beta: float,
     delta: float = 0.0,
     event_dims: Sequence[str | cx.Coordinate] = (),
+    event_reduction: EventReduction = 'sum',
+    valid_count: cx.Field | None = None,
 ) -> cx.Field:
   """Computes unbiased expected pairwise difference using ring chaining."""
   n = x.named_shape[ens_dim]
@@ -206,7 +268,9 @@ def _ring_chain_ens_spread(
   curr_x = x
   for _ in range(1, n):
     curr_x = roll_once(curr_x.untag(ens_dim)).tag(ens_dim)
-    kernel = _kernel(x - curr_x, beta, delta, event_dims)
+    kernel = _kernel(
+        x - curr_x, beta, delta, event_dims, event_reduction, valid_count
+    )
     spread_s = cx.cmap(jnp.mean)(kernel.untag(ens_dim))
     if total_spread is None:
       total_spread = spread_s
@@ -217,7 +281,10 @@ def _ring_chain_ens_spread(
 
 
 def _kernel_name_suffix(
-    beta: float, delta: float, event_dims: Sequence[str | cx.Coordinate]
+    beta: float,
+    delta: float,
+    event_dims: Sequence[str | cx.Coordinate],
+    event_reduction: EventReduction = 'sum',
 ) -> str:
   """Returns the suffix identifying kernel parameters in statistic names."""
   suffix = f'_beta_{beta}'
@@ -226,6 +293,8 @@ def _kernel_name_suffix(
   if event_dims:
     # The norm does not depend on the order of event dimensions.
     suffix += '_event_' + '_'.join(sorted(base.dim_names(event_dims)))
+    if event_reduction != 'sum':
+      suffix += f'_{event_reduction}'
   return suffix
 
 
@@ -242,9 +311,18 @@ def _as_event_dims(
 
 
 def _validate_kernel_args(
-    ens_dim: str, delta: float, event_dims: tuple[str | cx.Coordinate, ...]
+    ens_dim: str,
+    delta: float,
+    event_dims: tuple[str | cx.Coordinate, ...],
+    event_reduction: EventReduction = 'sum',
 ) -> None:
+  """Validates kernel smoothing and event dimension parameters."""
   _validate_delta(delta)
+  if event_reduction not in _EVENT_REDUCTIONS:
+    raise ValueError(
+        f'event_reduction must be one of {_EVENT_REDUCTIONS}, got'
+        f' {event_reduction!r}'
+    )
   names = base.dim_names(event_dims)
   if ens_dim in names:
     raise ValueError(f'{event_dims=} must not include the {ens_dim=}.')
@@ -260,9 +338,11 @@ class EnergySkill(base.PerVariableStatistic):
   the expected error against the target. In a 2-member ensemble setting, this
   is computed as:
     Skill = 0.5 * (ρ(X - Y) + ρ(X' - Y))
-  where ρ(r) = (‖r‖² + δ²)^(β/2) - δ^β and ‖r‖ is the Euclidean norm over
-  `event_dims` (|r| without event dimensions). ρ reduces to ‖r‖^β for δ = 0 and
-  to the pseudo-Huber function sqrt(‖r‖² + δ²) - δ for β = 1.
+  where ρ(r) = (q(r) + δ²)^(β/2) - δ^β and q(r) reduces squared errors over
+  `event_dims` via `event_reduction` (`‖r‖²` for `'sum'`, mean squared error for
+  `'mean'` and `'nanmean'`; `|r|²` without event dimensions). ρ reduces to
+  `q(r)^(β/2)` for δ = 0 and to the pseudo-Huber function `sqrt(q(r) + δ²) - δ`
+  for β = 1.
 
   When β=1, δ=0 and there are no event dimensions, this is the skill term for
   the CRPS. For an energy score based on this statistic to be strictly proper,
@@ -276,22 +356,33 @@ class EnergySkill(base.PerVariableStatistic):
       gradient continuous at zero error (behaving like ‖r‖² / (2δ) for ‖r‖ << δ)
       while leaving errors ‖r‖ >> δ essentially unchanged.
     event_dims: Dimensions of predictions and targets that form a single
-      (vector-valued) event. Errors are combined over these dimensions with the
-      Euclidean norm and the dimensions are reduced.
+      (vector-valued) event.
+    event_reduction: How squared errors are reduced across `event_dims`:
+      - `'sum'`: Sum of squares (Euclidean norm `‖r‖`). Any NaN in an event
+        propagates to the whole event.
+      - `'mean'`: Mean of squares (`‖r‖ / sqrt(event_size)`), keeping constant
+        errors and `delta` commensurate across event sizes.
+      - `'nanmean'`: Mean of squares over entries where `targets` is non-NaN,
+        returning NaN only when all entries in an event are NaN.
   """
 
   ensemble_dim: str = 'ensemble'
   beta: float = 1.0
   delta: float = 0.0
   event_dims: Sequence[str | cx.Coordinate] = ()
+  event_reduction: EventReduction = 'sum'
 
   def __post_init__(self):
     self.event_dims = _as_event_dims(self.event_dims)
-    _validate_kernel_args(self.ensemble_dim, self.delta, self.event_dims)
+    _validate_kernel_args(
+        self.ensemble_dim, self.delta, self.event_dims, self.event_reduction
+    )
 
   @property
   def unique_name(self) -> str:
-    suffix = _kernel_name_suffix(self.beta, self.delta, self.event_dims)
+    suffix = _kernel_name_suffix(
+        self.beta, self.delta, self.event_dims, self.event_reduction
+    )
     return f'EnergySkill_{self.ensemble_dim}{suffix}'
 
   def _compute_per_variable(
@@ -301,10 +392,28 @@ class EnergySkill(base.PerVariableStatistic):
     _validate_ens_dim(predictions, self.ensemble_dim)
     _validate_event_dims(predictions, self.event_dims)
     _validate_event_dims(targets, self.event_dims)
-    targets = targets.broadcast_like(predictions)  # Needed?
+    valid_count = None
+    if self.event_dims and self.event_reduction == 'nanmean':
+      valid = cx.cmap(lambda y: ~jnp.isnan(y))(targets)
+      predictions = _prepare_nanmean_field(predictions, valid)
+      targets = _prepare_nanmean_field(targets, valid)
+      valid_count = cx.reduce(
+          jnp.sum, valid.astype(jnp.int32), *self.event_dims
+      )
+    targets = targets.broadcast_like(predictions)
     err = predictions - targets
-    kernel = _kernel(err, self.beta, self.delta, self.event_dims)
-    return cx.cmap(jnp.mean)(kernel.untag(self.ensemble_dim))
+    kernel = _kernel(
+        err,
+        self.beta,
+        self.delta,
+        self.event_dims,
+        event_reduction=self.event_reduction,
+        valid_count=valid_count,
+    )
+    skill = cx.cmap(jnp.mean)(kernel.untag(self.ensemble_dim))
+    if valid_count is not None:
+      skill = _mask_empty_events(skill, valid_count)
+    return skill
 
 
 @dataclasses.dataclass
@@ -313,14 +422,17 @@ class EnergySpread(base.PerVariableStatistic):
 
   With X, X' two i.i.d. predictions, the spread is defined as the expected
   difference between predictions under the kernel
-  ρ(r) = (‖r‖² + δ²)^(β/2) - δ^β (see `EnergySkill`).
+  ρ(r) = (q(r) + δ²)^(β/2) - δ^β (see `EnergySkill`).
 
   Attributes:
     ensemble_dim: Name of the ensemble dimension in predictions.
     beta: Power parameter for the energy spread calculation.
     broadcast_target_nans: If True, ensures computed spread becomes NaN at
       locations where target fields are NaN (masking unobserved targets). With
-      `event_dims`, a NaN anywhere in an event masks the whole event.
+      `event_dims` and `event_reduction != 'nanmean'`, a NaN anywhere in an
+      event masks the whole event; with `'nanmean'`, pairwise differences are
+      restricted to entries where `targets` is non-NaN and become NaN only when
+      all entries in the event are NaN.
     algorithm: Method used to compute the expected pairwise difference. Options:
       - 'auto': Dynamically selects optimal algorithm ('flip' for n=2; for n>2
         'sort' on CPU if it is supported, 'all_pairs' otherwise).
@@ -333,6 +445,8 @@ class EnergySpread(base.PerVariableStatistic):
       `delta` of the skill term for the resulting score to be proper.
     event_dims: Dimensions of predictions that form a single event (see
       `EnergySkill`). Must match the `event_dims` of the skill term.
+    event_reduction: Reduction across `event_dims` (see `EnergySkill`). Must
+      match `event_reduction` of the skill term for properness.
   """
 
   ensemble_dim: str = 'ensemble'
@@ -341,10 +455,13 @@ class EnergySpread(base.PerVariableStatistic):
   algorithm: str = 'auto'
   delta: float = 0.0
   event_dims: Sequence[str | cx.Coordinate] = ()
+  event_reduction: EventReduction = 'sum'
 
   def __post_init__(self):
     self.event_dims = _as_event_dims(self.event_dims)
-    _validate_kernel_args(self.ensemble_dim, self.delta, self.event_dims)
+    _validate_kernel_args(
+        self.ensemble_dim, self.delta, self.event_dims, self.event_reduction
+    )
     if self.algorithm == 'sort' and not self._supports_sort:
       raise ValueError(
           'sort algorithm only supports beta=1.0, delta=0.0 and no event'
@@ -357,7 +474,9 @@ class EnergySpread(base.PerVariableStatistic):
 
   @property
   def unique_name(self) -> str:
-    suffix = _kernel_name_suffix(self.beta, self.delta, self.event_dims)
+    suffix = _kernel_name_suffix(
+        self.beta, self.delta, self.event_dims, self.event_reduction
+    )
     return f'EnergySpread_{self.ensemble_dim}{suffix}'
 
   def _compute_per_variable(
@@ -368,33 +487,41 @@ class EnergySpread(base.PerVariableStatistic):
     beta = self.beta
     delta = self.delta
     event_dims = self.event_dims
+    event_reduction = self.event_reduction
     _validate_ens_dim(predictions, ens_dim)
     _validate_event_dims(predictions, event_dims)
 
+    valid_count = None
+    if event_dims and event_reduction == 'nanmean':
+      if self.broadcast_target_nans:
+        _validate_event_dims(targets, event_dims)
+        valid = cx.cmap(lambda y: ~jnp.isnan(y))(targets)
+      else:
+        valid = ~cx.reduce(jnp.any, cx.cmap(jnp.isnan)(predictions), ens_dim)
+      predictions = _prepare_nanmean_field(predictions, valid)
+      valid_count = cx.reduce(jnp.sum, valid.astype(jnp.int32), *event_dims)
+
+    spread_kwargs = dict(
+        beta=beta,
+        delta=delta,
+        event_dims=event_dims,
+        event_reduction=event_reduction,
+        valid_count=valid_count,
+    )
     if self.algorithm == 'flip':
-      spread = _flip_2_ens_spread(predictions, ens_dim, beta, delta, event_dims)
+      spread = _flip_2_ens_spread(predictions, ens_dim, **spread_kwargs)
     elif self.algorithm == 'sort':
       spread = _sort_ens_spread(predictions, ens_dim, beta, delta)
     elif self.algorithm == 'all_pairs':
-      spread = _all_pairs_ens_spread(
-          predictions, ens_dim, beta, delta, event_dims
-      )
+      spread = _all_pairs_ens_spread(predictions, ens_dim, **spread_kwargs)
     elif self.algorithm == 'ring_chain':
-      spread = _ring_chain_ens_spread(
-          predictions, ens_dim, beta, delta, event_dims
-      )
+      spread = _ring_chain_ens_spread(predictions, ens_dim, **spread_kwargs)
     elif self.algorithm == 'auto':
       if predictions.named_shape[ens_dim] == 2:
-        spread = _flip_2_ens_spread(
-            predictions, ens_dim, beta, delta, event_dims
-        )
+        spread = _flip_2_ens_spread(predictions, ens_dim, **spread_kwargs)
       elif self._supports_sort:
         default_fn = functools.partial(
-            _all_pairs_ens_spread,
-            ens_dim=ens_dim,
-            beta=beta,
-            delta=delta,
-            event_dims=event_dims,
+            _all_pairs_ens_spread, ens_dim=ens_dim, **spread_kwargs
         )
         cpu_fn = functools.partial(
             _sort_ens_spread, ens_dim=ens_dim, beta=beta, delta=delta
@@ -403,13 +530,13 @@ class EnergySpread(base.PerVariableStatistic):
             predictions, cpu=cpu_fn, default=default_fn
         )
       else:
-        spread = _all_pairs_ens_spread(
-            predictions, ens_dim, beta, delta, event_dims
-        )
+        spread = _all_pairs_ens_spread(predictions, ens_dim, **spread_kwargs)
     else:
       raise ValueError(f'Unknown algorithm: {self.algorithm}')
 
-    if self.broadcast_target_nans:
+    if valid_count is not None:
+      spread = _mask_empty_events(spread, valid_count)
+    elif self.broadcast_target_nans:
       # Ensure spread is nan where targets are nan (anywhere in the event).
       _validate_event_dims(targets, event_dims)
       target_nans = 0.0 * targets
@@ -547,6 +674,11 @@ class EnergyScore(base.PerVariableMetric):
     spread_term_weight: Weight of the spread term.
     delta: Smoothing scale of the kernel, in units of the inputs. Must be
       non-negative.
+    event_reduction: How squared errors are reduced across `event_dims`:
+      `'sum'` (default Euclidean norm), `'mean'` (normalized by event size), or
+      `'nanmean'` (mean over entries where `targets` is non-NaN, returning NaN
+      only when an entire event is NaN; strictly proper on partially observed
+      events).
   """
 
   ensemble_dim: str = 'ensemble'
@@ -554,10 +686,13 @@ class EnergyScore(base.PerVariableMetric):
   beta: float = 1.0
   spread_term_weight: float = 0.5
   delta: float = 0.0
+  event_reduction: EventReduction = 'sum'
 
   def __post_init__(self):
     self.event_dims = _as_event_dims(self.event_dims)
-    _validate_kernel_args(self.ensemble_dim, self.delta, self.event_dims)
+    _validate_kernel_args(
+        self.ensemble_dim, self.delta, self.event_dims, self.event_reduction
+    )
     if not 0 < self.beta <= 2:
       raise ValueError(f'beta must be in (0, 2], got {self.beta=}')
 
@@ -569,6 +704,7 @@ class EnergyScore(base.PerVariableMetric):
             beta=self.beta,
             delta=self.delta,
             event_dims=self.event_dims,
+            event_reduction=self.event_reduction,
         ),
         'spread': EnergySpread(
             ensemble_dim=self.ensemble_dim,
@@ -576,6 +712,7 @@ class EnergyScore(base.PerVariableMetric):
             broadcast_target_nans=True,
             delta=self.delta,
             event_dims=self.event_dims,
+            event_reduction=self.event_reduction,
         ),
     }
 

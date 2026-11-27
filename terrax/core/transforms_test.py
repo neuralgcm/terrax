@@ -2642,6 +2642,170 @@ class NestedTransformTest(parameterized.TestCase):
       ):
         transforms.ConcatFields(cell, out_key='t', out_axis=unnamed)
 
+  def test_trim_lon_lat_poles(self):
+    grid = coordinates.LonLatGrid(
+        longitude_nodes=8,
+        latitude_nodes=5,
+        latitude_spacing='equiangular_with_poles',
+        longitude_offset=0.25,
+    )
+    arr = jnp.arange(2 * 8 * 5 * 3, dtype=jnp.float32).reshape(2, 8, 5, 3)
+    f_in = cx.field(arr, 'batch', grid, 'level')
+
+    with self.subTest('south_north_and_both'):
+      out_south = transforms.TrimLonLatPoles('south')(f_in)
+      expected_4 = coordinates.LonLatGrid(8, 4, 'equiangular', 0.25)
+      cx.testing.assert_fields_equal(
+          out_south, cx.field(arr[:, :, 1:, :], 'batch', expected_4, 'level')
+      )
+
+      out_north = transforms.TrimLonLatPoles('north')(f_in)
+      cx.testing.assert_fields_equal(
+          out_north, cx.field(arr[:, :, :-1, :], 'batch', expected_4, 'level')
+      )
+
+      out_both = transforms.TrimLonLatPoles()(f_in)
+      expected_3 = coordinates.LonLatGrid(8, 3, 'equiangular', 0.25)
+      cx.testing.assert_fields_equal(
+          out_both, cx.field(arr[:, :, 1:-1, :], 'batch', expected_3, 'level')
+      )
+
+    with self.subTest('skip_missing_and_errors'):
+      station = cx.field(jnp.ones(4), 'station')
+      out = transforms.TrimLonLatPoles('south', skip_missing=True)(
+          {'g': f_in, 's': station}
+      )
+      cx.testing.assert_fields_equal(out['s'], station)
+
+      bad_kwargs: dict[str, object] = {'poles': 'east'}
+      with self.assertRaisesRegex(ValueError, '`poles` must be'):
+        transforms.TrimLonLatPoles(**bad_kwargs)  # pyrefly: ignore[bad-argument-type]
+      with self.assertRaisesRegex(ValueError, 'fully labeled'):
+        transforms.TrimLonLatPoles('south')(
+            cx.field(jnp.zeros((2, 8, 5)), None, grid)
+        )
+      with self.assertRaisesRegex(ValueError, 'equiangular_with_poles'):
+        transforms.TrimLonLatPoles('south')(
+            cx.field(jnp.zeros((8, 4)), coordinates.LonLatGrid.F2())
+        )
+      padded = coordinates.LonLatGrid(
+          8, 5, 'equiangular_with_poles', lon_lat_padding=(2, 0)
+      )
+      with self.assertRaisesRegex(ValueError, 'unpadded'):
+        transforms.TrimLonLatPoles('south')(
+            cx.field(jnp.zeros(padded.shape), padded)
+        )
+      tiny = coordinates.LonLatGrid(4, 2, 'equiangular_with_poles')
+      with self.assertRaisesRegex(ValueError, 'Cannot drop'):
+        transforms.TrimLonLatPoles('both')(
+            cx.field(jnp.zeros(tiny.shape), tiny)
+        )
+
+  def test_patchify_lon_lat_grid(self):
+    with self.subTest('middle_axes_jit_and_vmap'):
+      src = coordinates.LonLatGrid(8, 6, 'equiangular')
+      dst = coordinates.LonLatGrid(2, 3, 'equiangular')
+      arr = jnp.arange(2 * 8 * 6 * 3, dtype=jnp.float32).reshape(2, 8, 6, 3)
+      f_in = cx.field(arr, 'batch', src, 'level')
+      tx = transforms.PatchifyLonLatGrid(dst, patch_dims=('p_lon', 'p_lat'))
+      out = nnx.jit(tx)(f_in)
+      cx.testing.assert_fields_equal(
+          jax.jit(lambda m, x: m(x))(tx, f_in), out
+      )
+      self.assertEqual(
+          out.dims,
+          ('batch', 'longitude', 'latitude', 'p_lon', 'p_lat', 'level'),
+      )
+      self.assertEqual(out.shape, (2, 2, 3, 4, 2, 3))
+      self.assertEqual(
+          cx.coords.extract(out.coordinate, coordinates.LonLatGrid), dst
+      )
+      np.testing.assert_array_equal(
+          out.data[:, 0, 0, :, :, :], arr[:, :4, :2, :]
+      )
+      np.testing.assert_array_equal(
+          out.data[:, 1, 2, :, :, :], arr[:, 4:, 4:, :]
+      )
+      vmapped = jax.vmap(lambda s: tx(cx.field(s, src, 'level')).data)(arr)
+      np.testing.assert_array_equal(vmapped, out.data)
+
+    with self.subTest('gauss_grid_and_skip_missing'):
+      src = coordinates.LonLatGrid.TL63()
+      dst = coordinates.LonLatGrid.T21()
+      inputs = {
+          'grid_var': cx.field(jnp.full(src.shape, 2.0), src),
+          'station_var': cx.field(jnp.ones(5), 'station'),
+      }
+      out = transforms.PatchifyLonLatGrid(dst, skip_missing=True)(inputs)
+      self.assertEqual(out['grid_var'].shape, (64, 32, 2, 2))
+      self.assertEqual(
+          cx.coords.extract(out['grid_var'].coordinate, coordinates.LonLatGrid),
+          dst,
+      )
+      cx.testing.assert_fields_equal(out['station_var'], inputs['station_var'])
+
+    with self.subTest('compositions_for_grids_with_poles'):
+      era5_grid = coordinates.LonLatGrid.EL720()
+      target_eq = coordinates.LonLatGrid(
+          360, 180, 'equiangular', longitude_offset=float(np.deg2rad(0.375))
+      )
+      trim_then_patchify = transforms.Sequential([
+          transforms.TrimLonLatPoles('south'),
+          transforms.PatchifyLonLatGrid(target_eq),
+      ])
+      shapes = trim_then_patchify.output_shapes(
+          {'tp': cx.shape_struct_field(era5_grid)}
+      )
+      self.assertEqual(shapes['tp'].shape, (360, 180, 4, 4))
+      self.assertEqual(
+          cx.coords.extract(shapes['tp'].coordinate, coordinates.LonLatGrid),
+          target_eq,
+      )
+
+      poles_src = coordinates.LonLatGrid(128, 65, 'equiangular_with_poles')
+      regrid_then_patchify = transforms.Sequential([
+          transforms.Regrid(
+              interpolators.ConservativeRegridder(coordinates.LonLatGrid.TL63())
+          ),
+          transforms.PatchifyLonLatGrid(coordinates.LonLatGrid.T21()),
+      ])
+      out_tl = regrid_then_patchify(
+          {'tp': cx.field(jnp.ones(poles_src.shape), poles_src)}
+      )['tp']
+      self.assertEqual(out_tl.shape, (64, 32, 2, 2))
+      np.testing.assert_allclose(out_tl.data, 1.0, atol=1e-6)
+
+    with self.subTest('errors'):
+      padded = coordinates.LonLatGrid(8, 4, lon_lat_padding=(2, 0))
+      with self.assertRaisesRegex(ValueError, 'unpadded `target_grid`'):
+        transforms.PatchifyLonLatGrid(padded)
+      with self.assertRaisesRegex(ValueError, 'distinct non-empty'):
+        transforms.PatchifyLonLatGrid(
+            coordinates.LonLatGrid.F2(), patch_dims=('p', 'p')
+        )
+      tx_f2 = transforms.PatchifyLonLatGrid(coordinates.LonLatGrid.F2())
+      with self.assertRaisesRegex(ValueError, 'fully labeled'):
+        tx_f2(
+            cx.field(jnp.zeros((2, 16, 8)), None, coordinates.LonLatGrid.F4())
+        )
+      with self.assertRaisesRegex(ValueError, 'unpadded source grid'):
+        tx_f2(cx.field(jnp.zeros(padded.shape), padded))
+      bad_div = coordinates.LonLatGrid(10, 4)
+      with self.assertRaisesRegex(ValueError, 'divisible'):
+        tx_f2(cx.field(jnp.zeros(bad_div.shape), bad_div))
+      poles_grid = coordinates.LonLatGrid(16, 8, 'equiangular_with_poles')
+      with self.assertRaisesRegex(ValueError, 'latitude_spacing'):
+        transforms.PatchifyLonLatGrid(
+            coordinates.LonLatGrid(8, 4, 'equiangular_with_poles')
+        )(cx.field(jnp.zeros(poles_grid.shape), poles_grid))
+      shifted_dst = coordinates.LonLatGrid.F2(longitude_offset=float(np.pi))
+      with self.assertRaisesRegex(ValueError, 'longitude_offset'):
+        transforms.PatchifyLonLatGrid(shifted_dst)(
+            cx.field(jnp.zeros((16, 8)), coordinates.LonLatGrid.F4())
+        )
+      with self.assertRaises(ValueError):
+        tx_f2(cx.field(jnp.ones(4), 'x'))
+
 
 if __name__ == '__main__':
   jax.config.update('jax_traceback_filtering', 'off')
