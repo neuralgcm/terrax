@@ -1406,8 +1406,8 @@ class RolloutTrainer:
       target = self.training_mesh.with_sharding_constraint(target, 'horizontal')
 
       # Update this level's aggregation state for each evaluator group.
-      for group_idx, evaluators in enumerate(nested_evaluators_groups):
-        evaluator = evaluators[level]
+      for group_idx, group_evaluators in enumerate(nested_evaluators_groups):
+        evaluator = group_evaluators[level]
         if evaluator is not None:
           agg_update = self.run_evaluator(evaluator, prediction, target)
           updated_agg_states_seq[group_idx][level] = self.combine_agg_states(
@@ -2064,7 +2064,8 @@ class RolloutTrainer:
         target_step = step - 1 - lookback
         logging_stream.wait()
         step, experiment_state = self.reinitialize_for_nan_restart(target_step)
-        prev_loss = loss = 1.0
+        # reset loss and prev_loss to non-NaN value to avoid faulty logging.
+        prev_loss = loss = 1.0  # pyrefly: ignore[unused-variable]
         if pbar is not None:
           pbar.n = step
           pbar.refresh()
@@ -2084,6 +2085,7 @@ class RolloutTrainer:
           step >= np.asarray(self._train_schedule_boundaries)
       )
       if schedule_idx != old_schedule_idx:
+        del train_iter, train_step_fn  # let gc pick no longer needed buffers.
         (
             train_iter,
             train_step_fn,

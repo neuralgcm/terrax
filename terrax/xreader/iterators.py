@@ -268,13 +268,57 @@ def evaluation_iterator(
   return dataset
 
 
+def _group_index_ranges(
+    sample_origins: np.ndarray, group_size: int
+) -> list[tuple[int, int]]:
+  """Returns index ranges of the samples that are read together as one block.
+
+  Samples are grouped in order, at most `group_size` at a time. A group also
+  ends wherever the spacing between consecutive origins differs from the
+  smallest spacing in `sample_origins`, e.g., at a holdout period between two
+  time slices in the dataset. A naive block read across such a break would
+  include all of the data in between.
+
+  Args:
+    sample_origins: sorted 1D array of sample origins.
+    group_size: maximum number of samples in a group.
+
+  Returns:
+    List of `(start, stop)` index ranges into `sample_origins`.
+  """
+  spacing = np.diff(sample_origins)
+  if spacing.size:
+    breaks = (np.flatnonzero(spacing != spacing.min()) + 1).tolist()
+  else:
+    breaks = []
+  run_starts = [0, *breaks]
+  run_stops = [*breaks, len(sample_origins)]
+  ranges = []
+  for run_start, run_stop in zip(run_starts, run_stops, strict=True):
+    for start in range(run_start, run_stop, group_size):
+      ranges.append((start, min(start + group_size, run_stop)))
+  return ranges
+
+
 def group_slices(
-    slices: list[slice], group_size: int
+    slices: list[slice], group_size: int, sample_origins: np.ndarray
 ) -> list[tuple[slice, list[slice]]]:
-  """Partition a list of slices into groups for reading in parallel."""
+  """Partition a list of slices into groups for reading in parallel.
+
+  Args:
+    slices: slices of the source data for each sample, in order.
+    group_size: maximum number of slices in a group.
+    sample_origins: origins of the samples that `slices` correspond to. Groups
+      do not extend across breaks in the spacing of these origins.
+
+  Returns:
+    List of `(block, sub_slices)` tuples, where `block` is the slice of the
+    source data that covers all slices in a group and `sub_slices` are those
+    slices relative to the start of `block`.
+  """
   groups = []
-  for i in range(0, len(slices), group_size):
-    slices_to_consolidate = slices[i : i + group_size]
+  for start, stop in _group_index_ranges(sample_origins, group_size):
+    slices_to_consolidate = slices[start:stop]
 
     block_start = slices_to_consolidate[0].start
     block_stop = slices_to_consolidate[-1].stop
@@ -298,8 +342,10 @@ def _split_block(sample_dim: str, block_tree: PyTree) -> list[PyTree]:
   flat_outputs = []
   for block in block_leaves:
     flat_outputs.append([
-        jax.tree.map(lambda x: x.isel({sample_dim: s}), block.block)  # pylint: disable=cell-var-from-loop
+        # pylint: disable=cell-var-from-loop
+        jax.tree.map(lambda x: x.isel({sample_dim: s}), block.block)  # pyrefly: ignore[undefined-variable]
         for s in block.sub_slices
+        # pylint: enable=cell-var-from-loop
     ])
   out = [unflatten(zipped) for zipped in zip(*flat_outputs)]
   return out
@@ -378,7 +424,7 @@ def training_iterator(
         sample_origins=sample_origins,
         stencil=stencil,
     )
-    grouped_slices = group_slices(slices, group_size)
+    grouped_slices = group_slices(slices, group_size, sample_origins)
     return _XarrayBlockSource(
         source, grouped_slices, stencil, sample_dim
     )
