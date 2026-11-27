@@ -516,6 +516,149 @@ class ProbabilisticMetricsTest(parameterized.TestCase):
         cx.testing.assert_fields_equal(result, expected)
 
   @parameterized.parameters(
+      dict(n=2, beta=1.0, delta=0.0),
+      dict(n=4, beta=1.0, delta=0.5),
+      dict(n=4, beta=0.5, delta=0.0),
+      dict(n=4, beta=1.5, delta=0.25),
+  )
+  def test_energy_score_event_reduction_mean(self, n, beta, delta):
+    """`'mean'` scales `'sum'` by `event_size**(-beta/2)` and matches `'nanmean'`."""
+    rng = np.random.default_rng(seed=0)
+    predictions = {
+        'a': cx.field(rng.normal(size=(2, n, 4, 3)), 'p', 'ensemble', 'x', 'q')
+    }
+    targets = {'a': cx.field(rng.normal(size=(4, 3, 2)), 'x', 'q', 'p')}
+    event_dims = ('q', 'p')
+    es_mean = probabilistic_metrics.EnergyScore(
+        event_dims=event_dims, beta=beta, delta=delta, event_reduction='mean'
+    )
+    es_nanmean = probabilistic_metrics.EnergyScore(
+        event_dims=event_dims, beta=beta, delta=delta, event_reduction='nanmean'
+    )
+    es_sum = probabilistic_metrics.EnergyScore(
+        event_dims=event_dims,
+        beta=beta,
+        delta=delta * np.sqrt(6.0),
+        event_reduction='sum',
+    )
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'mean': es_mean, 'nanmean': es_nanmean, 'sum': es_sum},
+        predictions,
+        targets,
+    )
+    self.assertLen(stats, 6)  # distinct unique_name per event_reduction.
+    val_mean = es_mean.values_from_mean_statistics(stats)['a']
+    val_nanmean = es_nanmean.values_from_mean_statistics(stats)['a']
+    val_sum = es_sum.values_from_mean_statistics(stats)['a']
+    cx.testing.assert_fields_allclose(
+        val_mean, val_nanmean, rtol=1e-5, atol=1e-6
+    )
+    cx.testing.assert_fields_allclose(
+        val_mean, val_sum * (6.0 ** (-beta / 2)), rtol=1e-5, atol=1e-6
+    )
+
+  @parameterized.parameters(
+      dict(n=2, beta=1.0, delta=0.0),
+      dict(n=4, beta=1.0, delta=0.5),
+      dict(n=4, beta=0.5, delta=0.0),
+  )
+  def test_energy_score_event_reduction_nanmean(self, n, beta, delta):
+    """`'nanmean'` scores each event over its non-NaN target entries only."""
+    rng = np.random.default_rng(seed=1)
+    # 4 events along 'x', each of length 3 along 'p':
+    #   x=0: all 3 observed; x=1: 2 observed (pred & target NaN at p=2);
+    #   x=2: 1 observed (target NaN at p=0, 2); x=3: all NaN.
+    pred_data = rng.normal(size=(n, 4, 3))
+    pred_data[:, 1, 2] = np.nan
+    pred_data[:, 3, :] = np.nan
+    target_data = np.array([
+        [1.0, 2.0, 3.0],
+        [1.0, 2.0, np.nan],
+        [np.nan, 2.0, np.nan],
+        [np.nan, np.nan, np.nan],
+    ])
+    predictions = {'a': cx.field(pred_data, 'ensemble', 'x', 'p')}
+    targets = {'a': cx.field(target_data, 'x', 'p')}
+
+    es_nanmean = probabilistic_metrics.EnergyScore(
+        event_dims=('p',), beta=beta, delta=delta, event_reduction='nanmean'
+    )
+    es_mean = probabilistic_metrics.EnergyScore(
+        event_dims=('p',), beta=beta, delta=delta, event_reduction='mean'
+    )
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'es': es_nanmean}, predictions, targets
+    )
+    actual = es_nanmean.values_from_mean_statistics(stats)['a'].data
+
+    for xi in range(3):
+      valid = ~np.isnan(target_data[xi])
+      sub_stats = base.compute_unique_statistics_for_all_metrics(
+          {'es': es_mean},
+          {'a': cx.field(pred_data[:, xi, valid], 'ensemble', 'p')},
+          {'a': cx.field(target_data[xi, valid], 'p')},
+      )
+      expected_xi = es_mean.values_from_mean_statistics(sub_stats)['a'].data
+      np.testing.assert_allclose(actual[xi], expected_xi, rtol=1e-5, atol=1e-6)
+    self.assertTrue(np.isnan(actual[3]))
+
+    for alg in ('all_pairs', 'ring_chain', 'auto') + (
+        ('flip',) if n == 2 else ()
+    ):
+      spread_stat = probabilistic_metrics.EnergySpread(
+          beta=beta,
+          delta=delta,
+          algorithm=alg,
+          broadcast_target_nans=True,
+          event_dims=('p',),
+          event_reduction='nanmean',
+      )
+      sp = spread_stat.compute(predictions, targets)['a'].data
+      self.assertTrue(np.all(np.isfinite(sp[:3])))
+      self.assertTrue(np.isnan(sp[3]))
+
+    def loss_fn(raw_pred):
+      st = base.compute_unique_statistics_for_all_metrics(
+          {'es': es_nanmean},
+          {'a': cx.field(raw_pred, 'ensemble', 'x', 'p')},
+          targets,
+      )
+      return jax.numpy.nansum(
+          es_nanmean.values_from_mean_statistics(st)['a'].data
+      )
+
+    grads = jax.grad(loss_fn)(pred_data)
+    self.assertTrue(np.all(np.isfinite(grads)))
+    np.testing.assert_array_equal(grads[:, 1, 2], 0.0)
+    np.testing.assert_array_equal(grads[:, 2, [0, 2]], 0.0)
+    np.testing.assert_array_equal(grads[:, 3, :], 0.0)
+
+  def test_energy_score_nanmean_validation_and_pred_nan(self):
+    bad_pred = np.ones((2, 2, 3))
+    bad_pred[0, 0, 0] = np.nan  # NaN on an observed target entry must propagate
+    target = np.array([[1.0, 1.0, np.nan], [1.0, 1.0, 1.0]])
+    es = probabilistic_metrics.EnergyScore(
+        event_dims=('p',), event_reduction='nanmean'
+    )
+    stats = base.compute_unique_statistics_for_all_metrics(
+        {'es': es},
+        {'a': cx.field(bad_pred, 'ensemble', 'x', 'p')},
+        {'a': cx.field(target, 'x', 'p')},
+    )
+    vals = es.values_from_mean_statistics(stats)['a'].data
+    self.assertTrue(np.isnan(vals[0]))
+    self.assertEqual(vals[1], 0.0)
+
+    bad_kwargs: dict[str, object] = {'event_reduction': 'median'}
+    for cls in (
+        probabilistic_metrics.EnergySkill,
+        probabilistic_metrics.EnergySpread,
+        probabilistic_metrics.EnergyScore,
+    ):
+      with self.assertRaisesRegex(ValueError, 'event_reduction must be one'):
+        cls(event_dims=('p',), **bad_kwargs)
+
+  @parameterized.parameters(
       dict(n=2),
       dict(n=4),
       dict(n=10),
